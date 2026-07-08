@@ -37,6 +37,10 @@
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
   label { display: block; font-size: 10px; letter-spacing: 2px; color: var(--dim); margin: 14px 0 5px; }
   label:first-child { margin-top: 0; }
+  select {
+    width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--dim); padding: 6px 8px; font: inherit; font-size: 12px; outline: none;
+  }
   input[type=text], input[type=password], input[type=number], textarea {
     width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
     color: var(--text); padding: 10px 12px; font: inherit; outline: none;
@@ -171,6 +175,11 @@
 
     <details class="adv">
       <summary>distribute supply on launch</summary>
+      <div class="row" style="margin-top:8px">
+        <div><select id="distSets"><option value="">— saved wallet sets —</option></select></div>
+        <div style="flex:0 0 auto"><button class="mini" id="distSave">save set</button></div>
+        <div style="flex:0 0 auto"><button class="mini" id="distDelete" title="delete selected set">del</button></div>
+      </div>
       <div id="distRows"></div>
       <button class="mini" id="distAdd" style="margin-top:8px">+ add wallet</button>
       <div class="hint" style="font-size:11px;margin-top:6px">amount in tokens (e.g. 10000000) or % of supply (e.g. 2%). sent from your wallet right after launch — needs a dev buy big enough to cover it.</div>
@@ -242,6 +251,6 @@
   </div>
 </div>
 
-<script type="module" src="app.js?v=5"></script>
+<script type="module" src="app.js?v=6"></script>
 </body>
 </html>
