@@ -231,7 +231,7 @@ async function launch() {
   if (feeRecipientRaw && !/^0x[0-9a-fA-F]{40}$/.test(feeRecipientRaw)) throw new Error('fee recipient is not a valid address');
   const feeRecipient = feeRecipientRaw || account.address;
 
-  const dists = parseDistributions(pad.curve?.supply || 1e9);
+  const dists = distroOn ? parseDistributions(pad.curve?.supply || 1e9) : [];
   if (dists.length && pad.curve && selectedChip >= 0) {
     const x = +buyChips[selectedChip];
     const expected = parseEther(Math.floor(x / (pad.curve.a + pad.curve.b * x)).toString());
@@ -457,7 +457,10 @@ async function runDistributions(pad, pub, wallet, token, dists, statusEl) {
 
 // saved wallet sets for distribution
 const DIST_SETS_KEY = 'distSets.v1';
+const DIST_LAST_KEY = 'distSets.last';
 const loadDistSets = () => JSON.parse(localStorage.getItem(DIST_SETS_KEY) || '{}');
+let distroOn = false;
+let activeDistSet = localStorage.getItem(DIST_LAST_KEY) || '';
 
 function currentDistRows() {
   const rows = [];
@@ -476,35 +479,63 @@ function setDistRows(rows) {
   if (!rows.length) box.appendChild(distRow());
 }
 
-function renderDistSets(selected = '') {
-  const sel = $('distSets');
-  sel.innerHTML = '<option value="">— saved wallet sets —</option>';
-  for (const name of Object.keys(loadDistSets())) {
-    const o = document.createElement('option');
-    o.value = o.textContent = name;
-    if (name === selected) o.selected = true;
-    sel.appendChild(o);
+function renderDistSetChips() {
+  const box = $('distSetChips');
+  box.innerHTML = '';
+  const sets = loadDistSets();
+  for (const name of Object.keys(sets)) {
+    const b = document.createElement('button');
+    b.className = 'pad' + (name === activeDistSet ? ' active' : '');
+    b.textContent = name;
+    b.onclick = () => {
+      activeDistSet = name;
+      localStorage.setItem(DIST_LAST_KEY, name);
+      setDistRows(sets[name]);
+      renderDistSetChips();
+    };
+    box.appendChild(b);
+  }
+}
+
+function toggleDistro() {
+  distroOn = !distroOn;
+  const t = $('distToggle');
+  t.textContent = distroOn ? 'on' : 'off';
+  t.classList.toggle('active', distroOn);
+  $('distPanel').classList.toggle('hidden', !distroOn);
+  if (distroOn) {
+    // pre-load the last-used (or only) saved set
+    const sets = loadDistSets();
+    const names = Object.keys(sets);
+    if (!currentDistRows().length && names.length) {
+      if (!sets[activeDistSet]) activeDistSet = names[0];
+      setDistRows(sets[activeDistSet]);
+    }
+    if (!$('distRows').children.length) $('distRows').appendChild(distRow());
+    renderDistSetChips();
   }
 }
 
 function saveDistSet() {
   const rows = currentDistRows();
   if (!rows.length) { setStatus('nothing to save — add wallets first', true); return; }
-  const name = prompt('name this wallet set:', $('distSets').value || 'set 1');
+  const name = prompt('name this wallet set:', activeDistSet || 'set 1');
   if (!name) return;
   const sets = loadDistSets();
   sets[name] = rows;
   localStorage.setItem(DIST_SETS_KEY, JSON.stringify(sets));
-  renderDistSets(name);
+  activeDistSet = name;
+  localStorage.setItem(DIST_LAST_KEY, name);
+  renderDistSetChips();
 }
 
 function deleteDistSet() {
-  const name = $('distSets').value;
-  if (!name) return;
+  if (!activeDistSet) return;
   const sets = loadDistSets();
-  delete sets[name];
+  delete sets[activeDistSet];
   localStorage.setItem(DIST_SETS_KEY, JSON.stringify(sets));
-  renderDistSets();
+  activeDistSet = Object.keys(sets)[0] || '';
+  renderDistSetChips();
 }
 
 // ---------------------------------------------------------------------------
@@ -734,13 +765,8 @@ function init() {
   renderBuyChips();
   refreshFeeNote();
 
-  $('distRows').appendChild(distRow());
+  $('distToggle').onclick = toggleDistro;
   $('distAdd').onclick = () => $('distRows').appendChild(distRow());
-  renderDistSets();
-  $('distSets').onchange = () => {
-    const sets = loadDistSets();
-    if (sets[$('distSets').value]) setDistRows(sets[$('distSets').value]);
-  };
   $('distSave').onclick = saveDistSet;
   $('distDelete').onclick = deleteDistSet;
 
