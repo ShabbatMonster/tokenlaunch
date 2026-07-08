@@ -174,17 +174,20 @@
     <div class="pads" id="buyChips"></div>
     <div class="buy-preview" id="buyPreview"></div>
 
-    <details class="adv">
-      <summary>distribute supply on launch</summary>
-      <div class="row" style="margin-top:8px">
-        <div><select id="distSets"><option value="">— saved wallet sets —</option></select></div>
-        <div style="flex:0 0 auto"><button class="mini" id="distSave">save set</button></div>
-        <div style="flex:0 0 auto"><button class="mini" id="distDelete" title="delete selected set">del</button></div>
-      </div>
+    <label>DISTRO</label>
+    <div class="pads">
+      <button class="pad" id="distToggle">off</button>
+    </div>
+    <div id="distPanel" class="hidden" style="margin-top:10px">
+      <div class="pads" id="distSetChips"></div>
       <div id="distRows"></div>
-      <button class="mini" id="distAdd" style="margin-top:8px">+ add wallet</button>
+      <div class="pads" style="margin-top:8px">
+        <button class="mini" id="distAdd">+ add wallet</button>
+        <button class="mini" id="distSave">save as set</button>
+        <button class="mini" id="distDelete">del set</button>
+      </div>
       <div class="hint" style="font-size:11px;margin-top:6px">amount in tokens (e.g. 10000000) or % of supply (e.g. 2%). sent from your wallet right after launch — needs a dev buy big enough to cover it.</div>
-    </details>
+    </div>
 
     <details class="adv">
       <summary>description · fee recipient</summary>
@@ -252,6 +255,6 @@
   </div>
 </div>
 
-<script type="module" src="app.js?v=7"></script>
+<script type="module" src="app.js?v=8"></script>
 </body>
 </html>
