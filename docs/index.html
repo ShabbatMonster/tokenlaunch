@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>launcher</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #14171c;
+    --panel2: #1a1e24;
+    --border: #262b33;
+    --text: #e6e9ee;
+    --dim: #8a93a1;
+    --accent: #4ade80;
+    --danger: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    min-height: 100vh; display: flex; justify-content: center; padding: 24px 12px;
+  }
+  .app { width: 100%; max-width: 460px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  header h1 { font-size: 15px; letter-spacing: 3px; font-weight: 600; }
+  .wallet-chip {
+    display: flex; gap: 8px; align-items: center; cursor: pointer;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; font-size: 12px; color: var(--dim);
+  }
+  .wallet-chip .bal { color: var(--text); }
+  .wallet-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+  .wallet-chip .dot.on { background: var(--accent); }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  label { display: block; font-size: 10px; letter-spacing: 2px; color: var(--dim); margin: 14px 0 5px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], input[type=password], input[type=number], textarea {
+    width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 10px 12px; font: inherit; outline: none;
+  }
+  input:focus, textarea:focus { border-color: #3b4453; }
+
+  .row { display: flex; gap: 10px; }
+  .row > div { flex: 1; }
+
+  .drop {
+    width: 96px; height: 96px; border: 1px dashed var(--border); border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    color: var(--dim); font-size: 26px; overflow: hidden; background: var(--panel2);
+    flex: none;
+  }
+  .drop.has img { width: 100%; height: 100%; object-fit: cover; }
+  .drop.drag { border-color: var(--accent); }
+  .drop-hint { font-size: 11px; color: var(--dim); margin-top: 6px; }
+
+  .pads { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pad {
+    padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--dim); font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .pad.active { border-color: var(--accent); color: var(--accent); }
+  .pad:disabled { opacity: .4; cursor: default; }
+
+  .launch-btn {
+    width: 100%; margin-top: 18px; padding: 13px; border: none; border-radius: 10px;
+    background: var(--accent); color: #04160b; font: inherit; font-weight: 700;
+    letter-spacing: 2px; cursor: pointer; font-size: 14px;
+  }
+  .launch-btn:disabled { opacity: .5; cursor: default; }
+  .fee-note { text-align: center; font-size: 11px; color: var(--dim); margin-top: 8px; }
+
+  .status { margin-top: 12px; font-size: 12px; color: var(--dim); word-break: break-all; white-space: pre-wrap; }
+  .status a { color: var(--accent); }
+  .status .err { color: var(--danger); }
+
+  /* modal */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.65); display: flex;
+    align-items: center; justify-content: center; padding: 16px; z-index: 10;
+  }
+  .overlay.hidden { display: none; }
+  .modal { width: 100%; max-width: 400px; }
+  .modal h2 { font-size: 13px; letter-spacing: 2px; margin-bottom: 4px; }
+  .modal .sub { font-size: 11px; color: var(--dim); }
+  .modal button.primary {
+    width: 100%; margin-top: 16px; padding: 11px; border: none; border-radius: 8px;
+    background: var(--accent); color: #04160b; font: inherit; font-weight: 700; cursor: pointer;
+  }
+  .modal .err { color: var(--danger); font-size: 12px; margin-top: 8px; min-height: 16px; }
+  .modal .ghost { background: none; border: none; color: var(--dim); font: inherit; font-size: 11px; margin-top: 10px; cursor: pointer; width: 100%; }
+  details.adv { margin-top: 14px; }
+  details.adv summary { font-size: 11px; color: var(--dim); cursor: pointer; letter-spacing: 1px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>LAUNCHER</h1>
+    <div class="wallet-chip" id="walletChip" title="wallet">
+      <span class="dot" id="walletDot"></span>
+      <span id="walletAddr">locked</span>
+      <span class="bal" id="walletBal"></span>
+    </div>
+  </header>
+
+  <div class="card">
+    <label>LAUNCHPAD</label>
+    <div class="pads" id="pads"></div>
+
+    <label>IMAGE</label>
+    <div style="display:flex; gap:12px; align-items:flex-start;">
+      <div class="drop" id="drop">+</div>
+      <div class="drop-hint">click, drag, or just paste (ctrl+v) an image anywhere</div>
+    </div>
+    <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
+
+    <div class="row">
+      <div>
+        <label>NAME</label>
+        <input type="text" id="name" maxlength="32" autocomplete="off" spellcheck="false">
+      </div>
+      <div style="flex:0 0 130px">
+        <label>TICKER</label>
+        <input type="text" id="symbol" maxlength="13" autocomplete="off" spellcheck="false" style="text-transform:uppercase">
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>DEV BUY (ETH, OPT.)</label>
+        <input type="number" id="devBuy" placeholder="0" min="0" step="0.001">
+      </div>
+    </div>
+
+    <details class="adv">
+      <summary>description / socials</summary>
+      <label>DESCRIPTION</label>
+      <textarea id="desc" rows="2">aaaaaaaaaa</textarea>
+      <div class="row">
+        <div><label>TWITTER (OPT.)</label><input type="text" id="twitter" placeholder="https://x.com/..."></div>
+        <div><label>WEBSITE (OPT.)</label><input type="text" id="website" placeholder="https://..."></div>
+      </div>
+    </details>
+
+    <button class="launch-btn" id="launchBtn">LAUNCH</button>
+    <div class="fee-note" id="feeNote"></div>
+    <div class="status" id="status"></div>
+  </div>
+</div>
+
+<!-- first-run: import key -->
+<div class="overlay hidden" id="setupOverlay">
+  <div class="card modal">
+    <h2>ONE-TIME SETUP</h2>
+    <p class="sub">Your key is encrypted with your password (AES-256) and stored only in this browser. It never leaves this device except as signed transactions sent straight to the RPC.</p>
+    <label>EVM PRIVATE KEY</label>
+    <input type="password" id="setupKey" placeholder="0x..." autocomplete="off">
+    <label>SOL PRIVATE KEY (OPT. — FOR FUTURE SOL PADS)</label>
+    <input type="password" id="setupSolKey" placeholder="base58 (phantom export)" autocomplete="off">
+    <label>PASSWORD</label>
+    <input type="password" id="setupPass" placeholder="unlocks the key on this device">
+    <div class="err" id="setupErr"></div>
+    <button class="primary" id="setupBtn">SAVE &amp; UNLOCK</button>
+  </div>
+</div>
+
+<!-- returning: unlock -->
+<div class="overlay hidden" id="unlockOverlay">
+  <div class="card modal">
+    <h2>UNLOCK</h2>
+    <p class="sub">Enter your password to decrypt your key for this session.</p>
+    <label>PASSWORD</label>
+    <input type="password" id="unlockPass">
+    <div class="err" id="unlockErr"></div>
+    <button class="primary" id="unlockBtn">UNLOCK</button>
+    <button class="ghost" id="resetVault">forget stored key / start over</button>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
