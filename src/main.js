@@ -417,23 +417,42 @@ function parseDistributions(supply) {
 }
 
 async function runDistributions(pad, pub, wallet, token, dists, statusEl) {
-  let ok = 0;
-  for (const [i, d] of dists.entries()) {
+  statusEl.innerHTML += `<br>distributing to ${dists.length} wallet${dists.length > 1 ? 's' : ''}…`;
+  // one gas estimate reused for all, txs fired back-to-back with pipelined
+  // nonces, receipts awaited together — no per-transfer round trips
+  let gas = 150000n;
+  try {
+    gas = await pub.estimateContractGas({
+      address: token, abi: ERC20_ABI, functionName: 'transfer',
+      args: [dists[0].addr, dists[0].amount], account,
+    });
+    gas = (gas * 130n) / 100n;
+  } catch { /* fall back to flat limit */ }
+
+  let nonce = await pub.getTransactionCount({ address: account.address, blockTag: 'pending' });
+  const sent = [];
+  for (const d of dists) {
     const tag = `${d.addr.slice(0, 6)}…${d.addr.slice(-4)}`;
     try {
-      statusEl.innerHTML += `<br>sending to ${tag} (${i + 1}/${dists.length})…`;
       const hash = await wallet.writeContract({
-        address: token, abi: ERC20_ABI, functionName: 'transfer', args: [d.addr, d.amount],
+        address: token, abi: ERC20_ABI, functionName: 'transfer',
+        args: [d.addr, d.amount], gas, nonce: nonce++,
       });
-      const r = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
-      if (r.status !== 'success') throw new Error('reverted');
-      ok++;
-      statusEl.innerHTML += ' ✓';
+      sent.push({ tag, hash });
     } catch (e) {
-      statusEl.innerHTML += ` <span class="err">failed (${e.shortMessage || e.message})</span>`;
+      statusEl.innerHTML += `<br>${tag} <span class="err">failed to send (${e.shortMessage || e.message})</span>`;
     }
   }
-  statusEl.innerHTML += `<br>distribution done: ${ok}/${dists.length} sent`;
+
+  const results = await Promise.all(sent.map((s) =>
+    pub.waitForTransactionReceipt({ hash: s.hash, confirmations: 1 })
+      .then((r) => ({ ...s, ok: r.status === 'success' }))
+      .catch(() => ({ ...s, ok: false })),
+  ));
+  for (const r of results) {
+    statusEl.innerHTML += `<br>${r.tag} ${r.ok ? '✓' : '<span class="err">reverted</span>'}`;
+  }
+  statusEl.innerHTML += `<br>distribution done: ${results.filter((r) => r.ok).length}/${dists.length} sent`;
 }
 
 // saved wallet sets for distribution
@@ -517,6 +536,12 @@ async function discoverMyTokens(pad) {
   return found;
 }
 
+async function getMyTokens(pad) {
+  const onchain = await discoverMyTokens(pad);
+  const local = loadLaunches().filter((l) => l.pad === pad.id).map((l) => l.token);
+  return [...new Set([...onchain, ...local].map((t) => t.toLowerCase()))];
+}
+
 async function renderTokenList() {
   const box = $('tokenList');
   if (!account) { box.innerHTML = '<div class="empty">unlock wallet to load your launches</div>'; return; }
@@ -524,9 +549,7 @@ async function renderTokenList() {
   box.innerHTML = '<div class="empty">loading…</div>';
   try {
     const pub = publicClientFor(pad);
-    const onchain = await discoverMyTokens(pad);
-    const local = loadLaunches().filter((l) => l.pad === pad.id).map((l) => l.token);
-    const tokens = [...new Set([...onchain, ...local].map((t) => t.toLowerCase()))];
+    const tokens = await getMyTokens(pad);
     if (!tokens.length) { box.innerHTML = '<div class="empty">no launches from this wallet yet</div>'; return; }
     box.innerHTML = '';
     for (const token of tokens) {
@@ -549,6 +572,53 @@ async function renderTokenList() {
     }
   } catch (e) {
     box.innerHTML = `<div class="empty">couldn't load tokens: ${e.shortMessage || e.message}</div>`;
+  }
+}
+
+async function claimAllFees(btn) {
+  const out = $('claimStatus');
+  const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
+  if (!account) { say('unlock wallet first', true); return; }
+  const pad = PADS.find((p) => p.enabled && p.locker);
+  btn.disabled = true;
+  try {
+    const pub = publicClientFor(pad);
+    const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+    say('checking which tokens have fees…');
+    const tokens = await getMyTokens(pad);
+    if (!tokens.length) { say('no launches from this wallet yet', true); return; }
+
+    // simulate collectFees for every token in parallel — only claim the ones
+    // that wouldn't revert (NoFeesToCollect etc.)
+    const claimable = (await Promise.all(tokens.map((token) =>
+      pub.simulateContract({
+        address: pad.locker, abi: LOCKER_ABI, functionName: 'collectFees',
+        args: [token], account,
+      }).then(() => token).catch(() => null),
+    ))).filter(Boolean);
+
+    if (!claimable.length) { say(`nothing to claim across ${tokens.length} token${tokens.length > 1 ? 's' : ''}`); return; }
+    say(`claiming ${claimable.length} of ${tokens.length}…`);
+
+    let nonce = await pub.getTransactionCount({ address: account.address, blockTag: 'pending' });
+    const hashes = [];
+    for (const token of claimable) {
+      hashes.push(await wallet.writeContract({
+        address: pad.locker, abi: LOCKER_ABI, functionName: 'collectFees',
+        args: [token], nonce: nonce++,
+      }));
+    }
+    const results = await Promise.all(hashes.map((hash) =>
+      pub.waitForTransactionReceipt({ hash, confirmations: 1 })
+        .then((r) => r.status === 'success').catch(() => false),
+    ));
+    const ok = results.filter(Boolean).length;
+    say(`<span style="color:var(--accent)">CLAIMED ${ok}/${claimable.length} ✓</span> (${tokens.length - claimable.length} had nothing)`);
+    refreshBalance();
+  } catch (e) {
+    say(e.shortMessage || e.message, true);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -679,6 +749,7 @@ function init() {
   $('chipCancel').onclick = () => $('chipsOverlay').classList.add('hidden');
 
   $('refreshTokens').onclick = renderTokenList;
+  $('claimAll').onclick = () => claimAllFees($('claimAll'));
   $('claimAddrBtn').onclick = () => {
     const addr = $('claimAddr').value.trim();
     if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
