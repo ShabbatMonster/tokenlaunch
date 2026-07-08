@@ -63,6 +63,28 @@
   }
   .pad.active { border-color: var(--accent); color: var(--accent); }
   .pad:disabled { opacity: .4; cursor: default; }
+  .pad input {
+    width: 56px; background: none; border: none; color: var(--accent);
+    font: inherit; font-size: 12px; outline: none; text-align: center; padding: 0;
+  }
+  .hint { letter-spacing: 0; text-transform: none; opacity: .7; }
+  .mini {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 7px;
+    color: var(--dim); font: inherit; font-size: 11px; padding: 4px 9px; cursor: pointer;
+  }
+  .mini:hover { color: var(--text); }
+  .mini.wide { width: 100%; padding: 10px 0; }
+  .mini:disabled { opacity: .5; cursor: default; }
+  .token-list .empty { font-size: 12px; color: var(--dim); }
+  .token-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 0;
+    border-bottom: 1px solid var(--border); font-size: 12px;
+  }
+  .token-row:last-child { border-bottom: none; }
+  .token-row .sym { color: var(--text); font-weight: 700; }
+  .token-row .addr { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .token-row .addr a { color: var(--dim); text-decoration: none; }
+  .token-row .addr a:hover { color: var(--accent); }
 
   .launch-btn {
     width: 100%; margin-top: 18px; padding: 13px; border: none; border-radius: 10px;
@@ -130,25 +152,32 @@
     </div>
 
     <div class="row">
-      <div>
-        <label>DEV BUY (ETH, OPT.)</label>
-        <input type="number" id="devBuy" placeholder="0" min="0" step="0.001">
-      </div>
+      <div><label>TWITTER (OPT.)</label><input type="text" id="twitter" placeholder="https://x.com/..."></div>
+      <div><label>WEBSITE (OPT.)</label><input type="text" id="website" placeholder="https://..."></div>
     </div>
 
+    <label>DEV BUY <span class="hint">— double-click a chip to edit it</span></label>
+    <div class="pads" id="buyChips"></div>
+
     <details class="adv">
-      <summary>description / socials</summary>
+      <summary>description</summary>
       <label>DESCRIPTION</label>
       <textarea id="desc" rows="2">aaaaaaaaaa</textarea>
-      <div class="row">
-        <div><label>TWITTER (OPT.)</label><input type="text" id="twitter" placeholder="https://x.com/..."></div>
-        <div><label>WEBSITE (OPT.)</label><input type="text" id="website" placeholder="https://..."></div>
-      </div>
     </details>
 
     <button class="launch-btn" id="launchBtn">LAUNCH</button>
     <div class="fee-note" id="feeNote"></div>
     <div class="status" id="status"></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <label style="margin-top:0">MY TOKENS · CLAIM FEES <button class="mini" id="refreshTokens" title="refresh">↻</button></label>
+    <div id="tokenList" class="token-list"><div class="empty">unlock wallet to load your launches</div></div>
+    <div class="row" style="margin-top:10px">
+      <div><input type="text" id="claimAddr" placeholder="or paste token address 0x..." spellcheck="false"></div>
+      <div style="flex:0 0 90px"><button class="mini wide" id="claimAddrBtn">CLAIM</button></div>
+    </div>
+    <div class="status" id="claimStatus"></div>
   </div>
 </div>
 
