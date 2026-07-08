@@ -59,6 +59,7 @@ const LOCKER_ABI = [
 ];
 const ERC20_ABI = [
   { type: 'function', name: 'symbol', inputs: [], outputs: [{ type: 'string' }], stateMutability: 'view' },
+  { type: 'function', name: 'transfer', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' },
 ];
 
 const PADS = [
@@ -70,6 +71,9 @@ const PADS = [
     explorer: 'https://robinhoodchain.blockscout.com',
     site: (t) => `https://fun.noxa.fi/robinhood/token/${t}`,
     nativeSymbol: 'ETH',
+    // launch-buy curve tokens_out = x/(a + b*x), fitted exactly (0.0000% err)
+    // against 11 historical launchToken txs on this factory; 1B token supply
+    curve: { a: 1.36935127e-9, b: 1e-9, supply: 1e9 },
   },
   { id: 'noxa-monad',    label: 'Noxa · Monad',   vm: 'evm', enabled: false, chainId: 143,  rpc: '', factory: '0x7F03effbd7ceB22A3f80Dd468f67eF27826acD85', nativeSymbol: 'MON' },
   { id: 'noxa-megaeth',  label: 'Noxa · MegaETH', vm: 'evm', enabled: false, chainId: 4326, rpc: '', factory: '0xAc303930F2f7A78BBB037f3f4622Bd02f5545B9a', nativeSymbol: 'ETH' },
@@ -223,6 +227,19 @@ async function launch() {
   const website = document.getElementById('website').value.trim();
   const devBuy = selectedBuyAmount();
 
+  const feeRecipientRaw = document.getElementById('feeRecipient').value.trim();
+  if (feeRecipientRaw && !/^0x[0-9a-fA-F]{40}$/.test(feeRecipientRaw)) throw new Error('fee recipient is not a valid address');
+  const feeRecipient = feeRecipientRaw || account.address;
+
+  const dists = parseDistributions(pad.curve?.supply || 1e9);
+  if (dists.length && pad.curve && selectedChip >= 0) {
+    const x = +buyChips[selectedChip];
+    const expected = parseEther(Math.floor(x / (pad.curve.a + pad.curve.b * x)).toString());
+    const total = dists.reduce((s, d) => s + d.amount, 0n);
+    if (total > expected) throw new Error('distribution total exceeds what your dev buy gets you — bump the dev buy or lower amounts');
+  }
+  if (dists.length && selectedChip < 0) throw new Error('distribution needs a dev buy (that is where the tokens come from)');
+
   setStatus('uploading image to IPFS...');
   const logo = await uploadToIpfs(logoBlob);
 
@@ -240,7 +257,7 @@ async function launch() {
     {
       name, symbol, logo, description,
       socials: { telegram: '', twitter, discord: '', website, farcaster: '' },
-      devWallet: account.address,
+      devWallet: feeRecipient,
     },
     0n, // launchConfigId
     0n, // dexId
@@ -268,6 +285,7 @@ async function launch() {
     `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token || ''}<br>` +
     (token && pad.site ? `<a href="${pad.site(token)}" target="_blank" rel="noopener">view on noxa</a> · ` : '') +
     `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a>`;
+  if (token && dists.length) await runDistributions(pad, pub, wallet, token, dists, el);
   refreshBalance();
   renderTokenList();
 }
@@ -281,6 +299,16 @@ let selectedChip = -1; // -1 = none
 
 function selectedBuyAmount() {
   return selectedChip >= 0 ? parseEther(buyChips[selectedChip]) : 0n;
+}
+
+function updateBuyPreview() {
+  const el = $('buyPreview');
+  const curve = activePad.curve;
+  if (selectedChip < 0 || !curve) { el.innerHTML = ''; return; }
+  const x = +buyChips[selectedChip];
+  const tokens = x / (curve.a + curve.b * x);
+  const pct = (tokens / curve.supply) * 100;
+  el.innerHTML = `you'd get ≈ <b>${Math.round(tokens).toLocaleString('en-US')}</b> tokens · <b>${pct.toFixed(2)}%</b> of supply`;
 }
 
 function renderBuyChips() {
@@ -307,6 +335,7 @@ function renderBuyChips() {
   pencil.textContent = '✎';
   pencil.onclick = openChipEditor;
   box.appendChild(pencil);
+  updateBuyPreview();
 }
 
 function chipEditRow(value) {
@@ -345,6 +374,66 @@ function saveChipEditor() {
   if (selectedChip >= buyChips.length) selectedChip = -1;
   $('chipsOverlay').classList.add('hidden');
   renderBuyChips();
+}
+
+// ---------------------------------------------------------------------------
+// distribute supply on launch
+// ---------------------------------------------------------------------------
+function distRow(addr = '', amt = '') {
+  const row = document.createElement('div');
+  row.className = 'chip-edit-row';
+  const a = document.createElement('input');
+  a.type = 'text'; a.placeholder = '0x wallet address'; a.value = addr;
+  a.spellcheck = false; a.className = 'dist-addr';
+  const m = document.createElement('input');
+  m.type = 'text'; m.placeholder = 'tokens or %'; m.value = amt;
+  m.style.flex = '0 0 110px'; m.className = 'dist-amt';
+  const x = document.createElement('button');
+  x.className = 'x'; x.textContent = '×'; x.title = 'remove';
+  x.onclick = () => row.remove();
+  row.append(a, m, x);
+  return row;
+}
+
+function parseDistributions(supply) {
+  const out = [];
+  for (const row of $('distRows').querySelectorAll('.chip-edit-row')) {
+    const addr = row.querySelector('.dist-addr').value.trim();
+    const raw = row.querySelector('.dist-amt').value.trim().replace(/,/g, '');
+    if (!addr && !raw) continue;
+    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) throw new Error(`distribution: bad address "${addr.slice(0, 14)}…"`);
+    let tokens;
+    if (raw.endsWith('%')) {
+      const pct = +raw.slice(0, -1);
+      if (!(pct > 0 && pct <= 100)) throw new Error(`distribution: bad % "${raw}"`);
+      tokens = (supply * pct) / 100;
+    } else {
+      tokens = +raw;
+      if (!(tokens > 0)) throw new Error(`distribution: bad amount "${raw}"`);
+    }
+    out.push({ addr, amount: parseEther(tokens.toString()) });
+  }
+  return out;
+}
+
+async function runDistributions(pad, pub, wallet, token, dists, statusEl) {
+  let ok = 0;
+  for (const [i, d] of dists.entries()) {
+    const tag = `${d.addr.slice(0, 6)}…${d.addr.slice(-4)}`;
+    try {
+      statusEl.innerHTML += `<br>sending to ${tag} (${i + 1}/${dists.length})…`;
+      const hash = await wallet.writeContract({
+        address: token, abi: ERC20_ABI, functionName: 'transfer', args: [d.addr, d.amount],
+      });
+      const r = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+      if (r.status !== 'success') throw new Error('reverted');
+      ok++;
+      statusEl.innerHTML += ' ✓';
+    } catch (e) {
+      statusEl.innerHTML += ` <span class="err">failed (${e.shortMessage || e.message})</span>`;
+    }
+  }
+  statusEl.innerHTML += `<br>distribution done: ${ok}/${dists.length} sent`;
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +570,7 @@ function onUnlocked() {
   $('walletDot').classList.add('on');
   $('walletAddr').textContent = account.address.slice(0, 6) + '…' + account.address.slice(-4);
   $('walletChip').title = account.address + ' (click to copy)';
+  $('feeRecipient').placeholder = account.address + ' (default)';
   refreshBalance();
   renderTokenList();
 }
@@ -521,6 +611,9 @@ function init() {
   renderPads();
   renderBuyChips();
   refreshFeeNote();
+
+  $('distRows').appendChild(distRow());
+  $('distAdd').onclick = () => $('distRows').appendChild(distRow());
 
   $('chipAdd').onclick = () => $('chipEditRows').appendChild(chipEditRow(''));
   $('chipSave').onclick = saveChipEditor;
