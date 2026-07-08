@@ -68,6 +68,8 @@
     font: inherit; font-size: 12px; outline: none; text-align: center; padding: 0;
   }
   .hint { letter-spacing: 0; text-transform: none; opacity: .7; }
+  .buy-preview { font-size: 12px; color: var(--dim); margin-top: 8px; min-height: 16px; }
+  .buy-preview b { color: var(--text); font-weight: 600; }
   .chip-edit-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
   .chip-edit-row input { flex: 1; }
   .chip-edit-row .x {
@@ -165,11 +167,22 @@
 
     <label>DEV BUY</label>
     <div class="pads" id="buyChips"></div>
+    <div class="buy-preview" id="buyPreview"></div>
 
     <details class="adv">
-      <summary>description</summary>
+      <summary>distribute supply on launch</summary>
+      <div id="distRows"></div>
+      <button class="mini" id="distAdd" style="margin-top:8px">+ add wallet</button>
+      <div class="hint" style="font-size:11px;margin-top:6px">amount in tokens (e.g. 10000000) or % of supply (e.g. 2%). sent from your wallet right after launch — needs a dev buy big enough to cover it.</div>
+    </details>
+
+    <details class="adv">
+      <summary>description · fee recipient</summary>
       <label>DESCRIPTION</label>
       <textarea id="desc" rows="2">aaaaaaaaaa</textarea>
+      <label>FEE SHARE RECIPIENT</label>
+      <input type="text" id="feeRecipient" placeholder="your imported wallet (default)" spellcheck="false">
+      <div class="hint" style="font-size:11px;margin-top:4px">creator trading fees route here. leave empty = your wallet.</div>
     </details>
 
     <button class="launch-btn" id="launchBtn">LAUNCH</button>
@@ -229,6 +242,6 @@
   </div>
 </div>
 
-<script type="module" src="app.js?v=4"></script>
+<script type="module" src="app.js?v=5"></script>
 </body>
 </html>
