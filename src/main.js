@@ -436,6 +436,58 @@ async function runDistributions(pad, pub, wallet, token, dists, statusEl) {
   statusEl.innerHTML += `<br>distribution done: ${ok}/${dists.length} sent`;
 }
 
+// saved wallet sets for distribution
+const DIST_SETS_KEY = 'distSets.v1';
+const loadDistSets = () => JSON.parse(localStorage.getItem(DIST_SETS_KEY) || '{}');
+
+function currentDistRows() {
+  const rows = [];
+  for (const row of $('distRows').querySelectorAll('.chip-edit-row')) {
+    const addr = row.querySelector('.dist-addr').value.trim();
+    const amt = row.querySelector('.dist-amt').value.trim();
+    if (addr || amt) rows.push({ addr, amt });
+  }
+  return rows;
+}
+
+function setDistRows(rows) {
+  const box = $('distRows');
+  box.innerHTML = '';
+  for (const r of rows) box.appendChild(distRow(r.addr, r.amt));
+  if (!rows.length) box.appendChild(distRow());
+}
+
+function renderDistSets(selected = '') {
+  const sel = $('distSets');
+  sel.innerHTML = '<option value="">— saved wallet sets —</option>';
+  for (const name of Object.keys(loadDistSets())) {
+    const o = document.createElement('option');
+    o.value = o.textContent = name;
+    if (name === selected) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+function saveDistSet() {
+  const rows = currentDistRows();
+  if (!rows.length) { setStatus('nothing to save — add wallets first', true); return; }
+  const name = prompt('name this wallet set:', $('distSets').value || 'set 1');
+  if (!name) return;
+  const sets = loadDistSets();
+  sets[name] = rows;
+  localStorage.setItem(DIST_SETS_KEY, JSON.stringify(sets));
+  renderDistSets(name);
+}
+
+function deleteDistSet() {
+  const name = $('distSets').value;
+  if (!name) return;
+  const sets = loadDistSets();
+  delete sets[name];
+  localStorage.setItem(DIST_SETS_KEY, JSON.stringify(sets));
+  renderDistSets();
+}
+
 // ---------------------------------------------------------------------------
 // my tokens + claim fees (Noxa locker)
 // ---------------------------------------------------------------------------
@@ -614,6 +666,13 @@ function init() {
 
   $('distRows').appendChild(distRow());
   $('distAdd').onclick = () => $('distRows').appendChild(distRow());
+  renderDistSets();
+  $('distSets').onchange = () => {
+    const sets = loadDistSets();
+    if (sets[$('distSets').value]) setDistRows(sets[$('distSets').value]);
+  };
+  $('distSave').onclick = saveDistSet;
+  $('distDelete').onclick = deleteDistSet;
 
   $('chipAdd').onclick = () => $('chipEditRows').appendChild(chipEditRow(''));
   $('chipSave').onclick = saveChipEditor;
