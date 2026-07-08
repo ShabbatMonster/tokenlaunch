@@ -68,6 +68,13 @@
     font: inherit; font-size: 12px; outline: none; text-align: center; padding: 0;
   }
   .hint { letter-spacing: 0; text-transform: none; opacity: .7; }
+  .chip-edit-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .chip-edit-row input { flex: 1; }
+  .chip-edit-row .x {
+    background: none; border: 1px solid var(--border); border-radius: 7px;
+    color: var(--dim); font: inherit; padding: 8px 11px; cursor: pointer;
+  }
+  .chip-edit-row .x:hover { color: var(--danger); border-color: var(--danger); }
   .mini {
     background: var(--panel2); border: 1px solid var(--border); border-radius: 7px;
     color: var(--dim); font: inherit; font-size: 11px; padding: 4px 9px; cursor: pointer;
@@ -156,7 +163,7 @@
       <div><label>WEBSITE (OPT.)</label><input type="text" id="website" placeholder="https://..."></div>
     </div>
 
-    <label>DEV BUY <span class="hint">— ✎ to edit amounts</span></label>
+    <label>DEV BUY</label>
     <div class="pads" id="buyChips"></div>
 
     <details class="adv">
@@ -178,6 +185,18 @@
       <div style="flex:0 0 90px"><button class="mini wide" id="claimAddrBtn">CLAIM</button></div>
     </div>
     <div class="status" id="claimStatus"></div>
+  </div>
+</div>
+
+<!-- edit buy amounts -->
+<div class="overlay hidden" id="chipsOverlay">
+  <div class="card modal">
+    <h2>EDIT BUY AMOUNTS</h2>
+    <p class="sub">These become your one-click dev-buy buttons.</p>
+    <div id="chipEditRows"></div>
+    <button class="ghost" id="chipAdd" style="text-align:left">+ add amount</button>
+    <button class="primary" id="chipSave">SAVE</button>
+    <button class="ghost" id="chipCancel">cancel</button>
   </div>
 </div>
 
@@ -210,6 +229,6 @@
   </div>
 </div>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=4"></script>
 </body>
 </html>
