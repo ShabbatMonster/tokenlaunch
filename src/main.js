@@ -278,6 +278,7 @@ async function launch() {
 const CHIPS_KEY = 'buyChips.v1';
 let buyChips = JSON.parse(localStorage.getItem(CHIPS_KEY) || 'null') || ['0.001', '0.005', '0.01', '0.05'];
 let selectedChip = -1; // -1 = none
+let editingChips = false;
 
 function selectedBuyAmount() {
   return selectedChip >= 0 ? parseEther(buyChips[selectedChip]) : 0n;
@@ -286,45 +287,49 @@ function selectedBuyAmount() {
 function renderBuyChips() {
   const box = $('buyChips');
   box.innerHTML = '';
+
   const none = document.createElement('button');
   none.className = 'pad' + (selectedChip === -1 ? ' active' : '');
   none.textContent = 'none';
+  none.disabled = editingChips;
   none.onclick = () => { selectedChip = -1; renderBuyChips(); };
   box.appendChild(none);
+
   buyChips.forEach((amt, i) => {
     const b = document.createElement('button');
-    b.className = 'pad' + (selectedChip === i ? ' active' : '');
-    b.textContent = amt + ' ' + activePad.nativeSymbol;
-    b.onclick = () => { selectedChip = i; renderBuyChips(); };
-    b.ondblclick = () => editChip(b, i);
+    b.className = 'pad' + (!editingChips && selectedChip === i ? ' active' : '');
+    if (editingChips) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = amt;
+      input.dataset.chip = i;
+      input.onkeydown = (e) => { if (e.key === 'Enter') saveChips(); };
+      b.appendChild(input);
+      b.onclick = () => input.focus();
+    } else {
+      b.textContent = amt + ' ' + activePad.nativeSymbol;
+      b.onclick = () => { selectedChip = i; renderBuyChips(); };
+    }
     box.appendChild(b);
   });
+
+  const pencil = document.createElement('button');
+  pencil.className = 'pad edit' + (editingChips ? ' active' : '');
+  pencil.title = editingChips ? 'save' : 'edit amounts';
+  pencil.textContent = editingChips ? '✓' : '✎';
+  pencil.onclick = () => { editingChips ? saveChips() : (editingChips = true, renderBuyChips()); };
+  box.appendChild(pencil);
 }
 
-function editChip(btn, i) {
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.value = buyChips[i];
-  btn.textContent = '';
-  btn.appendChild(input);
-  input.focus();
-  input.select();
-  const done = (save) => {
-    if (save) {
-      const v = input.value.trim();
-      if (v && !isNaN(+v) && +v > 0) {
-        buyChips[i] = v;
-        localStorage.setItem(CHIPS_KEY, JSON.stringify(buyChips));
-        selectedChip = i;
-      }
-    }
-    renderBuyChips();
-  };
-  input.onblur = () => done(true);
-  input.onkeydown = (e) => {
-    if (e.key === 'Enter') { input.onblur = null; done(true); }
-    if (e.key === 'Escape') { input.onblur = null; done(false); }
-  };
+function saveChips() {
+  const inputs = $('buyChips').querySelectorAll('input[data-chip]');
+  for (const input of inputs) {
+    const v = input.value.trim();
+    if (v && !isNaN(+v) && +v > 0) buyChips[+input.dataset.chip] = v;
+  }
+  localStorage.setItem(CHIPS_KEY, JSON.stringify(buyChips));
+  editingChips = false;
+  renderBuyChips();
 }
 
 // ---------------------------------------------------------------------------
