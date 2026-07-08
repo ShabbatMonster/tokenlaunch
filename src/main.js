@@ -53,11 +53,20 @@ const FACTORY_ABI = [
   },
 ];
 
+const LOCKER_ABI = [
+  { type: 'function', name: 'collectFees', inputs: [{ name: 'token', type: 'address' }], outputs: [], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'deployerTokens', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'address' }], stateMutability: 'view' },
+];
+const ERC20_ABI = [
+  { type: 'function', name: 'symbol', inputs: [], outputs: [{ type: 'string' }], stateMutability: 'view' },
+];
+
 const PADS = [
   {
     id: 'noxa-robinhood', label: 'Noxa · Robinhood', vm: 'evm', enabled: true,
     chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
     factory: '0xD9eC2db5f3D1b236843925949fe5bd8a3836FCcB',
+    locker: '0x7F03effbd7ceB22A3f80Dd468f67eF27826acD85',
     explorer: 'https://robinhoodchain.blockscout.com',
     site: (t) => `https://fun.noxa.fi/robinhood/token/${t}`,
     nativeSymbol: 'ETH',
@@ -212,8 +221,7 @@ async function launch() {
   const description = document.getElementById('desc').value.trim() || DEFAULT_DESC;
   const twitter = document.getElementById('twitter').value.trim();
   const website = document.getElementById('website').value.trim();
-  const devBuyStr = document.getElementById('devBuy').value.trim();
-  const devBuy = devBuyStr ? parseEther(devBuyStr) : 0n;
+  const devBuy = selectedBuyAmount();
 
   setStatus('uploading image to IPFS...');
   const logo = await uploadToIpfs(logoBlob);
@@ -254,12 +262,158 @@ async function launch() {
 
   const [ev] = parseEventLogs({ abi: FACTORY_ABI, eventName: 'TokenLaunched', logs: receipt.logs });
   const token = ev?.args?.token;
+  if (token) rememberLaunch(pad, token, symbol);
   const el = document.getElementById('status');
   el.innerHTML =
     `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token || ''}<br>` +
     (token && pad.site ? `<a href="${pad.site(token)}" target="_blank" rel="noopener">view on noxa</a> · ` : '') +
     `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a>`;
   refreshBalance();
+  renderTokenList();
+}
+
+// ---------------------------------------------------------------------------
+// dev-buy chips — editable presets, persisted
+// ---------------------------------------------------------------------------
+const CHIPS_KEY = 'buyChips.v1';
+let buyChips = JSON.parse(localStorage.getItem(CHIPS_KEY) || 'null') || ['0.001', '0.005', '0.01', '0.05'];
+let selectedChip = -1; // -1 = none
+
+function selectedBuyAmount() {
+  return selectedChip >= 0 ? parseEther(buyChips[selectedChip]) : 0n;
+}
+
+function renderBuyChips() {
+  const box = $('buyChips');
+  box.innerHTML = '';
+  const none = document.createElement('button');
+  none.className = 'pad' + (selectedChip === -1 ? ' active' : '');
+  none.textContent = 'none';
+  none.onclick = () => { selectedChip = -1; renderBuyChips(); };
+  box.appendChild(none);
+  buyChips.forEach((amt, i) => {
+    const b = document.createElement('button');
+    b.className = 'pad' + (selectedChip === i ? ' active' : '');
+    b.textContent = amt + ' ' + activePad.nativeSymbol;
+    b.onclick = () => { selectedChip = i; renderBuyChips(); };
+    b.ondblclick = () => editChip(b, i);
+    box.appendChild(b);
+  });
+}
+
+function editChip(btn, i) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = buyChips[i];
+  btn.textContent = '';
+  btn.appendChild(input);
+  input.focus();
+  input.select();
+  const done = (save) => {
+    if (save) {
+      const v = input.value.trim();
+      if (v && !isNaN(+v) && +v > 0) {
+        buyChips[i] = v;
+        localStorage.setItem(CHIPS_KEY, JSON.stringify(buyChips));
+        selectedChip = i;
+      }
+    }
+    renderBuyChips();
+  };
+  input.onblur = () => done(true);
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') { input.onblur = null; done(true); }
+    if (e.key === 'Escape') { input.onblur = null; done(false); }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// my tokens + claim fees (Noxa locker)
+// ---------------------------------------------------------------------------
+const LAUNCHES_KEY = 'launches.v1';
+const loadLaunches = () => JSON.parse(localStorage.getItem(LAUNCHES_KEY) || '[]');
+function rememberLaunch(pad, token, symbol) {
+  const all = loadLaunches();
+  if (!all.some((l) => l.token.toLowerCase() === token.toLowerCase())) {
+    all.push({ pad: pad.id, token, symbol });
+    localStorage.setItem(LAUNCHES_KEY, JSON.stringify(all));
+  }
+}
+
+async function discoverMyTokens(pad) {
+  // locker.deployerTokens(wallet, i) until it reverts
+  const pub = publicClientFor(pad);
+  const found = [];
+  for (let i = 0; i < 100; i++) {
+    try {
+      const t = await pub.readContract({
+        address: pad.locker, abi: LOCKER_ABI, functionName: 'deployerTokens',
+        args: [account.address, BigInt(i)],
+      });
+      found.push(t);
+    } catch { break; }
+  }
+  return found;
+}
+
+async function renderTokenList() {
+  const box = $('tokenList');
+  if (!account) { box.innerHTML = '<div class="empty">unlock wallet to load your launches</div>'; return; }
+  const pad = PADS.find((p) => p.enabled && p.locker);
+  box.innerHTML = '<div class="empty">loading…</div>';
+  try {
+    const pub = publicClientFor(pad);
+    const onchain = await discoverMyTokens(pad);
+    const local = loadLaunches().filter((l) => l.pad === pad.id).map((l) => l.token);
+    const tokens = [...new Set([...onchain, ...local].map((t) => t.toLowerCase()))];
+    if (!tokens.length) { box.innerHTML = '<div class="empty">no launches from this wallet yet</div>'; return; }
+    box.innerHTML = '';
+    for (const token of tokens) {
+      const row = document.createElement('div');
+      row.className = 'token-row';
+      const known = loadLaunches().find((l) => l.token.toLowerCase() === token);
+      let sym = known?.symbol || '';
+      if (!sym) {
+        sym = await pub.readContract({ address: token, abi: ERC20_ABI, functionName: 'symbol' }).catch(() => '?');
+      }
+      row.innerHTML =
+        `<span class="sym">${sym}</span>` +
+        `<span class="addr"><a href="${pad.site(token)}" target="_blank" rel="noopener">${token}</a></span>`;
+      const btn = document.createElement('button');
+      btn.className = 'mini';
+      btn.textContent = 'CLAIM';
+      btn.onclick = () => claimFees(pad, token, btn);
+      row.appendChild(btn);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    box.innerHTML = `<div class="empty">couldn't load tokens: ${e.shortMessage || e.message}</div>`;
+  }
+}
+
+async function claimFees(pad, token, btn) {
+  const out = $('claimStatus');
+  const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
+  if (!account) { say('unlock wallet first', true); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const pub = publicClientFor(pad);
+    const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+    say('claiming fees…');
+    const hash = await wallet.writeContract({
+      address: pad.locker, abi: LOCKER_ABI, functionName: 'collectFees', args: [token],
+    });
+    say(`tx sent: ${hash}\nwaiting…`);
+    const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+    if (receipt.status !== 'success') throw new Error('tx reverted');
+    say(`<span style="color:var(--accent)">FEES CLAIMED ✓</span> <a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx</a>`);
+    refreshBalance();
+  } catch (e) {
+    const msg = e.shortMessage || e.message;
+    say(/NoFeesToCollect/i.test(msg) ? 'nothing to claim yet' : msg, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +432,7 @@ function renderPads() {
     b.className = 'pad' + (pad === activePad ? ' active' : '');
     b.textContent = pad.enabled ? pad.label : pad.label + ' (soon)';
     b.disabled = !pad.enabled;
-    b.onclick = () => { activePad = pad; renderPads(); refreshFeeNote(); };
+    b.onclick = () => { activePad = pad; renderPads(); renderBuyChips(); refreshFeeNote(); };
     box.appendChild(b);
   }
 }
@@ -308,6 +462,7 @@ function onUnlocked() {
   $('walletAddr').textContent = account.address.slice(0, 6) + '…' + account.address.slice(-4);
   $('walletChip').title = account.address + ' (click to copy)';
   refreshBalance();
+  renderTokenList();
 }
 
 async function doSetup() {
@@ -344,7 +499,18 @@ async function doUnlock() {
 
 function init() {
   renderPads();
+  renderBuyChips();
   refreshFeeNote();
+
+  $('refreshTokens').onclick = renderTokenList;
+  $('claimAddrBtn').onclick = () => {
+    const addr = $('claimAddr').value.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
+      $('claimStatus').innerHTML = '<span class="err">not a valid token address</span>';
+      return;
+    }
+    claimFees(PADS.find((p) => p.enabled && p.locker), addr, $('claimAddrBtn'));
+  };
 
   if (loadVault()) $('unlockOverlay').classList.remove('hidden');
   else $('setupOverlay').classList.remove('hidden');
