@@ -54,26 +54,44 @@ const FACTORY_ABI = [
 ];
 
 const LOCKER_ABI = [
+  // Noxa lockers use collectFees, RobinFun's fork renamed it claimFees —
+  // pick via pad.claimFn. Both are permissionless; fees route to devWallet.
   { type: 'function', name: 'collectFees', inputs: [{ name: 'token', type: 'address' }], outputs: [], stateMutability: 'nonpayable' },
-  { type: 'function', name: 'deployerTokens', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'address' }], stateMutability: 'view' },
+  { type: 'function', name: 'claimFees', inputs: [{ name: 'token', type: 'address' }], outputs: [], stateMutability: 'nonpayable' },
 ];
+const TOKEN_LAUNCHED_EVENT = FACTORY_ABI.find((f) => f.type === 'event' && f.name === 'TokenLaunched');
 const ERC20_ABI = [
   { type: 'function', name: 'symbol', inputs: [], outputs: [{ type: 'string' }], stateMutability: 'view' },
   { type: 'function', name: 'transfer', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' },
 ];
 
+// launch-buy curve tokens_out = x/(a + b*x), fitted exactly (0.0000% err)
+// against historical launchToken txs; identical on Noxa and RobinFun
+// (same pool config); 1B token supply
+const ROBINHOOD_CURVE = { a: 1.36935127e-9, b: 1e-9, supply: 1e9 };
+
 const PADS = [
+  {
+    id: 'robinfun-robinhood', label: 'RobinFun · Robinhood', vm: 'evm', enabled: true,
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    factory: '0x52453b4289a6c3a70bb8b4682bcd3d8731267e28',
+    locker: '0x173d8370B4F67535D406F2F46168ec48aa03d26E',
+    claimFn: 'claimFees', startBlock: 8147000n,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinfun.live/token/${t}`,
+    nativeSymbol: 'ETH',
+    curve: ROBINHOOD_CURVE,
+  },
   {
     id: 'noxa-robinhood', label: 'Noxa · Robinhood', vm: 'evm', enabled: true,
     chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
     factory: '0xD9eC2db5f3D1b236843925949fe5bd8a3836FCcB',
     locker: '0x7F03effbd7ceB22A3f80Dd468f67eF27826acD85',
+    claimFn: 'collectFees', startBlock: 61688n,
     explorer: 'https://robinhoodchain.blockscout.com',
     site: (t) => `https://fun.noxa.fi/robinhood/token/${t}`,
     nativeSymbol: 'ETH',
-    // launch-buy curve tokens_out = x/(a + b*x), fitted exactly (0.0000% err)
-    // against 11 historical launchToken txs on this factory; 1B token supply
-    curve: { a: 1.36935127e-9, b: 1e-9, supply: 1e9 },
+    curve: ROBINHOOD_CURVE,
   },
   { id: 'noxa-monad',    label: 'Noxa · Monad',   vm: 'evm', enabled: false, chainId: 143,  rpc: '', factory: '0x7F03effbd7ceB22A3f80Dd468f67eF27826acD85', nativeSymbol: 'MON' },
   { id: 'noxa-megaeth',  label: 'Noxa · MegaETH', vm: 'evm', enabled: false, chainId: 4326, rpc: '', factory: '0xAc303930F2f7A78BBB037f3f4622Bd02f5545B9a', nativeSymbol: 'ETH' },
@@ -552,20 +570,17 @@ function rememberLaunch(pad, token, symbol) {
 }
 
 async function discoverMyTokens(pad) {
-  // locker.deployerTokens(wallet, i) until it reverts
+  // TokenLaunched has deployer indexed — one filtered getLogs finds all ours
   const pub = publicClientFor(pad);
-  const found = [];
-  for (let i = 0; i < 100; i++) {
-    try {
-      const t = await pub.readContract({
-        address: pad.locker, abi: LOCKER_ABI, functionName: 'deployerTokens',
-        args: [account.address, BigInt(i)],
-      });
-      found.push(t);
-    } catch { break; }
-  }
-  return found;
+  const logs = await pub.getLogs({
+    address: pad.factory, event: TOKEN_LAUNCHED_EVENT,
+    args: { deployer: account.address },
+    fromBlock: pad.startBlock, toBlock: 'latest',
+  });
+  return logs.map((l) => l.args.token);
 }
+
+const claimPad = () => (activePad.enabled && activePad.locker ? activePad : PADS.find((p) => p.enabled && p.locker));
 
 async function getMyTokens(pad) {
   const onchain = await discoverMyTokens(pad);
@@ -576,7 +591,7 @@ async function getMyTokens(pad) {
 async function renderTokenList() {
   const box = $('tokenList');
   if (!account) { box.innerHTML = '<div class="empty">unlock wallet to load your launches</div>'; return; }
-  const pad = PADS.find((p) => p.enabled && p.locker);
+  const pad = claimPad();
   box.innerHTML = '<div class="empty">loading…</div>';
   try {
     const pub = publicClientFor(pad);
@@ -610,7 +625,7 @@ async function claimAllFees(btn) {
   const out = $('claimStatus');
   const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
   if (!account) { say('unlock wallet first', true); return; }
-  const pad = PADS.find((p) => p.enabled && p.locker);
+  const pad = claimPad();
   btn.disabled = true;
   try {
     const pub = publicClientFor(pad);
@@ -623,7 +638,7 @@ async function claimAllFees(btn) {
     // that wouldn't revert (NoFeesToCollect etc.)
     const claimable = (await Promise.all(tokens.map((token) =>
       pub.simulateContract({
-        address: pad.locker, abi: LOCKER_ABI, functionName: 'collectFees',
+        address: pad.locker, abi: LOCKER_ABI, functionName: pad.claimFn,
         args: [token], account,
       }).then(() => token).catch(() => null),
     ))).filter(Boolean);
@@ -635,7 +650,7 @@ async function claimAllFees(btn) {
     const hashes = [];
     for (const token of claimable) {
       hashes.push(await wallet.writeContract({
-        address: pad.locker, abi: LOCKER_ABI, functionName: 'collectFees',
+        address: pad.locker, abi: LOCKER_ABI, functionName: pad.claimFn,
         args: [token], nonce: nonce++,
       }));
     }
@@ -663,7 +678,7 @@ async function claimFees(pad, token, btn) {
     const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
     say('claiming fees…');
     const hash = await wallet.writeContract({
-      address: pad.locker, abi: LOCKER_ABI, functionName: 'collectFees', args: [token],
+      address: pad.locker, abi: LOCKER_ABI, functionName: pad.claimFn, args: [token],
     });
     say(`tx sent: ${hash}\nwaiting…`);
     const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
@@ -694,7 +709,7 @@ function renderPads() {
     b.className = 'pad' + (pad === activePad ? ' active' : '');
     b.textContent = pad.enabled ? pad.label : pad.label + ' (soon)';
     b.disabled = !pad.enabled;
-    b.onclick = () => { activePad = pad; renderPads(); renderBuyChips(); refreshFeeNote(); };
+    b.onclick = () => { activePad = pad; renderPads(); renderBuyChips(); refreshFeeNote(); refreshBalance(); renderTokenList(); };
     box.appendChild(b);
   }
 }
@@ -782,7 +797,7 @@ function init() {
       $('claimStatus').innerHTML = '<span class="err">not a valid token address</span>';
       return;
     }
-    claimFees(PADS.find((p) => p.enabled && p.locker), addr, $('claimAddrBtn'));
+    claimFees(claimPad(), addr, $('claimAddrBtn'));
   };
 
   if (loadVault()) $('unlockOverlay').classList.remove('hidden');
