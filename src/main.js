@@ -80,12 +80,14 @@ const OUR_FACTORY_ABI = (() => {
 
 const PADS = [
   {
-    // our own factory — see contracts/LaunchFactory.sol. enabled + factory
-    // address get filled in at deployment.
-    id: 'ours-robinhood', label: 'Ours · Robinhood', vm: 'evm', enabled: false,
+    // our own factory — contracts/LaunchFactory.sol, deployed 2026-07-12.
+    // factory is also the locker (claimFees lives on it). 90% fees -> protocol
+    // wallet, 10% -> token devWallet. 0 launch fee. arbitrary supply.
+    id: 'ours-robinhood', label: 'Ours · Robinhood', vm: 'evm', enabled: true,
     chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
-    factory: '', locker: '',
-    claimFn: 'claimFees', startBlock: 0n,
+    factory: '0xcEdA535D923dAA5c222833a917Ac2F944bF9c795',
+    locker: '0xcEdA535D923dAA5c222833a917Ac2F944bF9c795',
+    claimFn: 'claimFees', startBlock: 8235897n,
     explorer: 'https://robinhoodchain.blockscout.com',
     site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
     nativeSymbol: 'ETH',
@@ -117,7 +119,7 @@ const PADS = [
   { id: 'noxa-megaeth',  label: 'Noxa · MegaETH', vm: 'evm', enabled: false, chainId: 4326, rpc: '', factory: '0xAc303930F2f7A78BBB037f3f4622Bd02f5545B9a', nativeSymbol: 'ETH' },
   { id: 'pump-sol',      label: 'Pump · SOL',     vm: 'sol', enabled: false },
 ];
-let activePad = PADS.find((p) => p.enabled);
+let activePad = PADS.find((p) => p.id === 'ours-robinhood') || PADS.find((p) => p.enabled);
 
 const IPFS_ADD = 'https://api.thegraph.com/ipfs/api/v0/add';
 const DEFAULT_DESC = 'aaaaaaaaaa';

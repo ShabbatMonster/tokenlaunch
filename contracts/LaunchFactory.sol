@@ -324,7 +324,7 @@ contract LaunchFactory {
     }
 
     function setProtocolFee(uint16 newBps) external onlyOwner {
-        require(newBps <= 2000, "max 20%");
+        require(newBps <= 10000, "max 100%");
         protocolFeeBps = newBps;
         emit ProtocolFeeUpdated(newBps);
     }

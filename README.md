@@ -7,7 +7,14 @@ the key never leaves the device — only signed transactions go out, straight to
 
 ## Live pads
 
-- **RobinFun · Robinhood Chain** (default, chain 4663, robinfun.live) — Noxa contract
+- **Ours · Robinhood Chain** (default, chain 4663) — our own factory,
+  `contracts/LaunchFactory.sol`, deployed at
+  `0xcEdA535D923dAA5c222833a917Ac2F944bF9c795`. Arbitrary token supply, 0 launch
+  fee, single-sided V3 liquidity, no transfer restrictions. Trading fees split
+  90% to the protocol wallet (`0xbE8a…04dA`) / 10% to the token creator. Factory
+  is its own locker (`claimFees`). Owner: `0xbE8a…04dA`. Full flow fork-tested
+  (`forge test --fork-url …`) and proven with a live mainnet launch.
+- **RobinFun · Robinhood Chain** (chain 4663, robinfun.live) — Noxa contract
   fork. Factory `0x52453b4289a6c3a70bb8b4682bcd3d8731267e28`, locker
   `0x173d8370B4F67535D406F2F46168ec48aa03d26E` (claims via `claimFees`). 0.0002 ETH
   launch fee + optional dev buy + gas, one tx.
