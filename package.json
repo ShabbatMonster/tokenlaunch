@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "esbuild src/main.js --bundle --minify --format=esm --outfile=docs/app.js",
+    "build": "esbuild src/main.js --bundle --minify --format=esm --outfile=docs/app.js && esbuild src/fees.js --bundle --minify --format=esm --outfile=docs/fees.js",
     "dev": "esbuild src/main.js --bundle --format=esm --outfile=docs/app.js --watch"
   },
   "dependencies": {
