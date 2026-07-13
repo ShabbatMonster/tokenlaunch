@@ -65,12 +65,32 @@ const ERC20_ABI = [
   { type: 'function', name: 'transfer', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' },
 ];
 
-// launch-buy curve tokens_out = x/(a + b*x), fitted exactly (0.0000% err)
-// against historical launchToken txs; identical on Noxa and RobinFun
-// (same pool config); 1B token supply
-const ROBINHOOD_CURVE = { a: 1.36935127e-9, b: 1e-9, supply: 1e9 };
+// launch-buy curve: tokens_out = supply * x / (cap + x), x in ETH.
+// cap fitted exactly (0.0000% err) against historical launchToken txs on
+// Noxa/RobinFun; our factory uses the same starting valuation by design.
+const ROBINHOOD_CURVE = { cap: 1.36935, supply: 1e9 };
+const OUR_CURVE = { cap: 1.36929 }; // supply comes from the SUPPLY input
+
+// our factory's launchToken takes one extra params field: totalSupply
+const OUR_FACTORY_ABI = (() => {
+  const base = JSON.parse(JSON.stringify(FACTORY_ABI));
+  base.find((f) => f.name === 'launchToken').inputs[0].components.push({ name: 'totalSupply', type: 'uint256' });
+  return base;
+})();
 
 const PADS = [
+  {
+    // our own factory — see contracts/LaunchFactory.sol. enabled + factory
+    // address get filled in at deployment.
+    id: 'ours-robinhood', label: 'Ours · Robinhood', vm: 'evm', enabled: false,
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    factory: '', locker: '',
+    claimFn: 'claimFees', startBlock: 0n,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
+    nativeSymbol: 'ETH',
+    curve: OUR_CURVE, customSupply: true,
+  },
   {
     id: 'robinfun-robinhood', label: 'RobinFun · Robinhood', vm: 'evm', enabled: true,
     chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
@@ -97,7 +117,7 @@ const PADS = [
   { id: 'noxa-megaeth',  label: 'Noxa · MegaETH', vm: 'evm', enabled: false, chainId: 4326, rpc: '', factory: '0xAc303930F2f7A78BBB037f3f4622Bd02f5545B9a', nativeSymbol: 'ETH' },
   { id: 'pump-sol',      label: 'Pump · SOL',     vm: 'sol', enabled: false },
 ];
-let activePad = PADS[0];
+let activePad = PADS.find((p) => p.enabled);
 
 const IPFS_ADD = 'https://api.thegraph.com/ipfs/api/v0/add';
 const DEFAULT_DESC = 'aaaaaaaaaa';
@@ -249,10 +269,13 @@ async function launch() {
   if (feeRecipientRaw && !/^0x[0-9a-fA-F]{40}$/.test(feeRecipientRaw)) throw new Error('fee recipient is not a valid address');
   const feeRecipient = feeRecipientRaw || account.address;
 
-  const dists = distroOn ? parseDistributions(pad.curve?.supply || 1e9) : [];
+  const supplyTokens = padSupply(pad);
+  if (pad.customSupply && !(supplyTokens >= 1 && supplyTokens <= 1e18)) throw new Error('supply must be between 1 and 1e18 tokens');
+
+  const dists = distroOn ? parseDistributions(supplyTokens) : [];
   if (dists.length && pad.curve && selectedChip >= 0) {
     const x = +buyChips[selectedChip];
-    const expected = parseEther(Math.floor(x / (pad.curve.a + pad.curve.b * x)).toString());
+    const expected = parseEther(Math.floor((supplyTokens * x) / (pad.curve.cap + x)).toString());
     const total = dists.reduce((s, d) => s + d.amount, 0n);
     if (total > expected) throw new Error('distribution total exceeds what your dev buy gets you — bump the dev buy or lower amounts');
   }
@@ -271,12 +294,15 @@ async function launch() {
   const bal = await pub.getBalance({ address: account.address });
   if (bal < value) throw new Error(`insufficient balance: need ${formatEther(value)}+gas, have ${formatEther(bal)} ${pad.nativeSymbol}`);
 
+  const params = {
+    name, symbol, logo, description,
+    socials: { telegram: '', twitter, discord: '', website, farcaster: '' },
+    devWallet: feeRecipient,
+  };
+  if (pad.customSupply) params.totalSupply = parseEther(supplyTokens.toLocaleString('fullwide', { useGrouping: false }));
+  const abi = pad.customSupply ? OUR_FACTORY_ABI : FACTORY_ABI;
   const args = [
-    {
-      name, symbol, logo, description,
-      socials: { telegram: '', twitter, discord: '', website, farcaster: '' },
-      devWallet: feeRecipient,
-    },
+    params,
     0n, // launchConfigId
     0n, // dexId
     keccak256(stringToBytes(`${name}-${symbol}-${Date.now()}`)),
@@ -285,11 +311,11 @@ async function launch() {
   setStatus('sending launch tx...');
   let gas;
   try {
-    gas = await pub.estimateContractGas({ address: pad.factory, abi: FACTORY_ABI, functionName: 'launchToken', args, value, account });
+    gas = await pub.estimateContractGas({ address: pad.factory, abi, functionName: 'launchToken', args, value, account });
     gas = (gas * 120n) / 100n;
   } catch { /* let the node estimate */ }
 
-  const hash = await wallet.writeContract({ address: pad.factory, abi: FACTORY_ABI, functionName: 'launchToken', args, value, gas });
+  const hash = await wallet.writeContract({ address: pad.factory, abi, functionName: 'launchToken', args, value, gas });
   setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
 
   const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
@@ -319,13 +345,20 @@ function selectedBuyAmount() {
   return selectedChip >= 0 ? parseEther(buyChips[selectedChip]) : 0n;
 }
 
+function padSupply(pad) {
+  if (!pad.customSupply) return pad.curve.supply;
+  const raw = +($('supply').value.trim().replace(/,/g, '')) || 1e9;
+  return raw;
+}
+
 function updateBuyPreview() {
   const el = $('buyPreview');
   const curve = activePad.curve;
   if (selectedChip < 0 || !curve) { el.innerHTML = ''; return; }
   const x = +buyChips[selectedChip];
-  const tokens = x / (curve.a + curve.b * x);
-  const pct = (tokens / curve.supply) * 100;
+  const supply = padSupply(activePad);
+  const tokens = (supply * x) / (curve.cap + x);
+  const pct = (x / (curve.cap + x)) * 100;
   el.innerHTML = `you'd get ≈ <b>${Math.round(tokens).toLocaleString('en-US')}</b> tokens · <b>${pct.toFixed(2)}%</b> of supply`;
 }
 
@@ -709,7 +742,11 @@ function renderPads() {
     b.className = 'pad' + (pad === activePad ? ' active' : '');
     b.textContent = pad.enabled ? pad.label : pad.label + ' (soon)';
     b.disabled = !pad.enabled;
-    b.onclick = () => { activePad = pad; renderPads(); renderBuyChips(); refreshFeeNote(); refreshBalance(); renderTokenList(); };
+    b.onclick = () => {
+      activePad = pad;
+      $('supplyRow').classList.toggle('hidden', !pad.customSupply);
+      renderPads(); renderBuyChips(); refreshFeeNote(); refreshBalance(); renderTokenList();
+    };
     box.appendChild(b);
   }
 }
@@ -779,6 +816,8 @@ function init() {
   renderPads();
   renderBuyChips();
   refreshFeeNote();
+  $('supplyRow').classList.toggle('hidden', !activePad.customSupply);
+  $('supply').addEventListener('input', updateBuyPreview);
 
   $('distToggle').onclick = toggleDistro;
   $('distAdd').onclick = () => $('distRows').appendChild(distRow());
