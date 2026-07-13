@@ -136,12 +136,16 @@
 <!-- login gate -->
 <div class="overlay" id="gateOverlay">
   <div class="card modal">
-    <h2>LOGIN</h2>
-    <p class="sub">Enter your credentials to access the launcher.</p>
+    <h2 id="gateTitle">LOGIN</h2>
+    <p class="sub" id="gateSub"></p>
     <label>USERNAME</label>
     <input type="text" id="gateUser" autocomplete="username" spellcheck="false">
     <label>PASSWORD</label>
     <input type="password" id="gatePass" autocomplete="current-password">
+    <div id="gateConfirmRow" class="hidden">
+      <label>CONFIRM PASSWORD</label>
+      <input type="password" id="gatePass2" autocomplete="new-password">
+    </div>
     <div class="err" id="gateErr"></div>
     <button class="primary" id="gateBtn">ENTER</button>
   </div>
@@ -276,6 +280,6 @@
   </div>
 </div>
 
-<script type="module" src="app.js?v=13"></script>
+<script type="module" src="app.js?v=14"></script>
 </body>
 </html>
