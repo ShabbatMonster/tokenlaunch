@@ -20,7 +20,7 @@ contract LaunchFactoryTest is Test {
     address trader = makeAddr("trader");
 
     function setUp() public {
-        factory = new LaunchFactory(V3_FACTORY, WETH, PROTOCOL, PROTOCOL, 100, CAP);
+        factory = new LaunchFactory(V3_FACTORY, WETH, PROTOCOL, PROTOCOL, 9000, CAP);
         vm.deal(dev, 100 ether);
         vm.deal(trader, 100 ether);
     }
@@ -117,7 +117,8 @@ contract LaunchFactoryTest is Test {
         console.log("dev WETH fees:", devGot, " protocol WETH fees:", protGot);
         // 1.05 ETH total buys (dev buy + trade) at 1% tier => ~0.0105 WETH fees
         assertApproxEqRel(devGot + protGot, 0.0105 ether, 0.02e18);
-        assertApproxEqRel(protGot * 99, devGot, 0.02e18);
+        // 90% protocol / 10% dev
+        assertApproxEqRel(devGot * 9, protGot, 0.02e18);
 
         // second claim with nothing accrued reverts
         vm.expectRevert(LaunchFactory.NoFeesToCollect.selector);
