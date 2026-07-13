@@ -81,13 +81,13 @@ const OUR_FACTORY_ABI = (() => {
 const PADS = [
   {
     // our own factory — contracts/LaunchFactory.sol, deployed 2026-07-12.
-    // factory is also the locker (claimFees lives on it). 90% fees -> protocol
-    // wallet, 10% -> token devWallet. 0 launch fee. arbitrary supply.
+    // factory is also the locker (claimFees lives on it). TESTING: 100% fees ->
+    // protocol wallet 0xbE8a…04dA, owner = deployer. 0 launch fee. any supply.
     id: 'ours-robinhood', label: 'Ours · Robinhood', vm: 'evm', enabled: true,
     chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
-    factory: '0xcEdA535D923dAA5c222833a917Ac2F944bF9c795',
-    locker: '0xcEdA535D923dAA5c222833a917Ac2F944bF9c795',
-    claimFn: 'claimFees', startBlock: 8235897n,
+    factory: '0x159331ec96486EC926403e504E6FCf217d6008AB',
+    locker: '0x159331ec96486EC926403e504E6FCf217d6008AB',
+    claimFn: 'claimFees', startBlock: 8242608n,
     explorer: 'https://robinhoodchain.blockscout.com',
     site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
     nativeSymbol: 'ETH',
