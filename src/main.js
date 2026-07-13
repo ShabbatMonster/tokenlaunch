@@ -83,11 +83,12 @@ const PADS = [
     // our own factory — contracts/LaunchFactory.sol, deployed 2026-07-12.
     // factory is also the locker (claimFees lives on it). TESTING: 100% fees ->
     // protocol wallet 0xbE8a…04dA, owner = deployer. 0 launch fee. any supply.
+    // 2% max-wallet cap on holders (dev + pool + factory exempt).
     id: 'ours-robinhood', label: 'Ours · Robinhood', vm: 'evm', enabled: true,
     chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
-    factory: '0x159331ec96486EC926403e504E6FCf217d6008AB',
-    locker: '0x159331ec96486EC926403e504E6FCf217d6008AB',
-    claimFn: 'claimFees', startBlock: 8242608n,
+    factory: '0x5251BA272d759B5757983D928AC89B47a64b7d8e',
+    locker: '0x5251BA272d759B5757983D928AC89B47a64b7d8e',
+    claimFn: 'claimFees', startBlock: 8274231n,
     explorer: 'https://robinhoodchain.blockscout.com',
     site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
     nativeSymbol: 'ETH',
@@ -882,4 +883,51 @@ function init() {
   setInterval(refreshBalance, 30000);
 }
 
-init();
+// ---------------------------------------------------------------------------
+// login gate — client-side. NOTE: the page is static and its source is public,
+// so this keeps casual visitors out but is not server-grade auth. Only a
+// PBKDF2 hash of user+password is embedded, never the plaintext.
+// ---------------------------------------------------------------------------
+const GATE_HASH = '53fdbf4cec2f0354e0f37dd46bb5b2053b25c1ee36c4d3138d49fec1a981e93c';
+const GATE_SALT = 'tokenlaunch-gate-v1';
+const GATE_ITER = 150000;
+const GATE_FLAG = 'gate.ok.v1';
+
+async function gateHash(username, password) {
+  const enc = new TextEncoder();
+  const keyMat = await crypto.subtle.importKey('raw', enc.encode(username + '\n' + password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(GATE_SALT), iterations: GATE_ITER, hash: 'SHA-256' },
+    keyMat, 256,
+  );
+  return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function enterApp() {
+  $('gateOverlay').classList.add('hidden');
+  $('appRoot').style.display = '';
+  init();
+}
+
+function initGate() {
+  if (sessionStorage.getItem(GATE_FLAG) === '1') { enterApp(); return; }
+  const submit = async () => {
+    $('gateErr').textContent = '';
+    const u = $('gateUser').value.trim();
+    const p = $('gatePass').value;
+    const h = await gateHash(u, p);
+    if (h === GATE_HASH) {
+      sessionStorage.setItem(GATE_FLAG, '1');
+      $('gatePass').value = '';
+      enterApp();
+    } else {
+      $('gateErr').textContent = 'wrong username or password';
+    }
+  };
+  $('gateBtn').onclick = submit;
+  $('gatePass').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  $('gateUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('gatePass').focus(); });
+  $('gateUser').focus();
+}
+
+initGate();

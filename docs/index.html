@@ -133,7 +133,21 @@
 </style>
 </head>
 <body>
-<div class="app">
+<!-- login gate -->
+<div class="overlay" id="gateOverlay">
+  <div class="card modal">
+    <h2>LOGIN</h2>
+    <p class="sub">Enter your credentials to access the launcher.</p>
+    <label>USERNAME</label>
+    <input type="text" id="gateUser" autocomplete="username" spellcheck="false">
+    <label>PASSWORD</label>
+    <input type="password" id="gatePass" autocomplete="current-password">
+    <div class="err" id="gateErr"></div>
+    <button class="primary" id="gateBtn">ENTER</button>
+  </div>
+</div>
+
+<div class="app" id="appRoot" style="display:none">
   <header>
     <h1>LAUNCHER</h1>
     <div class="wallet-chip" id="walletChip" title="wallet">
@@ -262,6 +276,6 @@
   </div>
 </div>
 
-<script type="module" src="app.js?v=12"></script>
+<script type="module" src="app.js?v=13"></script>
 </body>
 </html>
