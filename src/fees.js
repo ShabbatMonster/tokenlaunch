@@ -12,8 +12,13 @@ import { privateKeyToAccount } from 'viem/accounts';
 // ---------------------------------------------------------------------------
 const RPC = 'https://rpc.mainnet.chain.robinhood.com';
 const EXPLORER = 'https://robinhoodchain.blockscout.com';
-const FACTORY = '0x5251BA272d759B5757983D928AC89B47a64b7d8e';
-const START_BLOCK = 8274231n;
+// sweep every factory that routes fees to the recipient, so nothing is stranded
+// on a retired contract. All are our LaunchFactory (claimFees / same events).
+const FACTORIES = [
+  { addr: '0x159331ec96486EC926403e504E6FCf217d6008AB', start: 8242608n }, // active (100%, plain)
+  { addr: '0x5251BA272d759B5757983D928AC89B47a64b7d8e', start: 8274231n }, // retired (100% + 2% cap)
+  { addr: '0xcEdA535D923dAA5c222833a917Ac2F944bF9c795', start: 8235897n }, // retired (90/10)
+];
 const CHAIN = defineChain({
   id: 4663, name: 'Robinhood',
   nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
@@ -152,36 +157,41 @@ let recipient = '';
 let claimable = [];
 
 async function scan() {
-  $('scanStatus').textContent = 'scanning factory for tokens with fees…';
+  $('scanStatus').textContent = 'scanning factories for tokens with fees…';
   $('claimBtn').disabled = true;
   try {
-    const [recip, bps, logs] = await Promise.all([
-      pub.readContract({ address: FACTORY, abi: ABI, functionName: 'protocolFeeRecipient' }),
-      pub.readContract({ address: FACTORY, abi: ABI, functionName: 'protocolFeeBps' }),
-      pub.getLogs({ address: FACTORY, event: ABI.find((f) => f.name === 'TokenLaunched'), fromBlock: START_BLOCK, toBlock: 'latest' }),
+    const [recip, bps] = await Promise.all([
+      pub.readContract({ address: FACTORIES[0].addr, abi: ABI, functionName: 'protocolFeeRecipient' }),
+      pub.readContract({ address: FACTORIES[0].addr, abi: ABI, functionName: 'protocolFeeBps' }),
     ]);
     recipient = getAddress(recip);
     $('recipient').innerHTML = `fees route to <a href="${EXPLORER}/address/${recipient}" target="_blank" rel="noopener">${recipient}</a> · protocol share <b>${bps / 100}%</b>`;
 
-    const tokens = [...new Set(logs.map((l) => l.args.token.toLowerCase()))];
-    // find which have claimable fees by simulating claimFees on each
-    const results = await Promise.all(tokens.map((token) =>
-      pub.simulateContract({ address: FACTORY, abi: ABI, functionName: 'claimFees', args: [token], account: account.address })
-        .then(() => token).catch(() => null),
+    // gather (token, factory) pairs across every factory
+    const pairs = [];
+    for (const f of FACTORIES) {
+      const logs = await pub.getLogs({ address: f.addr, event: ABI.find((x) => x.name === 'TokenLaunched'), fromBlock: f.start, toBlock: 'latest' });
+      for (const token of new Set(logs.map((l) => l.args.token.toLowerCase()))) pairs.push({ token, factory: f.addr });
+    }
+
+    // find which have claimable fees by simulating claimFees on their factory
+    const results = await Promise.all(pairs.map((p) =>
+      pub.simulateContract({ address: p.factory, abi: ABI, functionName: 'claimFees', args: [p.token], account: account.address })
+        .then(() => p).catch(() => null),
     ));
     claimable = results.filter(Boolean);
 
     const box = $('list');
-    if (!tokens.length) { box.innerHTML = '<div class="empty">no tokens launched on this factory yet</div>'; $('scanStatus').textContent = ''; return; }
+    if (!pairs.length) { box.innerHTML = '<div class="empty">no tokens launched yet</div>'; $('scanStatus').textContent = ''; return; }
     box.innerHTML = '';
-    for (const token of claimable) {
-      const sym = await pub.readContract({ address: token, abi: ERC20_SYMBOL, functionName: 'symbol' }).catch(() => '?');
+    for (const p of claimable) {
+      const sym = await pub.readContract({ address: p.token, abi: ERC20_SYMBOL, functionName: 'symbol' }).catch(() => '?');
       const row = document.createElement('div');
       row.className = 'token-row';
-      row.innerHTML = `<span class="sym">${sym}</span><span class="addr"><a href="${EXPLORER}/token/${token}" target="_blank" rel="noopener">${token}</a></span><span class="ready">ready</span>`;
+      row.innerHTML = `<span class="sym">${sym}</span><span class="addr"><a href="${EXPLORER}/token/${p.token}" target="_blank" rel="noopener">${p.token}</a></span><span class="ready">ready</span>`;
       box.appendChild(row);
     }
-    $('scanStatus').textContent = `${tokens.length} token${tokens.length > 1 ? 's' : ''} scanned · ${claimable.length} with fees to claim`;
+    $('scanStatus').textContent = `${pairs.length} token${pairs.length > 1 ? 's' : ''} across ${FACTORIES.length} factories · ${claimable.length} with fees to claim`;
     if (!claimable.length) box.innerHTML = '<div class="empty">nothing to claim right now (fees accrue as tokens trade)</div>';
     $('claimBtn').disabled = claimable.length === 0;
     $('claimBtn').textContent = claimable.length ? `CLAIM ALL (${claimable.length})` : 'NOTHING TO CLAIM';
@@ -198,8 +208,8 @@ async function claimAll() {
   try {
     let nonce = await pub.getTransactionCount({ address: account.address, blockTag: 'pending' });
     const hashes = [];
-    for (const token of claimable) {
-      hashes.push(await wallet.writeContract({ address: FACTORY, abi: ABI, functionName: 'claimFees', args: [token], nonce: nonce++ }));
+    for (const p of claimable) {
+      hashes.push(await wallet.writeContract({ address: p.factory, abi: ABI, functionName: 'claimFees', args: [p.token], nonce: nonce++ }));
     }
     const receipts = await Promise.all(hashes.map((h) =>
       pub.waitForTransactionReceipt({ hash: h, confirmations: 1 }).then((r) => r).catch(() => null),
