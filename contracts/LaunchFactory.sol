@@ -155,6 +155,12 @@ contract LaunchFactory {
         address pool = dexFactory.createPool(token, weth, POOL_FEE);
         IUniswapV3Pool(pool).initialize(sqrtInitX96);
 
+        // exempt the pool (holds full liquidity) and the dev side (dev may buy
+        // past the 2% max-wallet) before any token moves
+        LaunchToken(token).setExempt(pool, true);
+        LaunchToken(token).setExempt(devWallet, true);
+        if (msg.sender != devWallet) LaunchToken(token).setExempt(msg.sender, true);
+
         uint128 liquidity = _liquidityForSupply(tokenIs0, tickLower, tickUpper, p.totalSupply);
         expectedPool = pool;
         IUniswapV3Pool(pool).mint(address(this), tickLower, tickUpper, liquidity, abi.encode(token));

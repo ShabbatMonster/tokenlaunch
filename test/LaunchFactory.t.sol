@@ -97,12 +97,14 @@ contract LaunchFactoryTest is Test {
         address token = _launch("FEE", B_SUPPLY, 0.05 ether, bytes32(uint256(4)));
         (address pool,,,,,) = factory.launches(token);
 
-        // this contract buys 1 ETH through the pool directly (pays via its callback)
+        // this contract buys 1 ETH through the pool; output goes to dev (exempt,
+        // so a big buy isn't blocked by the max-wallet cap). fees accrue in the
+        // pool regardless of who receives the tokens.
         vm.deal(address(this), 2 ether);
         IWETH9(WETH).deposit{value: 1 ether}();
         bool zeroForOne = WETH < token;
         IUniswapV3Pool(pool).swap(
-            trader, zeroForOne, int256(1 ether),
+            dev, zeroForOne, int256(1 ether),
             zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
             ""
         );
@@ -146,13 +148,45 @@ contract LaunchFactoryTest is Test {
         factory.launchToken{value: 1 ether}(_params("NOPE", B_SUPPLY), 0, 0, bytes32(uint256(6)));
     }
 
-    function test_transfersUnrestricted() public {
-        // distro feature needs free transfers right after launch
+    function test_distroWithinCap() public {
+        // distro feature: dev can seed wallets up to 2% each
         address token = _launch("MOVE", B_SUPPLY, 0.2 ether, bytes32(uint256(7)));
-        uint256 bal = IERC20Minimal(token).balanceOf(dev);
+        uint256 twoPct = (B_SUPPLY * 2) / 100;
         vm.prank(dev);
-        IERC20Minimal(token).transfer(trader, bal / 2);
-        assertEq(IERC20Minimal(token).balanceOf(trader), bal / 2);
+        IERC20Minimal(token).transfer(trader, twoPct);
+        assertEq(IERC20Minimal(token).balanceOf(trader), twoPct);
+    }
+
+    function test_maxWallet_capsHoldersDevExempt() public {
+        // 0.05 ETH dev buy on 1B supply mints the dev ~3.5% — proves the dev is
+        // exempt (holds >2%)
+        address token = _launch("CAP", B_SUPPLY, 0.05 ether, bytes32(uint256(8)));
+        uint256 twoPct = (B_SUPPLY * 2) / 100;
+        assertGt(IERC20Minimal(token).balanceOf(dev), twoPct, "dev should hold >2%");
+
+        uint256 onePct = B_SUPPLY / 100;
+        vm.prank(dev);
+        IERC20Minimal(token).transfer(trader, onePct); // trader at 1%, fine
+        assertEq(IERC20Minimal(token).balanceOf(trader), onePct);
+
+        // pushing trader over 2% reverts
+        vm.prank(dev);
+        vm.expectRevert(bytes("max wallet"));
+        IERC20Minimal(token).transfer(trader, onePct + onePct); // -> 3%
+
+        // and a whale buy that would exceed 2% reverts inside the swap. this
+        // contract is the (non-exempt) recipient and pays via its own callback.
+        vm.deal(address(this), 6 ether);
+        IWETH9(WETH).deposit{value: 5 ether}();
+        (address pool,,,,,) = factory.launches(token);
+        bool zeroForOne = WETH < token;
+        // V3 wraps the token's "max wallet" revert in its own "TF" on output transfer
+        vm.expectRevert(bytes("TF"));
+        IUniswapV3Pool(pool).swap(
+            address(this), zeroForOne, int256(5 ether),
+            zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
+            ""
+        );
     }
 }
 
