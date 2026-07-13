@@ -884,24 +884,28 @@ function init() {
 }
 
 // ---------------------------------------------------------------------------
-// login gate — client-side. NOTE: the page is static and its source is public,
-// so this keeps casual visitors out but is not server-grade auth. Only a
-// PBKDF2 hash of user+password is embedded, never the plaintext.
+// login gate — users create their own username + password on first visit; it
+// is stored (PBKDF2-hashed, never plaintext) in this browser. NOTE: the page is
+// static and its source is public, so this is a per-device lock, not
+// server-grade multi-user auth. Only a hash + random salt live in localStorage.
 // ---------------------------------------------------------------------------
-const GATE_HASH = '53fdbf4cec2f0354e0f37dd46bb5b2053b25c1ee36c4d3138d49fec1a981e93c';
-const GATE_SALT = 'tokenlaunch-gate-v1';
-const GATE_ITER = 150000;
+const GATE_CRED = 'gate.cred.v1';
 const GATE_FLAG = 'gate.ok.v1';
+const GATE_ITER = 150000;
 
-async function gateHash(username, password) {
+const toHex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+
+async function gateHash(username, password, saltBytes) {
   const enc = new TextEncoder();
   const keyMat = await crypto.subtle.importKey('raw', enc.encode(username + '\n' + password), 'PBKDF2', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: enc.encode(GATE_SALT), iterations: GATE_ITER, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt: saltBytes, iterations: GATE_ITER, hash: 'SHA-256' },
     keyMat, 256,
   );
-  return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return toHex(bits);
 }
+
+const loadGateCred = () => JSON.parse(localStorage.getItem(GATE_CRED) || 'null');
 
 function enterApp() {
   $('gateOverlay').classList.add('hidden');
@@ -911,21 +915,44 @@ function enterApp() {
 
 function initGate() {
   if (sessionStorage.getItem(GATE_FLAG) === '1') { enterApp(); return; }
+  const creating = !loadGateCred();
+
+  $('gateTitle').textContent = creating ? 'CREATE LOGIN' : 'LOGIN';
+  $('gateSub').textContent = creating
+    ? 'Pick a username and password to lock this launcher on this device.'
+    : 'Enter your username and password.';
+  $('gateConfirmRow').classList.toggle('hidden', !creating);
+  $('gateBtn').textContent = creating ? 'CREATE' : 'ENTER';
+
   const submit = async () => {
     $('gateErr').textContent = '';
     const u = $('gateUser').value.trim();
     const p = $('gatePass').value;
-    const h = await gateHash(u, p);
-    if (h === GATE_HASH) {
-      sessionStorage.setItem(GATE_FLAG, '1');
-      $('gatePass').value = '';
-      enterApp();
+
+    if (creating) {
+      if (u.length < 3) { $('gateErr').textContent = 'username needs 3+ characters'; return; }
+      if (p.length < 6) { $('gateErr').textContent = 'password needs 6+ characters'; return; }
+      if (p !== $('gatePass2').value) { $('gateErr').textContent = 'passwords do not match'; return; }
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const hash = await gateHash(u, p, salt);
+      localStorage.setItem(GATE_CRED, JSON.stringify({ username: u, salt: toHex(salt), hash }));
     } else {
-      $('gateErr').textContent = 'wrong username or password';
+      const cred = loadGateCred();
+      const saltBytes = Uint8Array.from(cred.salt.match(/../g).map((h) => parseInt(h, 16)));
+      const hash = await gateHash(u, p, saltBytes);
+      if (hash !== cred.hash) { $('gateErr').textContent = 'wrong username or password'; return; }
     }
+
+    sessionStorage.setItem(GATE_FLAG, '1');
+    $('gatePass').value = '';
+    if ($('gatePass2')) $('gatePass2').value = '';
+    enterApp();
   };
+
   $('gateBtn').onclick = submit;
-  $('gatePass').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  const onEnter = (e) => { if (e.key === 'Enter') submit(); };
+  $('gatePass').addEventListener('keydown', onEnter);
+  $('gatePass2').addEventListener('keydown', onEnter);
   $('gateUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('gatePass').focus(); });
   $('gateUser').focus();
 }
