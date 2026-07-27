@@ -53,6 +53,140 @@ const FACTORY_ABI = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// Pons v2 (docs.ponsfamily.com/v2) — different family from Noxa. Launches go
+// through launchToken(params, launchConfigId, pairToken) with an economics pin
+// read from previewLaunchEconomics() to stop config front-running. No initial
+// buy in the launch tx — dev buys are a separate buy() on the returned curve.
+// Fees accrue per-recipient in the Fee Escrow: claim() native, claimToken(erc20).
+// ABI transcribed from the docs; verify against the published ABI on deploy.
+// ---------------------------------------------------------------------------
+const PONS_FACTORY_ABI = [
+  {
+    type: 'function', name: 'launchToken', stateMutability: 'payable',
+    inputs: [
+      {
+        name: 'params', type: 'tuple', components: [
+          { name: 'name', type: 'string' },
+          { name: 'symbol', type: 'string' },
+          { name: 'logo', type: 'string' },
+          { name: 'description', type: 'string' },
+          {
+            name: 'socials', type: 'tuple', components: [
+              { name: 'twitter', type: 'string' },
+              { name: 'telegram', type: 'string' },
+              { name: 'discord', type: 'string' },
+              { name: 'website', type: 'string' },
+              { name: 'farcaster', type: 'string' },
+            ],
+          },
+          { name: 'creatorFeeRecipient', type: 'address' },
+          { name: 'creatorTaxBps', type: 'uint16' },
+          { name: 'buybackEnabled', type: 'bool' },
+          { name: 'expectedEconomics', type: 'bytes32' },
+        ],
+      },
+      { name: 'launchConfigId', type: 'uint256' },
+      { name: 'pairToken', type: 'address' },
+    ],
+    outputs: [{ name: 'token', type: 'address' }, { name: 'curve', type: 'address' }],
+  },
+  { type: 'function', name: 'launchFee', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'launchEnabled', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+  { type: 'function', name: 'maxCreatorTaxBps', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  {
+    type: 'function', name: 'previewLaunchEconomics', stateMutability: 'view',
+    inputs: [{ name: 'configId', type: 'uint256' }, { name: 'pairToken', type: 'address' }],
+    outputs: [{ type: 'bytes32' }],
+  },
+];
+
+const PONS_CURVE_ABI = [
+  {
+    type: 'function', name: 'buy', stateMutability: 'payable',
+    inputs: [
+      { name: 'quoteIn', type: 'uint256' },
+      { name: 'minTokensOut', type: 'uint256' },
+      { name: 'recipient', type: 'address' },
+    ],
+    outputs: [{ name: 'tokensOut', type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'sell', stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'tokensIn', type: 'uint256' },
+      { name: 'minQuoteOut', type: 'uint256' },
+      { name: 'recipient', type: 'address' },
+    ],
+    outputs: [{ name: 'quoteOut', type: 'uint256' }],
+  },
+];
+
+const PONS_ESCROW_ABI = [
+  { type: 'function', name: 'claim', inputs: [], outputs: [], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'claimToken', inputs: [{ name: 'token', type: 'address' }], outputs: [], stateMutability: 'nonpayable' },
+];
+
+// ---------------------------------------------------------------------------
+// Rialto (varo.rialto.xyz) — chain 4663, same chain as our other pads, but a
+// PERMISSIONED launchpad: launches are Rialto-signed intents, not open factory
+// calls. Flow reverse-engineered from the live web app bundle + a live launch:
+//
+//   1. SIWE-authenticate the wallet  POST /auth/challenge {wallet}
+//                                     -> sign message, POST /auth/verify -> JWT
+//   2. Upload the image             POST /assets/images (multipart) -> { url }
+//   3. Ask Rialto to build+sign the intent
+//                          POST /intents/create-token {name,symbol,image_uri,
+//                          quote_token,fee_recipients,request_id}
+//      -> { params, authorization, signature, transaction }. The pool economics
+//         (tick, sqrtPrice, supply) are computed server-side from the chosen
+//         quote token and baked into the signed intent; authorized by Rialto's
+//         backend signer and valid ~6 min.
+//   4. Submit the returned transaction (to = intent executor) from the wallet.
+//      On-chain: executeLaunch(params, authorization, signature) -> (token, locker).
+//
+// A launch CANNOT be produced without Rialto co-signing — unlike the
+// permissionless Noxa/Pons factories.
+// ---------------------------------------------------------------------------
+const RIALTO_API = 'https://varo.rialto.xyz/api/v1';
+const TRANSFER_TOPIC = keccak256(stringToBytes('Transfer(address,address,uint256)'));
+
+// executeLaunch(params, authorization, bytes signature) -> (token, locker).
+// Kept for pre-send eth_call (to read the launched token) and reference; the
+// actual submission relays Rialto's own pre-built calldata verbatim.
+const RIALTO_EXECUTOR_ABI = [
+  {
+    type: 'function', name: 'executeLaunch', stateMutability: 'nonpayable',
+    inputs: [
+      {
+        name: 'params', type: 'tuple', components: [
+          { name: 'name', type: 'string' },
+          { name: 'symbol', type: 'string' },
+          { name: 'imageURI', type: 'string' },
+          { name: 'creator', type: 'address' },
+          { name: 'saltNonce', type: 'uint32' },
+          { name: 'feeWallets', type: 'address[]' },     // creator-fee split targets
+          { name: 'feeSharesBps', type: 'uint16[]' },     // bps, sums to 10000
+          { name: 'supply', type: 'uint256' },
+          { name: 'initialTick', type: 'int24' },
+          { name: 'initialSqrtPriceX96', type: 'uint160' },
+          { name: 'protocolFeeBps', type: 'uint16' },
+          { name: 'quoteAsset', type: 'address' },        // WETH / USDG / NVDA / SPCX …
+        ],
+      },
+      {
+        name: 'authorization', type: 'tuple', components: [
+          { name: 'authorizer', type: 'address' },
+          { name: 'validAfter', type: 'uint48' },
+          { name: 'validBefore', type: 'uint48' },
+        ],
+      },
+      { name: 'signature', type: 'bytes' },
+    ],
+    outputs: [{ name: 'token', type: 'address' }, { name: 'locker', type: 'address' }],
+  },
+];
+
 const LOCKER_ABI = [
   // Noxa lockers use collectFees, RobinFun's fork renamed it claimFees —
   // pick via pad.claimFn. Both are permissionless; fees route to devWallet.
@@ -116,6 +250,43 @@ const PADS = [
     site: (t) => `https://fun.noxa.fi/robinhood/token/${t}`,
     nativeSymbol: 'ETH',
     curve: ROBINHOOD_CURVE,
+  },
+  {
+    // Pons v2 — configured per docs.ponsfamily.com/v2 (2026-07-26). Addresses
+    // are NOT published yet ("v2 addresses are not published yet … audits in
+    // progress") and the docs say to treat v2 as unaudited until reports land.
+    // To go live: fill factory + escrow (locker = escrow so claimPad works),
+    // confirm chainId/rpc (docs imply Ethereum + Uniswap v4), set startBlock,
+    // diff PONS_FACTORY_ABI against the published ABI, then enabled: true.
+    // shown but disabled ("soon") — addresses unpublished / audits in progress
+    id: 'pons-v2', label: 'Pons v2', vm: 'evm', enabled: false, family: 'pons-v2',
+    chainId: 1, rpc: '',
+    factory: '', escrow: '', locker: '',
+    launchConfigId: 0n,                                     // from getLaunchConfig / launchConfigCount
+    pairToken: '0x0000000000000000000000000000000000000000', // zero = native ETH pair
+    creatorTaxBps: 0,                                        // optional extra tax, capped by maxCreatorTaxBps()
+    buybackEnabled: false,
+    startBlock: 0n,
+    explorer: 'https://etherscan.io',
+    site: (t) => `https://etherscan.io/token/${t}`,
+    nativeSymbol: 'ETH',
+    curve: null, // bonding-curve params unpublished — no dev-buy preview yet
+  },
+  {
+    // Rialto · Robinhood — pair your token against a stock/ETF (NVDA, SPCX, …)
+    // or WETH/USDG. Addresses from GET https://varo.rialto.xyz/api/v1/config.
+    // Permissioned: launches are Rialto-signed intents — see launchRialto().
+    id: 'rialto-robinhood', label: 'Rialto · Stocks', vm: 'evm', enabled: true, family: 'rialto',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    executor: '0x1FaE6f162355cF77Bf7f23cb919130962dAd4Ecb',   // intent executor (tx target)
+    launchpad: '0x851153fe84239C2dC55fa191aC2f099e20a6d0b8',
+    configUrl: `${RIALTO_API}/config`,
+    startBlock: 20800000n,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://varo.rialto.xyz/launches/${t}`,
+    nativeSymbol: 'ETH',
+    curve: null,                 // economics are server-computed per quote token
+    quoteToken: null,            // chosen from the pair-token dropdown (config.quotes)
   },
   { id: 'noxa-monad',    label: 'Noxa · Monad',   vm: 'evm', enabled: false, chainId: 143,  rpc: '', factory: '0x7F03effbd7ceB22A3f80Dd468f67eF27826acD85', nativeSymbol: 'MON' },
   { id: 'noxa-megaeth',  label: 'Noxa · MegaETH', vm: 'evm', enabled: false, chainId: 4326, rpc: '', factory: '0xAc303930F2f7A78BBB037f3f4622Bd02f5545B9a', nativeSymbol: 'ETH' },
@@ -285,8 +456,29 @@ async function launch() {
   }
   if (dists.length && selectedChip < 0) throw new Error('distribution needs a dev buy (that is where the tokens come from)');
 
+  // Rialto hosts + hashes its own image, so it skips the IPFS upload entirely
+  if (pad.family === 'rialto') {
+    const { token, pub, wallet } = await launchRialto(pad, {
+      name, symbol, description, twitter, website, feeRecipient,
+    });
+    if (token && dists.length) await runDistributions(pad, pub, wallet, token, dists, $('status'));
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
   setStatus('uploading image to IPFS...');
   const logo = await uploadToIpfs(logoBlob);
+
+  if (pad.family === 'pons-v2') {
+    const { token, pub, wallet } = await launchPonsV2(pad, {
+      name, symbol, logo, description, twitter, website, feeRecipient, devBuy,
+    });
+    if (token && dists.length) await runDistributions(pad, pub, wallet, token, dists, $('status'));
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
 
   const pub = publicClientFor(pad);
   const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
@@ -339,6 +531,244 @@ async function launch() {
 }
 
 // ---------------------------------------------------------------------------
+// Rialto
+// ---------------------------------------------------------------------------
+let rialtoConfig = null; // cached GET /config (quote tokens, executor, fees)
+
+async function loadRialtoConfig(pad) {
+  if (rialtoConfig) return rialtoConfig;
+  const r = await fetch(pad.configUrl, { headers: { 'Content-Type': 'application/json' } });
+  if (!r.ok) throw new Error(`Rialto config unavailable (${r.status})`);
+  rialtoConfig = await r.json();
+  return rialtoConfig;
+}
+
+// SIWE: challenge -> sign with the in-app key -> verify -> bearer JWT. Fits the
+// app's model — the key signs the login message client-side, nothing leaves the
+// device but the signature.
+async function rialtoAuth(pad) {
+  const base = RIALTO_API;
+  const ch = await (await fetch(`${base}/auth/challenge`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ wallet: account.address }),
+  })).json();
+  if (!ch.message || !ch.nonce) throw new Error('Rialto auth challenge failed');
+  const signature = await account.signMessage({ message: ch.message });
+  const vr = await fetch(`${base}/auth/verify`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ wallet: account.address, signature, nonce: ch.nonce }),
+  });
+  if (!vr.ok) throw new Error(`Rialto auth failed (${vr.status})`);
+  const { token } = await vr.json();
+  if (!token) throw new Error('Rialto auth returned no token');
+  return token;
+}
+
+// Upload the logo to Rialto's asset store (they host + hash it); returns the URL
+// used as image_uri in the intent request.
+async function rialtoUploadImage(jwt, blob) {
+  const fd = new FormData();
+  fd.append('image', new File([blob], 'logo.' + (blob.type === 'image/gif' ? 'gif' : 'png'), { type: blob.type }));
+  const r = await fetch(`${RIALTO_API}/assets/images`, {
+    method: 'POST', headers: { authorization: `Bearer ${jwt}` }, body: fd,
+  });
+  if (!r.ok) throw new Error(`Rialto image upload failed (${r.status})`);
+  const { url } = await r.json();
+  if (!url) throw new Error('Rialto image upload returned no url');
+  return url;
+}
+
+// Ask Rialto to build + sign the launch intent. Returns
+// { params, authorization, signature, transaction } where transaction is the
+// ready-to-send executeLaunch calldata (to = intent executor, value = 0).
+async function rialtoCreateLaunch(jwt, body) {
+  const r = await fetch(`${RIALTO_API}/intents/create-token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${jwt}` },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let msg = `Rialto launch build failed (${r.status})`;
+    try { const e = await r.json(); if (e.message) msg = e.message; } catch { /* keep default */ }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+async function launchRialto(pad, inp) {
+  if (!pad.quoteToken) throw new Error('pick a token to pair against first');
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  setStatus('authenticating with Rialto (signing login message)...');
+  const jwt = await rialtoAuth(pad);
+
+  setStatus('uploading image to Rialto...');
+  const imageUrl = await rialtoUploadImage(jwt, logoBlob);
+
+  setStatus('requesting signed launch intent from Rialto...');
+  const built = await rialtoCreateLaunch(jwt, {
+    request_id: crypto.randomUUID(),
+    name: inp.name,
+    symbol: inp.symbol,
+    image_uri: imageUrl,
+    quote_token: pad.quoteToken,
+    fee_recipients: [{ wallet: inp.feeRecipient, share_bps: 10000 }],
+  });
+  const tx = built.transaction;
+  if (!tx?.to || !tx?.data) throw new Error('Rialto returned no launch transaction');
+  if (tx.to.toLowerCase() !== pad.executor.toLowerCase()) {
+    throw new Error('Rialto launch target is not the expected intent executor');
+  }
+
+  // read the token/locker the launch will mint via a pre-send eth_call
+  let token;
+  try {
+    const { data } = await pub.call({ to: tx.to, data: tx.data, account });
+    if (data && data.length >= 66) token = '0x' + data.slice(26, 66);
+  } catch { /* fall back to log parsing after the receipt */ }
+
+  setStatus('sending launch tx...');
+  const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: 0n });
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error('tx reverted: ' + hash);
+
+  // if the pre-send call didn't yield the token, recover it from the mint log
+  // (the ERC-20 Transfer from the zero address in this receipt)
+  if (!token) {
+    const ZERO_TOPIC = '0x' + '0'.repeat(64);
+    const mint = receipt.logs.find((l) =>
+      l.topics[0] === TRANSFER_TOPIC && l.topics[1] === ZERO_TOPIC);
+    token = mint?.address;
+  }
+  if (token) rememberLaunch(pad, token, inp.symbol);
+
+  const el = $('status');
+  el.innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token || ''}<br>` +
+    (token && pad.site ? `<a href="${pad.site(token)}" target="_blank" rel="noopener">view on Rialto</a> · ` : '') +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a>`;
+  return { token, pub, wallet };
+}
+
+// populate the pair-against dropdown from Rialto's enabled quote tokens
+async function refreshRialtoQuotes(pad) {
+  const sel = $('quoteSelect');
+  const hint = $('quoteHint');
+  sel.innerHTML = '<option>loading…</option>';
+  hint.textContent = '';
+  try {
+    const cfg = await loadRialtoConfig(pad);
+    const quotes = (cfg.quotes || []).filter((q) => q.enabled);
+    sel.innerHTML = '';
+    for (const q of quotes) {
+      const o = document.createElement('option');
+      o.value = q.address;
+      o.textContent = q.symbol + (q.usd_price ? ` (~$${(+q.usd_price).toLocaleString()})` : '');
+      sel.appendChild(o);
+    }
+    // default to the first stock-like quote if present, else config default
+    const def = cfg.default_quote || (quotes[0] && quotes[0].address);
+    sel.value = pad.quoteToken || def || '';
+    pad.quoteToken = sel.value;
+    updateRialtoHint(pad);
+  } catch (e) {
+    sel.innerHTML = '<option>unavailable</option>';
+    hint.textContent = e.message;
+  }
+}
+
+function updateRialtoHint(pad) {
+  const cfg = rialtoConfig;
+  const q = cfg && (cfg.quotes || []).find((x) => x.address === pad.quoteToken);
+  if (!q) { $('quoteHint').textContent = ''; return; }
+  const fdv = q.target_initial_fdv_quote_units
+    ? (Number(q.target_initial_fdv_quote_units) / 10 ** q.decimals) : null;
+  $('quoteHint').textContent =
+    `pooled with ${q.symbol}` + (fdv ? ` · starting FDV ≈ ${fdv.toLocaleString()} ${q.symbol}` : '');
+}
+
+// pons v2 launch: pre-launch checks -> economics pin -> launchToken -> dev buy
+// on the returned curve (v2 has no initial-buy param in the launch tx itself)
+async function launchPonsV2(pad, inp) {
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  setStatus('running pre-launch checks...');
+  const [enabled, fee, maxTax] = await Promise.all([
+    pub.readContract({ address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'launchEnabled' }),
+    pub.readContract({ address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'launchFee' }),
+    pub.readContract({ address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'maxCreatorTaxBps' }),
+  ]);
+  if (!enabled) throw new Error('pons v2 launches are currently paused');
+  const creatorTaxBps = Math.min(pad.creatorTaxBps || 0, Number(maxTax));
+
+  // economics pin — makes the tx revert if the protocol changes fee economics
+  // between this read and inclusion (the docs' front-running protection)
+  const expectedEconomics = await pub.readContract({
+    address: pad.factory, abi: PONS_FACTORY_ABI,
+    functionName: 'previewLaunchEconomics', args: [pad.launchConfigId, pad.pairToken],
+  });
+
+  const value = fee + inp.devBuy;
+  const bal = await pub.getBalance({ address: account.address });
+  if (bal < value) throw new Error(`insufficient balance: need ${formatEther(value)}+gas, have ${formatEther(bal)} ${pad.nativeSymbol}`);
+
+  const params = {
+    name: inp.name, symbol: inp.symbol, logo: inp.logo, description: inp.description,
+    socials: { twitter: inp.twitter, telegram: '', discord: '', website: inp.website, farcaster: '' },
+    creatorFeeRecipient: inp.feeRecipient,
+    creatorTaxBps,
+    buybackEnabled: !!pad.buybackEnabled,
+    expectedEconomics,
+  };
+  const args = [params, pad.launchConfigId, pad.pairToken];
+
+  // simulate first: surfaces reverts with a readable message and gives us the
+  // (token, curve) return values, which writeContract alone can't
+  setStatus('simulating launch...');
+  const { result: [token, curve] } = await pub.simulateContract({
+    address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'launchToken',
+    args, value: fee, account,
+  });
+
+  setStatus('sending launch tx...');
+  const hash = await wallet.writeContract({
+    address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'launchToken', args, value: fee,
+  });
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error('tx reverted: ' + hash);
+  rememberLaunch(pad, token, inp.symbol);
+
+  let buyNote = '';
+  if (inp.devBuy > 0n) {
+    setStatus('launched — sending dev buy on the curve...');
+    try {
+      // native pair: quoteIn must equal sent value; minTokensOut 0 is safe as
+      // the first buy on a fresh curve
+      const buyHash = await wallet.writeContract({
+        address: curve, abi: PONS_CURVE_ABI, functionName: 'buy',
+        args: [inp.devBuy, 0n, account.address], value: inp.devBuy,
+      });
+      const buyRcpt = await pub.waitForTransactionReceipt({ hash: buyHash, confirmations: 1 });
+      buyNote = buyRcpt.status === 'success'
+        ? ' · dev buy ✓'
+        : ' · <span class="err">dev buy reverted</span>';
+    } catch (e) {
+      buyNote = ` · <span class="err">dev buy failed (${e.shortMessage || e.message})</span>`;
+    }
+  }
+
+  const el = $('status');
+  el.innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}${buyNote}<br>` +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a>`;
+  return { token, curve, pub, wallet };
+}
+
+// ---------------------------------------------------------------------------
 // dev-buy chips — editable presets, persisted
 // ---------------------------------------------------------------------------
 const CHIPS_KEY = 'buyChips.v1';
@@ -350,7 +780,9 @@ function selectedBuyAmount() {
 }
 
 function padSupply(pad) {
-  if (!pad.customSupply) return pad.curve.supply;
+  // pads without published curve params (pons v2) fall back to 1e9 so
+  // %-based distributions still resolve to something sane
+  if (!pad.customSupply) return pad.curve?.supply ?? 1e9;
   const raw = +($('supply').value.trim().replace(/,/g, '')) || 1e9;
   return raw;
 }
@@ -607,6 +1039,12 @@ function rememberLaunch(pad, token, symbol) {
 }
 
 async function discoverMyTokens(pad) {
+  // pons v2's TokenLaunched field layout isn't published yet — rely on the
+  // local launch memory until the ABI lands and this can filter logs too
+  if (pad.family === 'pons-v2') return [];
+  // Rialto has no per-token locker in this app; discovery is via its API, and
+  // fee claiming isn't wired — fall back to local memory only
+  if (pad.family === 'rialto') return [];
   // TokenLaunched has deployer indexed — one filtered getLogs finds all ours
   const pub = publicClientFor(pad);
   const logs = await pub.getLogs({
@@ -663,6 +1101,9 @@ async function claimAllFees(btn) {
   const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
   if (!account) { say('unlock wallet first', true); return; }
   const pad = claimPad();
+  // pons v2 escrow aggregates all fees per recipient — one claim() covers
+  // every launch, no per-token loop needed
+  if (pad.family === 'pons-v2') { await claimFees(pad, null, btn); return; }
   btn.disabled = true;
   try {
     const pub = publicClientFor(pad);
@@ -714,9 +1155,15 @@ async function claimFees(pad, token, btn) {
     const pub = publicClientFor(pad);
     const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
     say('claiming fees…');
-    const hash = await wallet.writeContract({
-      address: pad.locker, abi: LOCKER_ABI, functionName: pad.claimFn, args: [token],
-    });
+    // pons v2: native fees via escrow.claim(); pass a token address to claim
+    // ERC-20 balances (custom pairs / released buyback vests) instead
+    const hash = pad.family === 'pons-v2'
+      ? await wallet.writeContract(token
+        ? { address: pad.escrow, abi: PONS_ESCROW_ABI, functionName: 'claimToken', args: [token] }
+        : { address: pad.escrow, abi: PONS_ESCROW_ABI, functionName: 'claim' })
+      : await wallet.writeContract({
+        address: pad.locker, abi: LOCKER_ABI, functionName: pad.claimFn, args: [token],
+      });
     say(`tx sent: ${hash}\nwaiting…`);
     const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
     if (receipt.status !== 'success') throw new Error('tx reverted');
@@ -749,6 +1196,8 @@ function renderPads() {
     b.onclick = () => {
       activePad = pad;
       $('supplyRow').classList.toggle('hidden', !pad.customSupply);
+      $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
+      if (pad.family === 'rialto') refreshRialtoQuotes(pad);
       renderPads(); renderBuyChips(); refreshFeeNote(); refreshBalance(); renderTokenList();
     };
     box.appendChild(b);
@@ -757,6 +1206,11 @@ function renderPads() {
 
 async function refreshFeeNote() {
   if (!activePad.enabled) return;
+  if (activePad.family === 'rialto') {
+    const bps = rialtoConfig?.initial_protocol_fee_bps ?? 3000;
+    $('feeNote').textContent = `Rialto protocol fee ${(bps / 100).toFixed(1)}% on trades + gas`;
+    return;
+  }
   try {
     const fee = await publicClientFor(activePad).readContract({
       address: activePad.factory, abi: FACTORY_ABI, functionName: 'launchFee',
@@ -821,7 +1275,13 @@ function init() {
   renderBuyChips();
   refreshFeeNote();
   $('supplyRow').classList.toggle('hidden', !activePad.customSupply);
+  $('quoteRow').classList.toggle('hidden', activePad.family !== 'rialto');
+  if (activePad.family === 'rialto') refreshRialtoQuotes(activePad);
   $('supply').addEventListener('input', updateBuyPreview);
+  $('quoteSelect').addEventListener('change', () => {
+    activePad.quoteToken = $('quoteSelect').value;
+    updateRialtoHint(activePad);
+  });
 
   $('distToggle').onclick = toggleDistro;
   $('distAdd').onclick = () => $('distRows').appendChild(distRow());

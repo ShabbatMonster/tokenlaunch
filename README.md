@@ -28,6 +28,49 @@ the key never leaves the device — only signed transactions go out, straight to
 
 Both share the same `launchToken` ABI and the same launch buy curve.
 
+## Pending pads
+
+## Rialto · Stocks (live)
+
+[varo.rialto.xyz](https://varo.rialto.xyz), chain 4663 — pair your token against a
+**tokenized stock/ETF** (NVDA, SPCX) or WETH/USDG instead of ETH. Pick the pair in
+the "PAIR AGAINST" dropdown (populated live from `GET /api/v1/config`).
+
+Rialto is a **permissioned** launchpad, not an open factory — reverse-engineered from
+the live web app bundle. A launch is a Rialto-signed *intent*; the whole flow the app
+drives:
+
+1. **SIWE auth** — `POST /auth/challenge {wallet}` → sign the message with the imported
+   key → `POST /auth/verify {wallet,signature,nonce}` → JWT.
+2. **Image** — `POST /assets/images` (multipart) → hosted URL (skips IPFS for Rialto).
+3. **Signed intent** — `POST /intents/create-token {name,symbol,image_uri,quote_token,
+   fee_recipients,request_id}` → `{ signature, valid_after, valid_before, transaction }`.
+   The pool economics (tick, sqrtPrice, supply) are computed server-side per quote token
+   and baked into the signed intent; authorized by Rialto's backend signer and valid ~6 min.
+4. **Submit** — send the returned `transaction` (to = intent executor
+   `0x1FaE6f16…dAd4Ecb`) from the wallet. On-chain:
+   `executeLaunch(params, authorization, signature)` → `(token, locker)`. Launchpad
+   `0x851153fe…20a6d0b8`.
+
+The full flow (auth → upload → signed intent) is verified end-to-end against the live
+API. Fee claiming isn't wired (Rialto uses per-launch lockers, not the Noxa
+`claimFees`/`collectFees` model), so launches don't appear under "MY TOKENS · CLAIM
+FEES" for this pad.
+
+## Pending pads
+
+- **Pons v2** ([docs.ponsfamily.com/v2](https://docs.ponsfamily.com/v2)) — wired up
+  but `enabled: false`: v2 contract addresses aren't published yet (three audits in
+  progress; docs say treat as unaudited until reports close). Different family from
+  Noxa: `launchToken(params, launchConfigId, pairToken)` with an economics pin from
+  `previewLaunchEconomics()`, optional `creatorTaxBps` (capped by
+  `maxCreatorTaxBps()`), dev buys as a separate `buy()` on the returned bonding
+  curve, and fee claims through the Fee Escrow (`claim()` native /
+  `claimToken(addr)` ERC-20) instead of a per-token locker. To go live, fill in
+  `factory`/`escrow`/`rpc`/`startBlock` on the `pons-v2` entry in `src/main.js`,
+  diff `PONS_FACTORY_ABI` against the published ABI, and flip `enabled`.
+  Integration/testnet contact: contact@ponsfamily.com.
+
 More Noxa chains (Monad, MegaETH, …) share the same factory ABI — flip `enabled: true`
 in `PADS` in `src/main.js` and add an RPC. Solana pads (pump.fun etc.) are stubbed in
 the registry; the vault already stores a SOL key for when they're wired up.
