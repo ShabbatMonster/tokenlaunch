@@ -4,3 +4,6 @@ deployer.key
 lib/
 out/
 cache/
+
+# built site — not published (private/local use). Regenerate with: npm run build
+docs/

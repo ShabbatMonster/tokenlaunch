@@ -1,38 +1,16 @@
 // Trade page: buy/sell a Meteora DBC token with SOL via the router in
-// ./solana.js (Jupiter leg + DBC curve leg). Reuses the launcher's vault
-// (vault.v1) and gate (gate.cred.v1). Browser-native here; the heavy web3.js +
-// SDK come from the lazily-imported solana.js bundle.
+// ./solana.js (Jupiter leg + DBC curve leg). Private/local tool — no login gate,
+// no password: the SOL key is read from the plaintext local store (keys.v1,
+// shared with the launcher). The heavy web3.js + SDK come from the lazily-
+// imported solana.js bundle.
 const SOL_RPC = 'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea';
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// ---------------------------------------------------------------------------
-// vault (shared scheme with the launcher)
-// ---------------------------------------------------------------------------
-const VAULT_KEY = 'vault.v1';
-const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-async function deriveAesKey(password, salt) {
-  const raw = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 310000, hash: 'SHA-256' },
-    raw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
-  );
-}
-async function decryptSecret(password, blob) {
-  const key = await deriveAesKey(password, unb64(blob.salt));
-  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(blob.iv) }, key, unb64(blob.ct));
-  return new TextDecoder().decode(pt);
-}
-const loadVault = () => JSON.parse(localStorage.getItem(VAULT_KEY) || 'null');
+const KEYS_KEY = 'keys.v1';
+const loadKeys = () => { try { return JSON.parse(localStorage.getItem(KEYS_KEY) || 'null'); } catch { return null; } };
 
-// session unlock cache (shared with the launcher): decrypted keys held only for
-// the tab session so navigating here doesn't re-prompt for the password
-const SESSION_KEYS = 'session.keys.v1';
-const loadSession = () => { try { return JSON.parse(sessionStorage.getItem(SESSION_KEYS) || 'null'); } catch { return null; } };
-const saveSession = (obj) => sessionStorage.setItem(SESSION_KEYS, JSON.stringify({ ...(loadSession() || {}), ...obj }));
-
-// ---------------------------------------------------------------------------
 // base58 -> SOL pubkey (to show the address without loading the heavy bundle)
-// ---------------------------------------------------------------------------
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 function base58Decode(s) {
   const bytes = [0];
@@ -68,54 +46,6 @@ function solPubkey(secret) {
 const isSolAddress = (s) => { try { return base58Decode(s.trim()).length === 32; } catch { return false; } };
 
 // ---------------------------------------------------------------------------
-// gate (shared credential with the launcher)
-// ---------------------------------------------------------------------------
-const GATE_CRED = 'gate.cred.v1';
-const GATE_FLAG = 'gate.ok.v1';
-const GATE_ITER = 150000;
-const toHex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
-async function gateHash(username, password, saltBytes) {
-  const keyMat = await crypto.subtle.importKey('raw', new TextEncoder().encode(username + '\n' + password), 'PBKDF2', false, ['deriveBits']);
-  return toHex(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: saltBytes, iterations: GATE_ITER, hash: 'SHA-256' }, keyMat, 256));
-}
-const loadGateCred = () => JSON.parse(localStorage.getItem(GATE_CRED) || 'null');
-
-function initGate(onPass) {
-  if (sessionStorage.getItem(GATE_FLAG) === '1') { onPass(); return; }
-  const creating = !loadGateCred();
-  $('gateTitle').textContent = creating ? 'CREATE LOGIN' : 'LOGIN';
-  $('gateSub').textContent = creating
-    ? 'Pick a username and password to lock this page on this device.'
-    : 'Enter your username and password.';
-  $('gateConfirmRow').classList.toggle('hidden', !creating);
-  $('gateBtn').textContent = creating ? 'CREATE' : 'ENTER';
-  const submit = async () => {
-    $('gateErr').textContent = '';
-    const u = $('gateUser').value.trim();
-    const p = $('gatePass').value;
-    if (creating) {
-      if (u.length < 3) { $('gateErr').textContent = 'username needs 3+ characters'; return; }
-      if (p.length < 6) { $('gateErr').textContent = 'password needs 6+ characters'; return; }
-      if (p !== $('gatePass2').value) { $('gateErr').textContent = 'passwords do not match'; return; }
-      const salt = crypto.getRandomValues(new Uint8Array(16));
-      localStorage.setItem(GATE_CRED, JSON.stringify({ username: u, salt: toHex(salt), hash: await gateHash(u, p, salt) }));
-    } else {
-      const cred = loadGateCred();
-      const saltBytes = Uint8Array.from(cred.salt.match(/../g).map((h) => parseInt(h, 16)));
-      if ((await gateHash(u, p, saltBytes)) !== cred.hash) { $('gateErr').textContent = 'wrong username or password'; return; }
-    }
-    sessionStorage.setItem(GATE_FLAG, '1');
-    $('gateOverlay').classList.add('hidden');
-    onPass();
-  };
-  $('gateBtn').onclick = submit;
-  const onEnter = (e) => { if (e.key === 'Enter') submit(); };
-  $('gatePass').addEventListener('keydown', onEnter);
-  $('gatePass2').addEventListener('keydown', onEnter);
-  $('gateUser').focus();
-}
-
-// ---------------------------------------------------------------------------
 // trade state
 // ---------------------------------------------------------------------------
 let solSecret = null;
@@ -126,39 +56,6 @@ let router = null;      // lazily imported ./solana.js
 
 const loadRouter = async () => (router ||= await import('./solana.js'));
 const slippageBps = () => Math.max(1, Math.round((+$('slippage').value || 1.5) * 100));
-
-function useSecret(secret) {
-  solSecret = secret;
-  solAddr = solPubkey(secret);
-  $('unlockOverlay').classList.add('hidden');
-  $('walletAddr').textContent = solAddr.slice(0, 4) + '…' + solAddr.slice(-4);
-  refreshSolBalance();
-}
-
-async function doUnlock() {
-  $('unlockErr').textContent = '';
-  const vault = loadVault();
-  if (!vault?.sol) { $('unlockErr').textContent = 'no SOL key in this wallet — add one in the launcher (🔑 keys)'; return; }
-  try {
-    const pass = $('unlockPass').value;
-    const sol = await decryptSecret(pass, vault.sol);
-    // cache sol (and evm if present) so other pages / reloads don't re-prompt
-    const cache = { sol };
-    if (vault.evm) { try { cache.evm = await decryptSecret(pass, vault.evm); } catch { /* ignore */ } }
-    saveSession(cache);
-    $('unlockPass').value = '';
-    useSecret(sol);
-  } catch {
-    $('unlockErr').textContent = 'wrong password';
-  }
-}
-
-// silent unlock from the session cache set on a previous unlock this session
-function trySessionUnlock() {
-  const s = loadSession();
-  if (!s?.sol) return false;
-  try { useSecret(s.sol); return true; } catch { return false; }
-}
 
 async function refreshSolBalance() {
   if (!solAddr) return;
@@ -192,10 +89,10 @@ async function resolveTokenInfo() {
     tokenInfo = await resolveToken({ rpcUrl: SOL_RPC, tokenMint: mint });
     $('tokinfo').innerHTML = tokenInfo.isMigrated
       ? '<span class="err">graduated off the curve — trade on the migrated pool</span>'
-      : `DBC pool · priced in <b>${tokenInfo.quoteSymbol}</b>`;
+      : `DBC pool · priced in <b>${esc(tokenInfo.quoteSymbol)}</b>`;
     runPreview();
   } catch (e) {
-    $('tokinfo').innerHTML = `<span class="err">${e.message}</span>`;
+    $('tokinfo').innerHTML = `<span class="err">${esc(e.message)}</span>`;
     $('go').disabled = true;
   }
 }
@@ -209,20 +106,19 @@ async function runPreview() {
   try {
     const { routerPreview } = await loadRouter();
     const p = await routerPreview({ rpcUrl: SOL_RPC, tokenMint: mint, side, uiAmount: amt, slippageBps: slippageBps() });
+    const sym = esc(tokenInfo.quoteSymbol);
     if (side === 'buy') {
       $('preview').innerHTML =
-        `<span class="route">route: SOL → ${tokenInfo.quoteSymbol} → token</span><br>` +
-        `≈ <b>${fmt(p.quoteOut, p.quoteDecimals)}</b> ${tokenInfo.quoteSymbol} → ` +
-        `you receive ≈ <b>${fmt(p.tokensOut, p.baseDecimals)}</b> tokens`;
+        `<span class="route">route: SOL → ${sym} → token</span><br>` +
+        `≈ <b>${fmt(p.quoteOut, p.quoteDecimals)}</b> ${sym} → you receive ≈ <b>${fmt(p.tokensOut, p.baseDecimals)}</b> tokens`;
     } else {
       $('preview').innerHTML =
-        `<span class="route">route: token → ${tokenInfo.quoteSymbol} → SOL</span><br>` +
-        `≈ <b>${fmt(p.quoteOut, p.quoteDecimals)}</b> ${tokenInfo.quoteSymbol} → ` +
-        `you receive ≈ <b>${fmt(p.solOut, 9)}</b> SOL`;
+        `<span class="route">route: token → ${sym} → SOL</span><br>` +
+        `≈ <b>${fmt(p.quoteOut, p.quoteDecimals)}</b> ${sym} → you receive ≈ <b>${fmt(p.solOut, 9)}</b> SOL`;
     }
     $('go').disabled = false;
   } catch (e) {
-    $('preview').innerHTML = `<span class="err">${e.message}</span>`;
+    $('preview').innerHTML = `<span class="err">${esc(e.message)}</span>`;
   }
 }
 
@@ -237,42 +133,47 @@ function setSide(s) {
 }
 
 async function go() {
-  if (!solSecret) { $('unlockOverlay').classList.remove('hidden'); return; }
+  if (!solSecret) return;
   const mint = $('token').value.trim();
   const amt = $('amount').value.trim();
   const btn = $('go');
   btn.disabled = true;
   const st = $('status');
-  const say = (m) => { st.innerHTML = m; };
+  const say = (m) => { st.innerHTML = esc(m); };
   try {
     const mod = await loadRouter();
     const opts = { rpcUrl: SOL_RPC, secretKey: solSecret, tokenMint: mint, slippageBps: slippageBps(), onStatus: say };
-    let res;
-    if (side === 'buy') res = await mod.routerBuy({ ...opts, uiSol: amt });
-    else res = await mod.routerSell({ ...opts, uiTokens: amt });
+    const res = side === 'buy'
+      ? await mod.routerBuy({ ...opts, uiSol: amt })
+      : await mod.routerSell({ ...opts, uiTokens: amt });
 
-    const link = (sig, label) => `<a href="https://solscan.io/tx/${sig}" target="_blank" rel="noopener">${label}</a>`;
+    const link = (sig, label) => `<a href="https://solscan.io/tx/${esc(sig)}" target="_blank" rel="noopener">${label}</a>`;
     st.innerHTML = side === 'buy'
       ? `<span class="ok">BOUGHT ✓</span> ≈ <b>${fmt(res.tokensOut, res.baseDecimals)}</b> tokens<br>${link(res.jupSig, 'leg 1 (Jupiter)')} · ${link(res.dbcSig, 'leg 2 (DBC)')}`
       : `<span class="ok">SOLD ✓</span> ≈ <b>${fmt(res.solOut, 9)}</b> SOL<br>${link(res.dbcSig, 'leg 1 (DBC)')} · ${link(res.jupSig, 'leg 2 (Jupiter)')}`;
     refreshSolBalance();
   } catch (e) {
-    st.innerHTML = `<span class="err">${e.message}</span>`;
+    st.innerHTML = `<span class="err">${esc(e.message)}</span>`;
   } finally {
     btn.disabled = false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// boot
+// boot — no gate, no password: read the SOL key from the plaintext store
 // ---------------------------------------------------------------------------
 function start() {
   $('appRoot').style.display = '';
-  if (!loadVault()) { $('noVault').hidden = false; $('main').style.display = 'none'; return; }
-  $('unlockBtn').onclick = doUnlock;
-  $('unlockPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') doUnlock(); });
-  if (!trySessionUnlock()) { $('unlockOverlay').classList.remove('hidden'); $('unlockPass').focus(); }
-
+  const keys = loadKeys();
+  if (!keys?.sol) { $('noVault').hidden = false; $('main').style.display = 'none'; return; }
+  try {
+    solSecret = keys.sol;
+    solAddr = solPubkey(solSecret);
+    $('walletAddr').textContent = solAddr.slice(0, 4) + '…' + solAddr.slice(-4);
+    refreshSolBalance();
+  } catch {
+    $('noVault').hidden = false; $('main').style.display = 'none'; return;
+  }
   $('buyTab').onclick = () => setSide('buy');
   $('sellTab').onclick = () => setSide('sell');
   $('token').addEventListener('input', () => { clearTimeout(previewTimer); previewTimer = setTimeout(resolveTokenInfo, 400); });
@@ -281,4 +182,4 @@ function start() {
   $('go').onclick = go;
 }
 
-initGate(start);
+start();
