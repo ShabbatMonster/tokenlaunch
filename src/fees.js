@@ -59,83 +59,14 @@ const ERC20_SYMBOL = [{ type: 'function', name: 'symbol', inputs: [], outputs: [
 const pub = createPublicClient({ chain: CHAIN, transport: http(RPC) });
 const $ = (id) => document.getElementById(id);
 
-// ---------------------------------------------------------------------------
-// vault (shared with the launcher: same localStorage key + scheme)
-// ---------------------------------------------------------------------------
-const VAULT_KEY = 'vault.v1';
-const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-async function deriveAesKey(password, salt) {
-  const raw = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 310000, hash: 'SHA-256' },
-    raw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
-  );
-}
-async function decryptSecret(password, blob) {
-  const key = await deriveAesKey(password, unb64(blob.salt));
-  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(blob.iv) }, key, unb64(blob.ct));
-  return new TextDecoder().decode(pt);
-}
-const loadVault = () => JSON.parse(localStorage.getItem(VAULT_KEY) || 'null');
-
-// session unlock cache (shared with the launcher): decrypted keys held only for
-// the tab session so navigating here doesn't re-prompt for the password
-const SESSION_KEYS = 'session.keys.v1';
-const loadSession = () => { try { return JSON.parse(sessionStorage.getItem(SESSION_KEYS) || 'null'); } catch { return null; } };
-const saveSession = (obj) => sessionStorage.setItem(SESSION_KEYS, JSON.stringify({ ...(loadSession() || {}), ...obj }));
+// keys are stored in plaintext (shared with the launcher: keys.v1) — private/
+// local tool, no password, no login gate
+const KEYS_KEY = 'keys.v1';
+const loadKeys = () => { try { return JSON.parse(localStorage.getItem(KEYS_KEY) || 'null'); } catch { return null; } };
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // ---------------------------------------------------------------------------
-// login gate (shared credential with the launcher: gate.cred.v1 / gate.ok.v1)
-// ---------------------------------------------------------------------------
-const GATE_CRED = 'gate.cred.v1';
-const GATE_FLAG = 'gate.ok.v1';
-const GATE_ITER = 150000;
-const toHex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
-async function gateHash(username, password, saltBytes) {
-  const enc = new TextEncoder();
-  const keyMat = await crypto.subtle.importKey('raw', enc.encode(username + '\n' + password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: saltBytes, iterations: GATE_ITER, hash: 'SHA-256' }, keyMat, 256);
-  return toHex(bits);
-}
-const loadGateCred = () => JSON.parse(localStorage.getItem(GATE_CRED) || 'null');
-
-function initGate(onPass) {
-  if (sessionStorage.getItem(GATE_FLAG) === '1') { onPass(); return; }
-  const creating = !loadGateCred();
-  $('gateTitle').textContent = creating ? 'CREATE LOGIN' : 'LOGIN';
-  $('gateSub').textContent = creating
-    ? 'Pick a username and password to lock this page on this device.'
-    : 'Enter your username and password.';
-  $('gateConfirmRow').classList.toggle('hidden', !creating);
-  $('gateBtn').textContent = creating ? 'CREATE' : 'ENTER';
-  const submit = async () => {
-    $('gateErr').textContent = '';
-    const u = $('gateUser').value.trim();
-    const p = $('gatePass').value;
-    if (creating) {
-      if (u.length < 3) { $('gateErr').textContent = 'username needs 3+ characters'; return; }
-      if (p.length < 6) { $('gateErr').textContent = 'password needs 6+ characters'; return; }
-      if (p !== $('gatePass2').value) { $('gateErr').textContent = 'passwords do not match'; return; }
-      const salt = crypto.getRandomValues(new Uint8Array(16));
-      localStorage.setItem(GATE_CRED, JSON.stringify({ username: u, salt: toHex(salt), hash: await gateHash(u, p, salt) }));
-    } else {
-      const cred = loadGateCred();
-      const saltBytes = Uint8Array.from(cred.salt.match(/../g).map((h) => parseInt(h, 16)));
-      if ((await gateHash(u, p, saltBytes)) !== cred.hash) { $('gateErr').textContent = 'wrong username or password'; return; }
-    }
-    sessionStorage.setItem(GATE_FLAG, '1');
-    $('gateOverlay').classList.add('hidden');
-    onPass();
-  };
-  $('gateBtn').onclick = submit;
-  const onEnter = (e) => { if (e.key === 'Enter') submit(); };
-  $('gatePass').addEventListener('keydown', onEnter);
-  $('gatePass2').addEventListener('keydown', onEnter);
-  $('gateUser').focus();
-}
-
-// ---------------------------------------------------------------------------
-// wallet unlock (pays gas; fees still route to the recipient)
+// wallet (pays gas; fees still route to the recipient)
 // ---------------------------------------------------------------------------
 let account = null;
 let wallet = null;
@@ -143,32 +74,10 @@ let wallet = null;
 function useKey(pk) {
   account = privateKeyToAccount(pk);
   wallet = createWalletClient({ account, chain: CHAIN, transport: http(RPC) });
-  $('unlockOverlay').classList.add('hidden');
   $('walletAddr').textContent = account.address.slice(0, 6) + '…' + account.address.slice(-4);
   scan();
 }
 
-async function doUnlock() {
-  $('unlockErr').textContent = '';
-  const vault = loadVault();
-  try {
-    const pass = $('unlockPass').value;
-    const pk = await decryptSecret(pass, vault.evm);
-    const cache = { evm: pk };
-    if (vault.sol) { try { cache.sol = await decryptSecret(pass, vault.sol); } catch { /* ignore */ } }
-    saveSession(cache);
-    $('unlockPass').value = '';
-    useKey(pk);
-  } catch {
-    $('unlockErr').textContent = 'wrong password';
-  }
-}
-
-function trySessionUnlock() {
-  const s = loadSession();
-  if (!s?.evm) return false;
-  try { useKey(s.evm); return true; } catch { return false; }
-}
 
 // ---------------------------------------------------------------------------
 // scan + claim
@@ -208,7 +117,7 @@ async function scan() {
       const sym = await pub.readContract({ address: p.token, abi: ERC20_SYMBOL, functionName: 'symbol' }).catch(() => '?');
       const row = document.createElement('div');
       row.className = 'token-row';
-      row.innerHTML = `<span class="sym">${sym}</span><span class="addr"><a href="${EXPLORER}/token/${p.token}" target="_blank" rel="noopener">${p.token}</a></span><span class="ready">ready</span>`;
+      row.innerHTML = `<span class="sym">${esc(sym)}</span><span class="addr"><a href="${EXPLORER}/token/${esc(p.token)}" target="_blank" rel="noopener">${esc(p.token)}</a></span><span class="ready">ready</span>`;
       box.appendChild(row);
     }
     $('scanStatus').textContent = `${pairs.length} token${pairs.length > 1 ? 's' : ''} across ${FACTORIES.length} factories · ${claimable.length} with fees to claim`;
@@ -257,15 +166,11 @@ async function claimAll() {
 // ---------------------------------------------------------------------------
 function start() {
   $('appRoot').style.display = '';
-  if (!loadVault()) {
-    $('noVault').classList.remove('hidden');
-    return;
-  }
-  $('unlockBtn').onclick = doUnlock;
-  $('unlockPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') doUnlock(); });
+  const keys = loadKeys();
+  if (!keys?.evm) { $('noVault').classList.remove('hidden'); return; }
   $('claimBtn').onclick = claimAll;
   $('rescan').onclick = scan;
-  if (!trySessionUnlock()) { $('unlockOverlay').classList.remove('hidden'); $('unlockPass').focus(); }
+  try { useKey(keys.evm); } catch { $('noVault').classList.remove('hidden'); }
 }
 
-initGate(start);
+start();
