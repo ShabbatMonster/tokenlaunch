@@ -78,6 +78,12 @@ async function decryptSecret(password, blob) {
 }
 const loadVault = () => JSON.parse(localStorage.getItem(VAULT_KEY) || 'null');
 
+// session unlock cache (shared with the launcher): decrypted keys held only for
+// the tab session so navigating here doesn't re-prompt for the password
+const SESSION_KEYS = 'session.keys.v1';
+const loadSession = () => { try { return JSON.parse(sessionStorage.getItem(SESSION_KEYS) || 'null'); } catch { return null; } };
+const saveSession = (obj) => sessionStorage.setItem(SESSION_KEYS, JSON.stringify({ ...(loadSession() || {}), ...obj }));
+
 // ---------------------------------------------------------------------------
 // login gate (shared credential with the launcher: gate.cred.v1 / gate.ok.v1)
 // ---------------------------------------------------------------------------
@@ -134,20 +140,34 @@ function initGate(onPass) {
 let account = null;
 let wallet = null;
 
+function useKey(pk) {
+  account = privateKeyToAccount(pk);
+  wallet = createWalletClient({ account, chain: CHAIN, transport: http(RPC) });
+  $('unlockOverlay').classList.add('hidden');
+  $('walletAddr').textContent = account.address.slice(0, 6) + '…' + account.address.slice(-4);
+  scan();
+}
+
 async function doUnlock() {
   $('unlockErr').textContent = '';
   const vault = loadVault();
   try {
-    const pk = await decryptSecret($('unlockPass').value, vault.evm);
-    account = privateKeyToAccount(pk);
-    wallet = createWalletClient({ account, chain: CHAIN, transport: http(RPC) });
+    const pass = $('unlockPass').value;
+    const pk = await decryptSecret(pass, vault.evm);
+    const cache = { evm: pk };
+    if (vault.sol) { try { cache.sol = await decryptSecret(pass, vault.sol); } catch { /* ignore */ } }
+    saveSession(cache);
     $('unlockPass').value = '';
-    $('unlockOverlay').classList.add('hidden');
-    $('walletAddr').textContent = account.address.slice(0, 6) + '…' + account.address.slice(-4);
-    scan();
+    useKey(pk);
   } catch {
     $('unlockErr').textContent = 'wrong password';
   }
+}
+
+function trySessionUnlock() {
+  const s = loadSession();
+  if (!s?.evm) return false;
+  try { useKey(s.evm); return true; } catch { return false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,12 +261,11 @@ function start() {
     $('noVault').classList.remove('hidden');
     return;
   }
-  $('unlockOverlay').classList.remove('hidden');
   $('unlockBtn').onclick = doUnlock;
   $('unlockPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') doUnlock(); });
-  $('unlockPass').focus();
   $('claimBtn').onclick = claimAll;
   $('rescan').onclick = scan;
+  if (!trySessionUnlock()) { $('unlockOverlay').classList.remove('hidden'); $('unlockPass').focus(); }
 }
 
 initGate(start);

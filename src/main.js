@@ -353,9 +353,18 @@ async function decryptSecret(password, blob) {
 const loadVault = () => JSON.parse(localStorage.getItem(VAULT_KEY) || 'null');
 const saveVault = (v) => localStorage.setItem(VAULT_KEY, JSON.stringify(v));
 
+// session unlock cache — after the first password unlock, the decrypted keys
+// live in sessionStorage so navigating between pages / reloading doesn't
+// re-prompt. Cleared when the tab closes (like the login gate). Shared across
+// the launcher, trade, and fees pages via the same key.
+const SESSION_KEYS = 'session.keys.v1';
+const loadSession = () => { try { return JSON.parse(sessionStorage.getItem(SESSION_KEYS) || 'null'); } catch { return null; } };
+const saveSession = (obj) => sessionStorage.setItem(SESSION_KEYS, JSON.stringify({ ...(loadSession() || {}), ...obj }));
+
 // unlocked session state (memory only)
 let account = null;        // viem account
-let solKeyB58 = null;      // held for future SOL pads
+let evmPk = null;          // raw decrypted EVM private key (for the session cache)
+let solKeyB58 = null;      // decrypted SOL key (base58 / json array)
 
 // ---------------------------------------------------------------------------
 // key validation
@@ -1434,6 +1443,8 @@ function onUnlocked() {
   $('unlockOverlay').classList.add('hidden');
   $('walletDot').classList.add('on');
   $('feeRecipient').placeholder = account.address + ' (default)';
+  // cache the decrypted keys for the session so other pages / reloads don't re-prompt
+  if (evmPk) saveSession({ evm: evmPk, sol: solKeyB58 || undefined });
   updateWalletChip(activePad);
   refreshBalance();
   renderTokenList();
@@ -1452,6 +1463,7 @@ async function doSetup() {
       vault.sol = await encryptSecret(pass, solKeyB58);
     }
     saveVault(vault);
+    evmPk = pk;
     account = privateKeyToAccount(pk);
     $('setupKey').value = ''; $('setupPass').value = ''; $('setupSolKey').value = '';
     onUnlocked();
@@ -1465,10 +1477,24 @@ async function doUnlock() {
     const vault = loadVault();
     const pk = await decryptSecret(pass, vault.evm).catch(() => { throw new Error('wrong password'); });
     if (vault.sol) solKeyB58 = await decryptSecret(pass, vault.sol).catch(() => null);
+    evmPk = pk;
     account = privateKeyToAccount(pk);
     $('unlockPass').value = '';
     onUnlocked();
   } catch (e) { $('unlockErr').textContent = e.message; }
+}
+
+// silent unlock from the session cache (set on a previous unlock this session)
+function trySessionUnlock() {
+  const s = loadSession();
+  if (!s?.evm) return false;
+  try {
+    evmPk = s.evm;
+    account = privateKeyToAccount(s.evm);
+    if (s.sol) solKeyB58 = s.sol;
+    onUnlocked();
+    return true;
+  } catch { return false; }
 }
 
 // add or replace a key in an existing vault (no full reset needed)
@@ -1479,7 +1505,7 @@ async function doImportKeys() {
     const vault = loadVault();
     if (!vault) throw new Error('no wallet yet — use the setup screen first');
     // verify the password by decrypting the current EVM key
-    const evmPk = await decryptSecret(pass, vault.evm).catch(() => { throw new Error('wrong password'); });
+    const curEvmPk = await decryptSecret(pass, vault.evm).catch(() => { throw new Error('wrong password'); });
 
     const solRaw = $('importSolKey').value.trim();
     const evmRaw = $('importEvmKey').value.trim();
@@ -1490,14 +1516,11 @@ async function doImportKeys() {
       solKeyB58 = validateSolKey(solRaw);
       next.sol = await encryptSecret(pass, solKeyB58);
     }
-    if (evmRaw) {
-      const pk = normalizeEvmKey(evmRaw);
-      next.evm = await encryptSecret(pass, pk);
-      account = privateKeyToAccount(pk);
-    } else if (!account) {
-      account = privateKeyToAccount(evmPk);
-    }
+    evmPk = evmRaw ? normalizeEvmKey(evmRaw) : curEvmPk;
+    if (evmRaw) next.evm = await encryptSecret(pass, evmPk);
+    account = privateKeyToAccount(evmPk);
     saveVault(next);
+    saveSession({ evm: evmPk, sol: solKeyB58 || undefined });
 
     $('importSolKey').value = ''; $('importEvmKey').value = ''; $('importPass').value = '';
     $('keysOverlay').classList.add('hidden');
@@ -1544,7 +1567,7 @@ function init() {
     claimFees(claimPad(), addr, $('claimAddrBtn'));
   };
 
-  if (loadVault()) $('unlockOverlay').classList.remove('hidden');
+  if (loadVault()) { if (!trySessionUnlock()) $('unlockOverlay').classList.remove('hidden'); }
   else $('setupOverlay').classList.remove('hidden');
 
   $('setupBtn').onclick = doSetup;
@@ -1553,6 +1576,7 @@ function init() {
   $('resetVault').onclick = () => {
     if (confirm('Delete the stored (encrypted) key from this browser?')) {
       localStorage.removeItem(VAULT_KEY);
+      sessionStorage.removeItem(SESSION_KEYS);
       location.reload();
     }
   };
