@@ -24,6 +24,12 @@ async function decryptSecret(password, blob) {
 }
 const loadVault = () => JSON.parse(localStorage.getItem(VAULT_KEY) || 'null');
 
+// session unlock cache (shared with the launcher): decrypted keys held only for
+// the tab session so navigating here doesn't re-prompt for the password
+const SESSION_KEYS = 'session.keys.v1';
+const loadSession = () => { try { return JSON.parse(sessionStorage.getItem(SESSION_KEYS) || 'null'); } catch { return null; } };
+const saveSession = (obj) => sessionStorage.setItem(SESSION_KEYS, JSON.stringify({ ...(loadSession() || {}), ...obj }));
+
 // ---------------------------------------------------------------------------
 // base58 -> SOL pubkey (to show the address without loading the heavy bundle)
 // ---------------------------------------------------------------------------
@@ -121,20 +127,37 @@ let router = null;      // lazily imported ./solana.js
 const loadRouter = async () => (router ||= await import('./solana.js'));
 const slippageBps = () => Math.max(1, Math.round((+$('slippage').value || 1.5) * 100));
 
+function useSecret(secret) {
+  solSecret = secret;
+  solAddr = solPubkey(secret);
+  $('unlockOverlay').classList.add('hidden');
+  $('walletAddr').textContent = solAddr.slice(0, 4) + '…' + solAddr.slice(-4);
+  refreshSolBalance();
+}
+
 async function doUnlock() {
   $('unlockErr').textContent = '';
   const vault = loadVault();
   if (!vault?.sol) { $('unlockErr').textContent = 'no SOL key in this wallet — add one in the launcher (🔑 keys)'; return; }
   try {
-    solSecret = await decryptSecret($('unlockPass').value, vault.sol);
-    solAddr = solPubkey(solSecret);
+    const pass = $('unlockPass').value;
+    const sol = await decryptSecret(pass, vault.sol);
+    // cache sol (and evm if present) so other pages / reloads don't re-prompt
+    const cache = { sol };
+    if (vault.evm) { try { cache.evm = await decryptSecret(pass, vault.evm); } catch { /* ignore */ } }
+    saveSession(cache);
     $('unlockPass').value = '';
-    $('unlockOverlay').classList.add('hidden');
-    $('walletAddr').textContent = solAddr.slice(0, 4) + '…' + solAddr.slice(-4);
-    refreshSolBalance();
+    useSecret(sol);
   } catch {
     $('unlockErr').textContent = 'wrong password';
   }
+}
+
+// silent unlock from the session cache set on a previous unlock this session
+function trySessionUnlock() {
+  const s = loadSession();
+  if (!s?.sol) return false;
+  try { useSecret(s.sol); return true; } catch { return false; }
 }
 
 async function refreshSolBalance() {
@@ -246,10 +269,9 @@ async function go() {
 function start() {
   $('appRoot').style.display = '';
   if (!loadVault()) { $('noVault').hidden = false; $('main').style.display = 'none'; return; }
-  $('unlockOverlay').classList.remove('hidden');
   $('unlockBtn').onclick = doUnlock;
   $('unlockPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') doUnlock(); });
-  $('unlockPass').focus();
+  if (!trySessionUnlock()) { $('unlockOverlay').classList.remove('hidden'); $('unlockPass').focus(); }
 
   $('buyTab').onclick = () => setSide('buy');
   $('sellTab').onclick = () => setSide('sell');
