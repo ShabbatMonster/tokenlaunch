@@ -155,6 +155,8 @@
   <header>
     <h1>LAUNCHER</h1>
     <div style="display:flex;gap:10px;align-items:center">
+      <a href="trade.html" style="color:var(--dim);font-size:12px;text-decoration:none" title="buy / sell DBC tokens with SOL">🔀 trade</a>
+      <a id="keysLink" style="color:var(--dim);font-size:12px;text-decoration:none;cursor:pointer" title="import / update keys">🔑 keys</a>
       <a href="fees.html" style="color:var(--dim);font-size:12px;text-decoration:none" title="sweep all creator fees">💸 fees</a>
       <div class="wallet-chip" id="walletChip" title="wallet">
         <span class="dot" id="walletDot"></span>
@@ -201,15 +203,46 @@
       </div>
     </div>
 
+    <!-- Solana / Meteora DBC -->
+    <div id="solRow" class="hidden">
+      <label>PAIR AGAINST (QUOTE)</label>
+      <select id="solQuoteSelect">
+        <option value="SOL">SOL</option>
+        <option value="USDC">USDC</option>
+        <option value="CUSTOM">custom mint…</option>
+      </select>
+      <input type="text" id="solCustomMint" class="hidden" spellcheck="false"
+             style="margin-top:8px" placeholder="quote mint address">
+      <div class="hint" id="solQuoteHint" style="font-size:11px;margin-top:4px"></div>
+
+      <details class="adv" id="solParams">
+        <summary>bonding-curve parameters (pump.fun defaults)</summary>
+        <div class="row">
+          <div><label>TOTAL SUPPLY</label><input type="text" id="solSupply" value="1000000000" spellcheck="false"></div>
+          <div style="flex:0 0 120px"><label>FEE (BPS)</label><input type="text" id="solFeeBps" value="100" spellcheck="false"></div>
+        </div>
+        <div class="row">
+          <div><label>MIGRATION THRESHOLD (QUOTE)</label><input type="text" id="solMigThreshold" spellcheck="false"></div>
+          <div style="flex:0 0 120px"><label>% ON MIGRATION</label><input type="text" id="solMigPct" value="20" spellcheck="false"></div>
+        </div>
+        <label>FEE WALLET (ALL TRADING FEES)</label>
+        <input type="text" id="solFeeWallet" value="H5GAYEieNUyTmHFD4foJEKSpkggEDHBV9ffGebrD6wAW" spellcheck="false">
+        <div class="hint" style="font-size:11px;margin-top:4px">1% buy &amp; sell → this wallet · LP burnt · mint authority disabled · migrates to DAMM v2</div>
+      </details>
+    </div>
+
     <div class="row">
       <div><label>TWITTER (OPT.)</label><input type="text" id="twitter" placeholder="https://x.com/..."></div>
       <div><label>WEBSITE (OPT.)</label><input type="text" id="website" placeholder="https://..."></div>
     </div>
 
-    <label>DEV BUY</label>
-    <div class="pads" id="buyChips"></div>
-    <div class="buy-preview" id="buyPreview"></div>
+    <div id="devBuyBlock">
+      <label>DEV BUY</label>
+      <div class="pads" id="buyChips"></div>
+      <div class="buy-preview" id="buyPreview"></div>
+    </div>
 
+    <div id="distroBlock">
     <label>DISTRO</label>
     <div class="pads">
       <button class="pad" id="distToggle">off</button>
@@ -224,8 +257,9 @@
       </div>
       <div class="hint" style="font-size:11px;margin-top:6px">amount in tokens (e.g. 10000000) or % of supply (e.g. 2%). sent from your wallet right after launch — needs a dev buy big enough to cover it.</div>
     </div>
+    </div>
 
-    <details class="adv">
+    <details class="adv" id="descBlock">
       <summary>description · fee recipient</summary>
       <label>DESCRIPTION</label>
       <textarea id="desc" rows="2">aaaaaaaaaa</textarea>
@@ -250,6 +284,23 @@
   </div>
 </div>
 
+<!-- import / update keys (post-setup) -->
+<div class="overlay hidden" id="keysOverlay">
+  <div class="card modal">
+    <h2>IMPORT / UPDATE KEYS</h2>
+    <p class="sub">Add or replace a key without wiping your vault. Enter your password to unlock and re-encrypt. Keys stay encrypted (AES-256) in this browser only.</p>
+    <label>SOL PRIVATE KEY</label>
+    <input type="password" id="importSolKey" placeholder="base58 (Phantom export) or [1,2,…]" autocomplete="off">
+    <label>EVM PRIVATE KEY (OPTIONAL — REPLACE)</label>
+    <input type="password" id="importEvmKey" placeholder="0x… (leave blank to keep current)" autocomplete="off">
+    <label>PASSWORD</label>
+    <input type="password" id="importPass" placeholder="your existing password" autocomplete="current-password">
+    <div class="err" id="importErr"></div>
+    <button class="primary" id="importBtn">SAVE</button>
+    <button class="ghost" id="importCancel">cancel</button>
+  </div>
+</div>
+
 <!-- edit buy amounts -->
 <div class="overlay hidden" id="chipsOverlay">
   <div class="card modal">
@@ -269,7 +320,7 @@
     <p class="sub">Your key is encrypted with your password (AES-256) and stored only in this browser. It never leaves this device except as signed transactions sent straight to the RPC.</p>
     <label>EVM PRIVATE KEY</label>
     <input type="password" id="setupKey" placeholder="0x..." autocomplete="off">
-    <label>SOL PRIVATE KEY (OPT. — FOR FUTURE SOL PADS)</label>
+    <label>SOL PRIVATE KEY (OPT.)</label>
     <input type="password" id="setupSolKey" placeholder="base58 (phantom export)" autocomplete="off">
     <label>PASSWORD</label>
     <input type="password" id="setupPass" placeholder="unlocks the key on this device">
@@ -291,6 +342,6 @@
   </div>
 </div>
 
-<script type="module" src="app.js?v=17"></script>
+<script type="module" src="app.js?v=24"></script>
 </body>
 </html>
