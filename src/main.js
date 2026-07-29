@@ -212,6 +212,17 @@ const OUR_FACTORY_ABI = (() => {
   return base;
 })();
 
+// Solana / Meteora DBC config (chain logic lives in the lazy-loaded solana.js).
+// Defined before PADS because the meteora pad references SOL_RPC.
+const SOL_RPC = 'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea';
+const SOL_QUOTES = {
+  SOL:  { mint: 'So11111111111111111111111111111111111111112', symbol: 'SOL',  decimals: 9, defaultThreshold: 85 },
+  USDC: { mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', symbol: 'USDC', decimals: 6, defaultThreshold: 17000 },
+};
+const SOL_FEE_WALLET = 'H5GAYEieNUyTmHFD4foJEKSpkggEDHBV9ffGebrD6wAW';
+const SOL_CUSTOM_DEFAULT = '9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump'; // prefill for custom quote
+const SOL_CUSTOM_THRESHOLD = 1000000; // default migration threshold for custom quotes
+
 const PADS = [
   {
     // our own factory — contracts/LaunchFactory.sol, deployed 2026-07-12.
@@ -290,11 +301,24 @@ const PADS = [
   },
   { id: 'noxa-monad',    label: 'Noxa · Monad',   vm: 'evm', enabled: false, chainId: 143,  rpc: '', factory: '0x7F03effbd7ceB22A3f80Dd468f67eF27826acD85', nativeSymbol: 'MON' },
   { id: 'noxa-megaeth',  label: 'Noxa · MegaETH', vm: 'evm', enabled: false, chainId: 4326, rpc: '', factory: '0xAc303930F2f7A78BBB037f3f4622Bd02f5545B9a', nativeSymbol: 'ETH' },
-  { id: 'pump-sol',      label: 'Pump · SOL',     vm: 'sol', enabled: false },
+  {
+    // Meteora Dynamic Bonding Curve on Solana mainnet. Permissionless: we build
+    // a config (binds the quote mint) + create the pool client-side and sign
+    // with the stored SOL key. Quote can be SOL, USDC, or any SPL/Token-2022
+    // mint (e.g. the pump token). See src/solana.js (lazy-loaded bundle).
+    id: 'meteora-sol', label: 'Meteora · SOL', vm: 'sol', enabled: true, family: 'meteora',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://solscan.io/token/${t}`,
+    nativeSymbol: 'SOL',
+    quoteSel: 'SOL',           // SOL | USDC | CUSTOM (from the dropdown)
+    quoteMint: null,           // resolved from quoteSel / custom input
+  },
 ];
 let activePad = PADS.find((p) => p.id === 'ours-robinhood') || PADS.find((p) => p.enabled);
 
 const IPFS_ADD = 'https://api.thegraph.com/ipfs/api/v0/add';
+const IPFS_GW = (hash) => `https://ipfs.io/ipfs/${hash}`;
 const DEFAULT_DESC = 'aaaaaaaaaa';
 
 // ---------------------------------------------------------------------------
@@ -359,6 +383,41 @@ function base58DecodeLen(s) {
   for (const c of s) { if (c === '1') bytes.push(0); else break; }
   return bytes.length;
 }
+// full base58 decode/encode — enough to derive the SOL pubkey (last 32 bytes of
+// the 64-byte secret) and show the address without loading the heavy solana bundle
+function base58Decode(s) {
+  const bytes = [0];
+  for (const c of s) {
+    const v = B58.indexOf(c);
+    if (v < 0) throw new Error('bad base58 char');
+    let carry = v;
+    for (let i = 0; i < bytes.length; i++) { carry += bytes[i] * 58; bytes[i] = carry & 0xff; carry >>= 8; }
+    while (carry) { bytes.push(carry & 0xff); carry >>= 8; }
+  }
+  let zeros = 0;
+  for (const c of s) { if (c === '1') zeros++; else break; }
+  return Uint8Array.from([...new Array(zeros).fill(0), ...bytes.reverse()]);
+}
+function base58Encode(bytes) {
+  const digits = [0];
+  for (const b of bytes) {
+    let carry = b;
+    for (let i = 0; i < digits.length; i++) { carry += digits[i] << 8; digits[i] = carry % 58; carry = (carry / 58) | 0; }
+    while (carry) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+  }
+  let out = '';
+  for (const b of bytes) { if (b === 0) out += '1'; else break; }
+  for (let i = digits.length - 1; i >= 0; i--) out += B58[digits[i]];
+  return out;
+}
+function solSecretBytes(secret) {
+  const s = secret.trim();
+  const b = s.startsWith('[') ? Uint8Array.from(JSON.parse(s)) : base58Decode(s);
+  if (b.length !== 64) throw new Error('SOL key must be 64 bytes');
+  return b;
+}
+const solPubkeyFromSecret = (secret) => base58Encode(solSecretBytes(secret).slice(32, 64));
+
 function validateSolKey(input) {
   const k = input.trim();
   if (k.startsWith('[')) {
@@ -438,6 +497,13 @@ async function launch() {
   const description = document.getElementById('desc').value.trim() || DEFAULT_DESC;
   const twitter = document.getElementById('twitter').value.trim();
   const website = document.getElementById('website').value.trim();
+
+  // Solana / Meteora path — separate stack, doesn't touch the EVM branch below
+  if (pad.vm === 'sol') {
+    await launchSol(pad, { name, symbol, description, twitter, website });
+    return;
+  }
+
   const devBuy = selectedBuyAmount();
 
   const feeRecipientRaw = document.getElementById('feeRecipient').value.trim();
@@ -687,6 +753,90 @@ function updateRialtoHint(pad) {
     ? (Number(q.target_initial_fdv_quote_units) / 10 ** q.decimals) : null;
   $('quoteHint').textContent =
     `pooled with ${q.symbol}` + (fdv ? ` · starting FDV ≈ ${fdv.toLocaleString()} ${q.symbol}` : '');
+}
+
+// ---------------------------------------------------------------------------
+// Solana / Meteora DBC (chain logic lazy-loaded from ./solana.js)
+// ---------------------------------------------------------------------------
+const isSolAddress = (s) => { try { return base58Decode(s).length === 32; } catch { return false; } };
+
+async function uploadJsonToIpfs(obj) {
+  const fd = new FormData();
+  fd.append('file', new File([JSON.stringify(obj)], 'metadata.json', { type: 'application/json' }));
+  const r = await fetch(IPFS_ADD, { method: 'POST', body: fd });
+  if (!r.ok) throw new Error('IPFS metadata upload failed (' + r.status + ')');
+  const { Hash } = await r.json();
+  if (!Hash) throw new Error('IPFS metadata upload returned no hash');
+  return Hash;
+}
+
+// resolve the selected quote mint (SOL / USDC / custom) to its address
+function solQuoteMint(pad) {
+  const sel = pad.quoteSel;
+  if (sel === 'CUSTOM') {
+    const m = $('solCustomMint').value.trim();
+    if (!isSolAddress(m)) throw new Error('enter a valid custom quote mint address');
+    return m;
+  }
+  return SOL_QUOTES[sel].mint;
+}
+
+function solParamsFromUI(pad) {
+  const num = (id, name) => {
+    const v = +($(id).value.trim().replace(/,/g, ''));
+    if (!(v > 0)) throw new Error(`${name} must be a positive number`);
+    return v;
+  };
+  const feeWallet = $('solFeeWallet').value.trim();
+  if (!isSolAddress(feeWallet)) throw new Error('fee wallet is not a valid Solana address');
+  const migRaw = $('solMigThreshold').value.trim().replace(/,/g, '');
+  let migrationThreshold = +migRaw;
+  if (!migRaw) {
+    const def = SOL_QUOTES[pad.quoteSel]?.defaultThreshold;
+    if (!def) throw new Error('set a migration threshold (in quote tokens)');
+    migrationThreshold = def;
+  }
+  if (!(migrationThreshold > 0)) throw new Error('migration threshold must be positive');
+  return {
+    totalSupply: num('solSupply', 'total supply'),
+    baseDecimals: 6,
+    feeBps: num('solFeeBps', 'fee bps'),
+    pctSupplyOnMigration: num('solMigPct', '% on migration'),
+    migrationThreshold,
+    feeClaimer: feeWallet,
+  };
+}
+
+async function launchSol(pad, inp) {
+  if (!solKeyB58) throw new Error('no SOL key stored — re-import your wallet with a SOL private key');
+  const quoteMint = solQuoteMint(pad);
+  const params = solParamsFromUI(pad);
+
+  setStatus('uploading image + metadata to IPFS...');
+  const imgHash = (await uploadToIpfs(logoBlob)).replace('ipfs://', '');
+  const metaHash = await uploadJsonToIpfs({
+    name: inp.name, symbol: inp.symbol, description: inp.description,
+    image: IPFS_GW(imgHash),
+    ...(inp.twitter || inp.website ? { extensions: { twitter: inp.twitter, website: inp.website } } : {}),
+  });
+  const uri = IPFS_GW(metaHash);
+
+  setStatus('loading Solana module...');
+  const { launchMeteora } = await import('./solana.js');
+
+  const res = await launchMeteora({
+    rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint,
+    name: inp.name, symbol: inp.symbol, uri, params,
+    onStatus: (m) => setStatus(m),
+  });
+
+  rememberLaunch(pad, res.mint, inp.symbol);
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>` +
+    `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">token on solscan</a> · ` +
+    `<a href="${pad.explorer}/tx/${res.poolSig}" target="_blank" rel="noopener">pool tx</a>`;
+  refreshBalance();
+  renderTokenList();
 }
 
 // pons v2 launch: pre-launch checks -> economics pin -> launchToken -> dev buy
@@ -1195,12 +1345,50 @@ function renderPads() {
     b.disabled = !pad.enabled;
     b.onclick = () => {
       activePad = pad;
-      $('supplyRow').classList.toggle('hidden', !pad.customSupply);
-      $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
-      if (pad.family === 'rialto') refreshRialtoQuotes(pad);
+      applyPadUI(pad);
       renderPads(); renderBuyChips(); refreshFeeNote(); refreshBalance(); renderTokenList();
     };
     box.appendChild(b);
+  }
+}
+
+// show/hide the per-pad input sections + wallet for the active pad
+function applyPadUI(pad) {
+  const sol = pad.vm === 'sol';
+  $('supplyRow').classList.toggle('hidden', !pad.customSupply || sol);
+  $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
+  $('solRow').classList.toggle('hidden', !sol);
+  $('devBuyBlock').classList.toggle('hidden', sol); // dev buy / distro are EVM-only
+  $('distroBlock').classList.toggle('hidden', sol);
+  if (pad.family === 'rialto') refreshRialtoQuotes(pad);
+  if (sol) updateSolQuoteUI(pad);
+  updateWalletChip(pad);
+}
+
+// Solana quote dropdown -> custom-mint field + default migration threshold
+function updateSolQuoteUI(pad) {
+  const sel = $('solQuoteSelect').value;
+  pad.quoteSel = sel;
+  const custom = sel === 'CUSTOM';
+  $('solCustomMint').classList.toggle('hidden', !custom);
+  if (custom && !$('solCustomMint').value.trim()) $('solCustomMint').value = SOL_CUSTOM_DEFAULT;
+  const q = SOL_QUOTES[sel];
+  const thr = $('solMigThreshold');
+  if (!thr.value.trim()) thr.value = q ? q.defaultThreshold : SOL_CUSTOM_THRESHOLD;
+  $('solQuoteHint').textContent = custom
+    ? 'any SPL or Token-2022 mint (metadata-only extensions)'
+    : `token pooled against ${q.symbol} · threshold in ${q.symbol}`;
+}
+
+function updateWalletChip(pad) {
+  if (pad.vm === 'sol') {
+    if (!solKeyB58) { $('walletAddr').textContent = 'no SOL key'; $('walletChip').title = 'import a SOL key to launch here'; return; }
+    const a = solPubkeyFromSecret(solKeyB58);
+    $('walletAddr').textContent = a.slice(0, 4) + '…' + a.slice(-4);
+    $('walletChip').title = a + ' (SOL — click to copy)';
+  } else if (account) {
+    $('walletAddr').textContent = account.address.slice(0, 6) + '…' + account.address.slice(-4);
+    $('walletChip').title = account.address + ' (click to copy)';
   }
 }
 
@@ -1220,7 +1408,21 @@ async function refreshFeeNote() {
 }
 
 async function refreshBalance() {
-  if (!account || !activePad.enabled) return;
+  if (!activePad.enabled) return;
+  if (activePad.vm === 'sol') {
+    if (!solKeyB58) { $('walletBal').textContent = ''; return; }
+    try {
+      const a = solPubkeyFromSecret(solKeyB58);
+      const r = await fetch(activePad.rpc, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [a] }),
+      });
+      const j = await r.json();
+      $('walletBal').textContent = (j.result.value / 1e9).toFixed(4) + ' SOL';
+    } catch { /* rpc hiccup, ignore */ }
+    return;
+  }
+  if (!account) return;
   try {
     const bal = await publicClientFor(activePad).getBalance({ address: account.address });
     $('walletBal').textContent = (+formatEther(bal)).toFixed(4) + ' ' + activePad.nativeSymbol;
@@ -1231,9 +1433,8 @@ function onUnlocked() {
   $('setupOverlay').classList.add('hidden');
   $('unlockOverlay').classList.add('hidden');
   $('walletDot').classList.add('on');
-  $('walletAddr').textContent = account.address.slice(0, 6) + '…' + account.address.slice(-4);
-  $('walletChip').title = account.address + ' (click to copy)';
   $('feeRecipient').placeholder = account.address + ' (default)';
+  updateWalletChip(activePad);
   refreshBalance();
   renderTokenList();
 }
@@ -1270,18 +1471,54 @@ async function doUnlock() {
   } catch (e) { $('unlockErr').textContent = e.message; }
 }
 
+// add or replace a key in an existing vault (no full reset needed)
+async function doImportKeys() {
+  try {
+    $('importErr').textContent = '';
+    const pass = $('importPass').value;
+    const vault = loadVault();
+    if (!vault) throw new Error('no wallet yet — use the setup screen first');
+    // verify the password by decrypting the current EVM key
+    const evmPk = await decryptSecret(pass, vault.evm).catch(() => { throw new Error('wrong password'); });
+
+    const solRaw = $('importSolKey').value.trim();
+    const evmRaw = $('importEvmKey').value.trim();
+    if (!solRaw && !evmRaw) throw new Error('enter a SOL or EVM key to import');
+
+    const next = { ...vault };
+    if (solRaw) {
+      solKeyB58 = validateSolKey(solRaw);
+      next.sol = await encryptSecret(pass, solKeyB58);
+    }
+    if (evmRaw) {
+      const pk = normalizeEvmKey(evmRaw);
+      next.evm = await encryptSecret(pass, pk);
+      account = privateKeyToAccount(pk);
+    } else if (!account) {
+      account = privateKeyToAccount(evmPk);
+    }
+    saveVault(next);
+
+    $('importSolKey').value = ''; $('importEvmKey').value = ''; $('importPass').value = '';
+    $('keysOverlay').classList.add('hidden');
+    updateWalletChip(activePad);
+    refreshBalance();
+    renderTokenList();
+    setStatus('keys updated ✓');
+  } catch (e) { $('importErr').textContent = e.message; }
+}
+
 function init() {
   renderPads();
   renderBuyChips();
   refreshFeeNote();
-  $('supplyRow').classList.toggle('hidden', !activePad.customSupply);
-  $('quoteRow').classList.toggle('hidden', activePad.family !== 'rialto');
-  if (activePad.family === 'rialto') refreshRialtoQuotes(activePad);
+  applyPadUI(activePad);
   $('supply').addEventListener('input', updateBuyPreview);
   $('quoteSelect').addEventListener('change', () => {
     activePad.quoteToken = $('quoteSelect').value;
     updateRialtoHint(activePad);
   });
+  $('solQuoteSelect').addEventListener('change', () => updateSolQuoteUI(activePad));
 
   $('distToggle').onclick = toggleDistro;
   $('distAdd').onclick = () => $('distRows').appendChild(distRow());
@@ -1291,6 +1528,10 @@ function init() {
   $('chipAdd').onclick = () => $('chipEditRows').appendChild(chipEditRow(''));
   $('chipSave').onclick = saveChipEditor;
   $('chipCancel').onclick = () => $('chipsOverlay').classList.add('hidden');
+
+  $('keysLink').onclick = () => { $('importErr').textContent = ''; $('keysOverlay').classList.remove('hidden'); };
+  $('importBtn').onclick = doImportKeys;
+  $('importCancel').onclick = () => $('keysOverlay').classList.add('hidden');
 
   $('refreshTokens').onclick = renderTokenList;
   $('claimAll').onclick = () => claimAllFees($('claimAll'));
@@ -1317,7 +1558,8 @@ function init() {
   };
 
   $('walletChip').onclick = () => {
-    if (account) navigator.clipboard.writeText(account.address);
+    const addr = activePad.vm === 'sol' ? (solKeyB58 && solPubkeyFromSecret(solKeyB58)) : account?.address;
+    if (addr) navigator.clipboard.writeText(addr);
   };
 
   // image: click / drop / paste

@@ -3,13 +3,20 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "esbuild src/main.js --bundle --minify --format=esm --outfile=docs/app.js && esbuild src/fees.js --bundle --minify --format=esm --outfile=docs/fees.js",
-    "dev": "esbuild src/main.js --bundle --format=esm --outfile=docs/app.js --watch"
+    "build": "node build.mjs",
+    "dev": "node build.mjs --dev"
   },
   "dependencies": {
+    "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.10",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.98.4",
+    "bs58": "^6.0.0",
+    "process": "^0.11.10",
     "viem": "^2.21.0"
   },
   "devDependencies": {
+    "@esbuild-plugins/node-globals-polyfill": "^0.2.3",
+    "@esbuild-plugins/node-modules-polyfill": "^0.2.2",
     "esbuild": "^0.24.2"
   }
 }

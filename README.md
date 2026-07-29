@@ -28,8 +28,6 @@ the key never leaves the device — only signed transactions go out, straight to
 
 Both share the same `launchToken` ABI and the same launch buy curve.
 
-## Pending pads
-
 ## Rialto · Stocks (live)
 
 [varo.rialto.xyz](https://varo.rialto.xyz), chain 4663 — pair your token against a
@@ -56,6 +54,52 @@ The full flow (auth → upload → signed intent) is verified end-to-end against
 API. Fee claiming isn't wired (Rialto uses per-launch lockers, not the Noxa
 `claimFees`/`collectFees` model), so launches don't appear under "MY TOKENS · CLAIM
 FEES" for this pad.
+
+## Meteora · SOL (live)
+
+Solana mainnet launches via **Meteora Dynamic Bonding Curve** (program
+`dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN`). Pick the pad, choose a quote in
+"PAIR AGAINST" — **SOL**, **USDC**, or a **custom mint** (any SPL or Token-2022
+mint with metadata-only extensions, e.g. `9cRCn9…pump`). Uses the stored SOL key,
+signs client-side.
+
+Two on-chain txs: `partner.createConfig` (binds the quote mint + curve) then a
+direct `initializeVirtualPoolWithSplToken` (mints the token, opens the curve).
+Defaults are pump.fun-style and editable in "bonding-curve parameters":
+
+- 1B supply, 6 decimals, **mint + freeze authority disabled**
+- **1% buy & sell fee**, 100% routed to the fee wallet (`creatorTradingFeePercentage: 0`)
+- Migrated LP **permanently locked (burnt)**, migrates to **DAMM v2**
+- Migration threshold in quote-token units (default 85 SOL / 17k USDC / editable for custom)
+
+Chain logic lives in `src/solana.js`, built as a **separate lazy-loaded bundle**
+(`docs/solana.js`, ~880 KB) so the web3.js + Anchor + Meteora deps only load when
+someone launches on Solana. `main.js` marks `./solana.js` external and dynamic-
+imports it at runtime; `build.mjs` polyfills Node globals (Buffer/process) for it.
+
+Note: the Meteora SDK's `createPool` hardcodes the classic Token program for the
+quote vault, which breaks Token-2022 quotes — so we build that instruction
+ourselves and pass the quote's real token program (`src/solana.js`,
+`buildCreatePoolTx`). Verified with a live mainnet launch paired against the pump
+token. Dev-buy (first-buy) and fee claiming are not wired for Solana yet.
+
+## Trade page (SOL↔token router)
+
+`trade.html` (🔀 trade in the header) buys/sells a Meteora DBC token with SOL even
+when the token is quoted in an arbitrary mint (e.g. a pump token) that no
+aggregator routes. It's a 2-leg router, executed sequentially:
+
+- **Buy:** SOL → quote via **Jupiter** (`lite-api.jup.ag/swap/v1`), then quote →
+  token via the **DBC curve** (`client.pool.swap`). The actual quote received from
+  leg 1 is read from the wallet's balance and fed into leg 2.
+- **Sell:** token → quote via DBC, then quote → SOL via Jupiter.
+
+Pool/config are resolved from just the token mint (`getPoolByBaseMint`); pricing
+uses the SDK's `swapQuote`. Router logic lives in `src/solana.js`
+(`routerPreview`/`routerBuy`/`routerSell`); the page shell (`src/trade.js`) reuses
+the launcher's vault + gate and lazy-imports the Solana bundle. Note: this makes a
+token buyable **through this app**, not discoverable on Jupiter/DexScreener — for
+ecosystem visibility, launch SOL-quoted.
 
 ## Pending pads
 
