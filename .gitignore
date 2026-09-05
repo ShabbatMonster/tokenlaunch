@@ -5,5 +5,7 @@ lib/
 out/
 cache/
 
-# built site — not published (private/local use). Regenerate with: npm run build
-docs/
+# built site - published to GitHub Pages from docs/ on main
+
+# launch bot: secrets, strategy and run artifacts stay local
+bot/

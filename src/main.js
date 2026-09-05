@@ -1,8 +1,56 @@
 import {
   createPublicClient, createWalletClient, http, defineChain,
-  parseEther, formatEther, keccak256, stringToBytes, parseEventLogs,
+  parseEther, formatEther, keccak256, stringToBytes, parseEventLogs, getAddress,
+  encodeAbiParameters, encodeFunctionData, concat, parseUnits, formatUnits,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { FAIRTOKEN_BYTECODE, FAIRTOKEN_ABI, FAIRTOKEN_TAX_BYTECODE, FAIRTOKEN_TAX_ABI } from './fairtoken.js';
+import { buildPoolsLaunch, buildPoolsTokenData, selfTestPoolsLaunch, POOLS_LAUNCHER, POOLS_POOL_STRATEGY } from './poolsAtomic.js';
+selfTestPoolsLaunch(); // fail fast if the launch recipe ever drifts
+
+// ---------------------------------------------------------------------------
+// Uniswap V2 fair-launch config. Deploy a fixed-supply, non-mintable ERC-20,
+// pool it against ETH via the V2 router, and burn the LP to the dead address so
+// liquidity is permanently locked. Multi-chain ready — only mainnet is enabled.
+// ---------------------------------------------------------------------------
+const DEAD_ADDRESS = '0x000000000000000000000000000000000000dEaD';
+const UNISWAP_V2_ROUTER_ABI = [
+  {
+    type: 'function', name: 'addLiquidityETH', stateMutability: 'payable',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'amountTokenDesired', type: 'uint256' },
+      { name: 'amountTokenMin', type: 'uint256' },
+      { name: 'amountETHMin', type: 'uint256' },
+      { name: 'to', type: 'address' },
+      { name: 'deadline', type: 'uint256' },
+    ],
+    outputs: [
+      { name: 'amountToken', type: 'uint256' },
+      { name: 'amountETH', type: 'uint256' },
+      { name: 'liquidity', type: 'uint256' },
+    ],
+  },
+];
+const UNISWAP_V2_FACTORY_ABI = [
+  { type: 'function', name: 'getPair', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }], outputs: [{ type: 'address' }] },
+];
+// DYORswap V3 launchpad on ARC (chain 5042, USDC-native). API-driven like Rialto:
+// prepare returns a ready {to,data,value} tx that deploys a fixed-supply immutable
+// ERC-20, pools the full supply in a Uniswap V3 pool vs USDC, and locks the LP NFT
+// in an immutable vault. Dev buy (initialBuyEth) is denominated in USDC (≤6 dp).
+const DYOR_ARC_API = 'https://dyorv3.org/api/arc/v1';
+
+// per-chain Uniswap V2 deployment (router / factory / WETH). Add chains here.
+const UNISWAP_CHAINS = {
+  1: {
+    rpc: 'https://eth.llamarpc.com',
+    router: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',
+    factory: '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f',
+    weth: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+    explorer: 'https://etherscan.io',
+  },
+};
 
 // ---------------------------------------------------------------------------
 // launchpad registry — flip `enabled` to light up more pads (same Noxa ABI)
@@ -122,9 +170,145 @@ const PONS_CURVE_ABI = [
   },
 ];
 
+// PonsV2FeeEscrow (v2) — fees accrue per recipient; claim() sends to msg.sender.
 const PONS_ESCROW_ABI = [
-  { type: 'function', name: 'claim', inputs: [], outputs: [], stateMutability: 'nonpayable' },
-  { type: 'function', name: 'claimToken', inputs: [{ name: 'token', type: 'address' }], outputs: [], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'balanceOf', inputs: [{ name: 'recipient', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'balanceOfToken', inputs: [{ name: 'recipient', type: 'address' }, { name: 'token', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'claim', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'claimToken', inputs: [{ name: 'token', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'nonpayable' },
+];
+// PonsLaunchLocker (v1) — owns the LP position NFTs; collectFees(token) collects
+// the v3 fees and sends them to that token's recorded fee wallet (feeRedirects),
+// after the protocol share. Gated so only the recipient/collector can call it.
+const PONS_LOCKER_ABI = [
+  { type: 'function', name: 'collectFees', inputs: [{ name: 'token', type: 'address' }], outputs: [{ type: 'uint256' }, { type: 'uint256' }], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'feeRecipientTokenCount', inputs: [{ name: 'recipient', type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'feeRecipientTokens', inputs: [{ name: 'recipient', type: 'address' }, { name: 'i', type: 'uint256' }], outputs: [{ type: 'address' }], stateMutability: 'view' },
+  { type: 'function', name: 'feeRedirects', inputs: [{ name: 'token', type: 'address' }], outputs: [{ type: 'address' }], stateMutability: 'view' },
+];
+const PONS_LOCKER_ADDR = '0x736D76699C26D0d966744cAe304C000d471f7F35';
+const PONS_ESCROW_ADDR = '0xd3AFEB2a57f70eF218Aa82451c51B2fb0416Ac9e'; // v2 fee escrow (current)
+
+// PonsV2LaunchFactory — bonding-curve launch. launchToken(params{…,salt},
+// launchConfigId, pairToken, snipeTaxExemptions[]) -> (token, curve).
+const PONS_V2_FACTORY_ABI = [
+  { type: 'error', name: 'MetadataTooLong', inputs: [] },
+  { type: 'function', name: 'launchEnabled', stateMutability: 'view', inputs: [], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'launchFee', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'maxCreatorTaxBps', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'approvedPairTokens', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'previewLaunchEconomics', stateMutability: 'view', inputs: [{ type: 'uint256' }, { type: 'address' }], outputs: [{ type: 'bytes32' }] },
+  {
+    type: 'function', name: 'launchToken', stateMutability: 'payable',
+    inputs: [
+      { name: 'params', type: 'tuple', components: [
+        { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' },
+        { name: 'logo', type: 'string' }, { name: 'description', type: 'string' },
+        { name: 'socials', type: 'tuple', components: [
+          { name: 'twitter', type: 'string' }, { name: 'telegram', type: 'string' },
+          { name: 'discord', type: 'string' }, { name: 'website', type: 'string' }, { name: 'farcaster', type: 'string' },
+        ] },
+        { name: 'creatorFeeRecipient', type: 'address' }, { name: 'creatorTaxBps', type: 'uint16' },
+        { name: 'buybackEnabled', type: 'bool' }, { name: 'expectedEconomics', type: 'bytes32' },
+        { name: 'salt', type: 'bytes32' },
+      ] },
+      { name: 'launchConfigId', type: 'uint256' }, { name: 'pairToken', type: 'address' },
+      { name: 'snipeTaxExemptions', type: 'address[]' },
+    ],
+    outputs: [{ name: 'token', type: 'address' }, { name: 'curve', type: 'address' }],
+  },
+];
+// ---------------------------------------------------------------------------
+// Our own Uniswap-v4 bonding curve (contracts/AnyQuoteCurve*.sol).
+// Same curve shape as Pons v2 (virtual quote = 0.4x the graduation threshold,
+// so ~71.43% of supply sells on the curve and the rest seeds the pool), with
+// the two restrictions removed: ANY quote token is allowed, and graduate() is
+// permissionless the moment the threshold is met — no executor bot, no rescue
+// delay, so a curve can never end up closed-but-poolless.
+const V4CURVE_FACTORY = '0xaE6c291948611B29C030eBac5f71FD1C6928aE41'; // AnyQuoteCurveFactory, deployed 2026-09-02
+const V4CURVE_ABI = [
+  {
+    type: 'function', name: 'launch', stateMutability: 'payable',
+    inputs: [{ name: 'p', type: 'tuple', components: [
+      { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' },
+      { name: 'logo', type: 'string' }, { name: 'description', type: 'string' },
+      { name: 'twitter', type: 'string' }, { name: 'website', type: 'string' },
+      { name: 'quoteToken', type: 'address' }, { name: 'graduationThreshold', type: 'uint256' },
+      { name: 'supply', type: 'uint256' }, { name: 'poolFee', type: 'uint24' },
+      { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' },
+      { name: 'feeBps', type: 'uint16' },
+    ] }],
+    outputs: [{ name: 'token', type: 'address' }, { name: 'curve', type: 'address' }],
+  },
+  { type: 'function', name: 'launchFee', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+];
+const V4CURVE_BUY_ABI = [
+  { type: 'function', name: 'buy', stateMutability: 'payable', inputs: [
+    { name: 'quoteIn', type: 'uint256' }, { name: 'minTokensOut', type: 'uint256' }, { name: 'recipient', type: 'address' },
+  ], outputs: [{ type: 'uint256' }] },
+];
+
+// Pons v2 rejects oversized metadata with MetadataTooLong() (0x85b8e2f4). The
+// caps are PER FIELD (not a combined total) and were measured against the live
+// factory by binary-searching each field until the revert flipped.
+const PONS_V2_META_LIMITS = {
+  name: 64, symbol: 16, logo: 512, description: 2048,
+  twitter: 256, website: 256, telegram: 256, discord: 256, farcaster: 256,
+};
+function checkPonsV2Metadata(fields) {
+  for (const [key, max] of Object.entries(PONS_V2_META_LIMITS)) {
+    const v = fields[key];
+    if (typeof v === 'string' && v.length > max) {
+      throw new Error(`${key} is ${v.length} characters — Pons v2 allows at most ${max}. Shorten it by ${v.length - max}.`);
+    }
+  }
+}
+
+const PONS_V2_CURVE_ABI = [
+  { type: 'function', name: 'buy', stateMutability: 'payable', inputs: [{ name: 'quoteIn', type: 'uint256' }, { name: 'minTokensOut', type: 'uint256' }, { name: 'recipient', type: 'address' }], outputs: [{ type: 'uint256' }] },
+];
+// PonsV2LaunchAndBuy — ATOMIC launch + dev buy in a single tx (no snipe gap).
+const PONS_V2_FORWARDER_ADDR = '0xe33E9E479dF8802cb0866d5d05258bEc4cF62948';
+const PONS_V2_FORWARDER_ABI = [
+  { type: 'error', name: 'MetadataTooLong', inputs: [] },
+  {
+  type: 'function', name: 'launchAndBuy', stateMutability: 'payable',
+  inputs: [
+    { name: 'params', type: 'tuple', components: [
+      { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' },
+      { name: 'logo', type: 'string' }, { name: 'description', type: 'string' },
+      { name: 'socials', type: 'tuple', components: [
+        { name: 'twitter', type: 'string' }, { name: 'telegram', type: 'string' },
+        { name: 'discord', type: 'string' }, { name: 'website', type: 'string' }, { name: 'farcaster', type: 'string' },
+      ] },
+      { name: 'creatorFeeRecipient', type: 'address' }, { name: 'creatorTaxBps', type: 'uint16' },
+      { name: 'buybackEnabled', type: 'bool' }, { name: 'expectedEconomics', type: 'bytes32' }, { name: 'salt', type: 'bytes32' },
+    ] },
+    { name: 'launchConfigId', type: 'uint256' }, { name: 'pairToken', type: 'address' },
+    { name: 'quoteIn', type: 'uint256' }, { name: 'minTokensOut', type: 'uint256' },
+    { name: 'recipient', type: 'address' }, { name: 'snipeTaxExemptions', type: 'address[]' },
+  ],
+  outputs: [{ name: 'token', type: 'address' }, { name: 'curve', type: 'address' }, { name: 'tokensOut', type: 'uint256' }],
+}];
+// Wallets exempt from the 99%-for-3s snipe tax on every Pons v2 launch (the launch's
+// snipeTaxExemptions[]). The dev/launcher wallet is added automatically, and its atomic
+// dev buy is untaxed regardless — these are the extra wallets you want to buy tax-free
+// inside the snipe window.
+const PONS_V2_TAX_WHITELIST = [
+  '0x9e1c2a59fb22387990f507952b598283a4cf326f',
+  '0x4bceadd89c26691c7c912a55fa27e957c6a55fc2',
+  '0x7b36ca9407db51838f882449c266f3344160512a',
+  '0xb4aa78fd343f16d67ecb6a1bd4ad112bb91be692',
+  '0x9f1b39369aa566debb4e49b754c9b928de72fed8',
+  '0xbab72092a2f053e34d3ca4e0b08ca84b48411bab',
+  '0xf6f4c51457ffbbfee16c75fd23fdfa641016d2e5',
+  '0xeeeeeeeeeeebf4d6b932da0e2f77c6dd277ec991',
+  '0x665d601a51b53c70f9a00f82d96d2d8596369999',
+  '0xe4dbba098059855d51349f59157e7a59de42e395',
+  '0xab928c7ba171c7ac8e15f16407f3be3e0a72b553',
+  '0x5d6c57466756e5963b402b7f9b9c29ccd202f4fb',
+  '0x1a936979e68b8743897525d0d361043022db224c',
+  '0xbbcd2d2c1483f6104516be34d6251186189d8443',
 ];
 
 // ---------------------------------------------------------------------------
@@ -198,6 +382,14 @@ const ERC20_ABI = [
   { type: 'function', name: 'symbol', inputs: [], outputs: [{ type: 'string' }], stateMutability: 'view' },
   { type: 'function', name: 'transfer', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' },
 ];
+// full ERC-20 used by the flap/pons dev-buy + PancakeSwap paths
+const ERC20 = [
+  { type: 'function', name: 'symbol', inputs: [], outputs: [{ type: 'string' }], stateMutability: 'view' },
+  { type: 'function', name: 'decimals', inputs: [], outputs: [{ type: 'uint8' }], stateMutability: 'view' },
+  { type: 'function', name: 'balanceOf', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'allowance', inputs: [{ type: 'address' }, { type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'approve', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' },
+];
 
 // launch-buy curve: tokens_out = supply * x / (cap + x), x in ETH.
 // cap fitted exactly (0.0000% err) against historical launchToken txs on
@@ -214,7 +406,13 @@ const OUR_FACTORY_ABI = (() => {
 
 // Solana / Meteora DBC config (chain logic lives in the lazy-loaded solana.js).
 // Defined before PADS because the meteora pad references SOL_RPC.
-const SOL_RPC = 'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea';
+// primary Helius RPC + fallbacks (the first key was maxed, so the backup leads).
+// A public RPC is the last resort for plain reads (getAccountInfo, etc.).
+const SOL_RPC = 'https://mainnet.helius-rpc.com/?api-key=ae11f74a-b518-408b-bc88-524c277da375';
+const SOL_RPC_FALLBACKS = [
+  'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea',
+  'https://api.mainnet-beta.solana.com',
+];
 const SOL_QUOTES = {
   SOL:  { mint: 'So11111111111111111111111111111111111111112', symbol: 'SOL',  decimals: 9, defaultThreshold: 85 },
   USDC: { mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', symbol: 'USDC', decimals: 6, defaultThreshold: 17000 },
@@ -222,6 +420,60 @@ const SOL_QUOTES = {
 const SOL_FEE_WALLET = 'H5GAYEieNUyTmHFD4foJEKSpkggEDHBV9ffGebrD6wAW';
 const SOL_CUSTOM_DEFAULT = '9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump'; // prefill for custom quote
 const SOL_CUSTOM_THRESHOLD = 1000000; // default migration threshold for custom quotes
+
+// Every quote mint with a live Raydium LaunchLab config (checked on-chain) —
+// shared by both the raydium-sol and bonk-sol pads below, since they run the
+// same LaunchLab program/configs and differ only in platformId. NVDAx / SPYx /
+// CRCLx are the stock-pegged xStocks quotes (stock pairing).
+const RAYDIUM_LAUNCHLAB_QUOTES = [
+  { symbol: 'SOL',   mint: 'So11111111111111111111111111111111111111112' },
+  { symbol: 'USD1',  mint: 'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB' },
+  { symbol: 'Anon',  mint: '9McvH6w97oewLmPxqQEoHUAv3u5iYMyQ9AeZZhguYf1T' },
+  { symbol: 'USDC',  mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
+  { symbol: 'USDT',  mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB' },
+  { symbol: 'EURC',  mint: 'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr' },
+  { symbol: 'TRUMP', mint: '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN' },
+  { symbol: 'NVDAx (stock)',  mint: 'Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh' },
+  { symbol: 'SPYx (stock)',   mint: 'XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W' },
+  { symbol: 'CRCLx (stock)',  mint: 'XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1' },
+  { symbol: 'custom…', mint: 'custom' },
+];
+
+// Every quote token Pons lists on its own frontend (pulled from their app
+// bundle), plus native ETH. Pons v2 only accepts the ones its factory has
+// approved; our own v4 curve accepts anything, so for that pad this list is
+// just a shortcut and `custom` takes any ERC-20.
+const PONS_V2_PAIRS = [
+  { symbol: 'ETH', address: '0x0000000000000000000000000000000000000000', decimals: 18 },
+  { symbol: 'USDG', address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', decimals: 6 },
+  { symbol: 'cbBTC', address: '0xCEC185eB182c47d1bA1EFc84e6959e18cd620Be4', decimals: 8 },
+  { symbol: 'AAPL', address: '0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9', decimals: 18 },
+  { symbol: 'AMD', address: '0x86923f96303D656E4aa86D9d42D1e57ad2023fdC', decimals: 18 },
+  { symbol: 'AMZN', address: '0x12f190a9F9d7D37a250758b26824B97CE941bF54', decimals: 18 },
+  { symbol: 'BB', address: '0x48E39E56aCdbA37b09020C0b734A613C9a2f100A', decimals: 18 },
+  { symbol: 'COIN', address: '0x6330D8C3178a418788dF01a47479c0ce7CCF450b', decimals: 18 },
+  { symbol: 'COST', address: '0x4EA005168D7F09a7A0Ba9D1DEf21a479950E44C2', decimals: 18 },
+  { symbol: 'CRCL', address: '0xdF0992E440dD0be65BD8439b609d6D4366bf1CB5', decimals: 18 },
+  { symbol: 'DJT', address: '0x1D11f0496982706C5e14A514D4E79F2e6BdE4516', decimals: 18 },
+  { symbol: 'GLD', address: '0xC9a981FEE1F9DEc688bb123ccDeCc63D0deBFC4e', decimals: 18 },
+  { symbol: 'GME', address: '0x1b0E319c6A659F002271B69dB8A7df2F911c153E', decimals: 18 },
+  { symbol: 'GOOGL', address: '0x2e0847E8910a9732eB3fb1bb4b70a580ADAD4FE3', decimals: 18 },
+  { symbol: 'HIMS', address: '0xCceE82fE024c36fA15E1005edE3E9e4787e23D09', decimals: 18 },
+  { symbol: 'META', address: '0xc0D6457C16Cc70d6790Dd43521C899C87ce02f35', decimals: 18 },
+  { symbol: 'MSFT', address: '0xe93237C50D904957Cf27E7B1133b510C669c2e74', decimals: 18 },
+  { symbol: 'MSTR', address: '0xec262a75e413fAfD0dF80480274532C79D42da09', decimals: 18 },
+  { symbol: 'MU', address: '0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD', decimals: 18 },
+  { symbol: 'NVDA', address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC', decimals: 18 },
+  { symbol: 'PLTR', address: '0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A', decimals: 18 },
+  { symbol: 'QQQ', address: '0xD5f3879160bc7c32ebb4dC785F8a4F505888de68', decimals: 18 },
+  { symbol: 'RDDT', address: '0x05b37Fb53A299a1b874A619e1c4C404D52C36F4C', decimals: 18 },
+  { symbol: 'SNDK', address: '0xB90A19fF0Af67f7779afF50A882A9CfF42446400', decimals: 18 },
+  { symbol: 'SPCX', address: '0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa', decimals: 18 },
+  { symbol: 'SPY', address: '0x117cc2133c37B721F49dE2A7a74833232B3B4C0C', decimals: 18 },
+  { symbol: 'TSLA', address: '0x322F0929c4625eD5bAd873c95208D54E1c003b2d', decimals: 18 },
+  { symbol: 'TTWO', address: '0x5e81213613b6B86EaB4c6c50d718d34359459786', decimals: 18 },
+  { symbol: 'custom…', address: 'custom', decimals: 18 },
+];
 
 const PADS = [
   {
@@ -263,25 +515,68 @@ const PADS = [
     curve: ROBINHOOD_CURVE,
   },
   {
-    // Pons v2 — configured per docs.ponsfamily.com/v2 (2026-07-26). Addresses
-    // are NOT published yet ("v2 addresses are not published yet … audits in
-    // progress") and the docs say to treat v2 as unaudited until reports land.
-    // To go live: fill factory + escrow (locker = escrow so claimPad works),
-    // confirm chainId/rpc (docs imply Ethereum + Uniswap v4), set startBlock,
-    // diff PONS_FACTORY_ABI against the published ABI, then enabled: true.
-    // shown but disabled ("soon") — addresses unpublished / audits in progress
-    id: 'pons-v2', label: 'Pons v2', vm: 'evm', enabled: false, family: 'pons-v2',
-    chainId: 1, rpc: '',
-    factory: '', escrow: '', locker: '',
-    launchConfigId: 0n,                                     // from getLaunchConfig / launchConfigCount
-    pairToken: '0x0000000000000000000000000000000000000000', // zero = native ETH pair
-    creatorTaxBps: 0,                                        // optional extra tax, capped by maxCreatorTaxBps()
-    buybackEnabled: false,
-    startBlock: 0n,
-    explorer: 'https://etherscan.io',
-    site: (t) => `https://etherscan.io/token/${t}`,
+    // Pons v2 — on ROBINHOOD CHAIN (4663), not Ethereum. As of 2026-07-30 only the
+    // first pieces are live + verified: Meme Hook 0x8e99D200…c3a044 and Fee Escrow
+    // 0xbc39B650…2A0A9c (escrow set below). The FACTORY (launch entry point) is NOT
+    // deployed yet — escrow.factory() reverts and the docs say "factory, bonding
+    // curves, launch tokens… still to come". Also unaudited (3 audits in progress).
+    // To go live once the factory ships: set factory (+ locker), confirm the
+    // launchConfigId/pairToken, diff PONS_FACTORY_ABI vs the verified ABI, set
+    // startBlock, then enabled: true.
+    // Pons v1 — the live launchpad (v2 is currently turned off). PonsLaunchFactory,
+    // verified. launchToken(params, launchConfigId, dexId, salt) → direct DEX launch
+    // paired vs WETH (config 0). Tickers can be arbitrarily long. See launchPonsV1().
+    id: 'pons-v1', label: 'Pons', vm: 'evm', enabled: true, family: 'pons-v1',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    factory: '0xA5aAb3F0c6EeadF30Ef1D3Eb997108E976351feB', // PonsLaunchFactory v1 (verified, live)
+    locker: '0x736D76699C26D0d966744cAe304C000d471f7F35',  // PonsLaunchLocker (fees route here)
+    claimFn: 'collectFees',
+    launchConfigId: 0n, dexId: 0n,                          // only config 0 (pairs vs WETH)
+    startBlock: 23011563n,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
     nativeSymbol: 'ETH',
-    curve: null, // bonding-curve params unpublished — no dev-buy preview yet
+    curve: { supply: 1e9 }, // config-0 supply (1e9 tokens) — for %-based distributions
+  },
+  {
+    // Pons v2 — re-enabled on a new PonsV2LaunchFactory. Bonding-curve launchpad:
+    // launchToken(params{…,salt}, launchConfigId, pairToken, snipeTaxExemptions[])
+    // -> (token, curve). Pairs vs an approved stock (NVDA/AAPL/GME). Fees accrue in
+    // the fee escrow. See launchPonsV2().
+    id: 'pons-v2', label: 'Pons v2', vm: 'evm', enabled: true, family: 'pons-v2',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    factory: '0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e', // PonsV2LaunchFactory (verified, live)
+    escrow: '0xd3AFEB2a57f70eF218Aa82451c51B2fb0416Ac9e',  // PonsV2FeeEscrow (new)
+    launchConfigId: 0n, creatorTaxBps: 0, buybackEnabled: false,
+    startBlock: 23011563n,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
+    nativeSymbol: 'ETH', curve: null,
+    // ETH (native, 0x0) is a real distinct pair on this factory; stocks are approved
+    // ERC-20 pairs. `custom` = paste any approved pair address.
+    pairToken: '0x0000000000000000000000000000000000000000', // default: native ETH
+    // every currently-approved pair token (verified live from the factory's
+    // PairTokenApprovalUpdated events + approvedPairTokens state, 2026-08). ETH is a
+    // distinct native pair; USDG is 6-decimals (handled dynamically at launch).
+    quotes: PONS_V2_PAIRS,
+  },
+  {
+    // Pools — open-to-everyone launchpad on Robinhood chain (Uniswap v4). Launch =
+    // LiquidityLauncher.createToken (mint 1B, image stored as IPFS in tokenData) then
+    // distributeToken (all supply single-sided into a v4 pool via the strategy). Free,
+    // no seeded liquidity. Optional dev buy = a swap on the pool after. See launchPools().
+    id: 'pools', label: 'Pools', vm: 'evm', enabled: true, family: 'pools',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    launcher: '0x0000ffffbe8efe702c8703ae3477ff5de3d319c0', // canonical LiquidityLauncher (Axiom + gmgn both label "pools")
+    uercFactory: '0x000000e200088D55C39a11F609E5F667729ad49b', // UERC20Factory
+    strategy: '0x23f8209572b4a1C2AD88A42749E830791Fb027f1',   // opens the tickSpacing-25 pool the terminals recognize as "pools"
+    router: '0x65050A9b7E5075A2bA5cED7b1b64EE66262c40Dc',     // swap router (dev buy)
+    feeNft: '0x587d2fdddf14f6f84022b51e8c3a473eb88c4544',     // "Fee Beneficiary" NFT (id == LP position id)
+    feeHolder: '0x7198c32a497c09497e04c86cf8f77a244a9e4b8f',  // holds positions; collectFees(uint256[]) claims your 0.25% swap fees
+    startBlock: 28000000n,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
+    nativeSymbol: 'ETH', curve: { supply: 1e9 },
   },
   {
     // Rialto · Robinhood — pair your token against a stock/ETF (NVDA, SPCX, …)
@@ -299,6 +594,92 @@ const PADS = [
     curve: null,                 // economics are server-computed per quote token
     quoteToken: null,            // chosen from the pair-token dropdown (config.quotes)
   },
+  {
+    // Uniswap V2 on Ethereum mainnet — deploy a fixed-supply, non-mintable token,
+    // pool it against ETH, and burn the LP. No bonding curve. See launchUniswap().
+    id: 'uniswap-eth', label: 'Uniswap · ETH', vm: 'evm', enabled: true, family: 'uniswap',
+    chainId: 1, rpc: UNISWAP_CHAINS[1].rpc,
+    explorer: UNISWAP_CHAINS[1].explorer,
+    site: (t) => `https://etherscan.io/token/${t}`,
+    nativeSymbol: 'ETH',
+    customSupply: true, curve: null,
+  },
+  {
+    // DYORswap V3 launchpad on ARC (Circle's chain, USDC-native). Fixed-supply
+    // immutable token, full supply into a Uniswap V3 pool vs USDC, LP NFT locked
+    // in an immutable vault. API-driven — see launchDyorswap(). Dev buy is in USDC.
+    id: 'dyorswap-arc', label: 'DYOR · ARC', vm: 'evm', enabled: true, family: 'dyorswap',
+    chainId: 5042, rpc: 'https://rpc.blockdaemon.mainnet.arc.io',
+    api: DYOR_ARC_API,
+    explorer: 'https://arc-mainnet.cloud.blockscout.com',
+    site: (t) => `https://arc-mainnet.cloud.blockscout.com/token/${t}`,
+    nativeSymbol: 'USDC',
+  },
+  {
+    // o1 · Base — launches EXACTLY the way launch.o1.exchange does: through the
+    // B20LaunchpadFactory (createLaunch), which mints the B20 token AND opens a
+    // Uniswap-v4 pool vs ETH from a fixed 1B supply. You get an allocation (default
+    // 200M); the rest is seeded into the pool. Socials go in metadataKeys/Values.
+    // (The old build called the raw B20 precompile, so tokens never appeared on o1.)
+    id: 'o1-base', label: 'o1 · Base (B20)', vm: 'evm', enabled: true, family: 'b20',
+    chainId: 8453, rpc: 'https://mainnet.base.org',
+    launchpad: '0xa52ad458ce0282a971ecc71c051a32f28946bb9f', // B20LaunchpadFactory (verified)
+    explorer: 'https://basescan.org',
+    site: (t) => `https://launch.o1.exchange/token/${t}`,
+    nativeSymbol: 'ETH',
+    customSupply: true, defaultSupply: 1_000_000_000, curve: null, // fixed 1B launch supply
+  },
+  {
+    // flap.sh · Robinhood — Portal.newTokenV6 tax token (V3). Bonding curve with a
+    // configurable buy/sell tax that splits into market / burn / dividend / LP. The
+    // token address must be vanity (ends 7777) — mined client-side. See launchFlap().
+    id: 'flap-robinhood', label: 'flap · Robinhood', vm: 'evm', enabled: true, family: 'flap',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    portal: '0x26605f322f7fF986f381bB9A6e3f5DAb0bEaEb09',
+    cloneImpl: '0x7777c8743c88b3aff3cf262135bef2c8b2e83333', // V6 tax-token clone base
+    startBlock: 0n,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://flap.sh/robinhood/token/${t}`,
+    nativeSymbol: 'ETH', curve: null,
+    // stock quote tokens flap allows on Robinhood (native + tokenized equities)
+    quotes: [
+      { symbol: 'ETH', address: '0x0000000000000000000000000000000000000000' },
+      { symbol: 'NVDA', address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC' },
+      { symbol: 'AAPL', address: '0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9' },
+      { symbol: 'GME', address: '0x1b0E319c6A659F002271B69dB8A7df2F911c153E' },
+    ],
+  },
+  {
+    // flap.sh · BNB — same Portal.newTokenV6 on BSC mainnet. Quote against BNB/USDT.
+    // BSC clone impl per flap docs; simulate-first guards a wrong vanity derivation.
+    id: 'flap-bnb', label: 'flap · BNB', vm: 'evm', enabled: true, family: 'flap',
+    chainId: 56, rpc: 'https://bsc-dataseed.bnbchain.org',
+    portal: '0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0',
+    cloneImpl: '0x024f18294970B5c76c0691b87f138A0317156422', // BSC tax-token clone base (flap docs)
+    swapRegistry: '0x644A8f560138418bAD4EdEFC7c17878a3c2fBEB6',
+    startBlock: 0n,
+    explorer: 'https://bscscan.com',
+    site: (t) => `https://flap.sh/token/${t}`,
+    nativeSymbol: 'BNB', curve: null,
+    // flap payment tokens on BNB (addresses confirmed on-chain). CRYPTO + RWA
+    // (tokenized equities). 'custom…' lets you paste any other flap payment token.
+    quotes: [
+      { symbol: 'BNB',   address: '0x0000000000000000000000000000000000000000' },
+      { symbol: 'USDT',  address: '0x55d398326f99059fF775485246999027B3197955' },
+      { symbol: 'USD1',  address: '0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d' },
+      { symbol: 'U',     address: '0xcE24439F2D9C6a2289F741120FE202248B666666' },
+      { symbol: 'BTCB',  address: '0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c' },
+      { symbol: 'SPCXB', address: '0xbe9D156892E55e7154BcD3cB0FEA677F9D3103E1' },
+      { symbol: 'SKHYB', address: '0xCA750eF65f295BBECd685Abf54e82CAf297BDB61' },
+      { symbol: 'SPYB',  address: '0x7138b48df7D98D7e3cc221BfE7192D0a178182D8' },
+      { symbol: 'XAUT',  address: '0x21cAef8A43163Eea865baeE23b9C2E327696A3bf' },
+      { symbol: 'QQQB',  address: '0x205812CdBed920aFf76C6580abD681a46D11efc7' },
+      { symbol: 'NVDAB', address: '0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436' },
+      { symbol: 'AAPLB', address: '0x431a3BEE82E2ca41e49895CbECE5bB0F76A89b7A' },
+      { symbol: 'TSLAB', address: '0x5b1910eAaD6450E50f816082Aa078C41F10C292f' },
+      { symbol: 'custom…', address: 'custom' },
+    ],
+  },
   { id: 'noxa-monad',    label: 'Noxa · Monad',   vm: 'evm', enabled: false, chainId: 143,  rpc: '', factory: '0x7F03effbd7ceB22A3f80Dd468f67eF27826acD85', nativeSymbol: 'MON' },
   { id: 'noxa-megaeth',  label: 'Noxa · MegaETH', vm: 'evm', enabled: false, chainId: 4326, rpc: '', factory: '0xAc303930F2f7A78BBB037f3f4622Bd02f5545B9a', nativeSymbol: 'ETH' },
   {
@@ -313,6 +694,60 @@ const PADS = [
     nativeSymbol: 'SOL',
     quoteSel: 'SOL',           // SOL | USDC | CUSTOM (from the dropdown)
     quoteMint: null,           // resolved from quoteSel / custom input
+  },
+  {
+    // Our own Uniswap-v4 bonding curve on Robinhood chain. Unlike every other
+    // pad here this one is our contract, so the quote list is a convenience
+    // rather than a restriction — `custom` accepts any ERC-20 at all.
+    id: 'v4curve-robinhood', label: 'v4 Curve · Any Quote', vm: 'evm', enabled: !!V4CURVE_FACTORY, family: 'v4curve',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    factory: V4CURVE_FACTORY,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
+    nativeSymbol: 'ETH', curve: null,
+    poolFee: 10000, tickSpacing: 200, feeBps: 100,
+    quotes: PONS_V2_PAIRS,
+  },
+  {
+    // Raydium LaunchLab on Solana mainnet — bonding curve, no liquidity to seed.
+    // Pairs against a quote mint that has an on-chain LaunchpadConfig — SOL / USD1 /
+    // Anon / USDC / USDT / EURC / TRUMP are live, plus stock-pegged xStocks quotes
+    // (NVDAx, SPYx, CRCLx) now that Raydium added stock pairing to LaunchLab.
+    // Graduates to a Raydium AMM/CPMM pool. See launchRaydium().
+    id: 'raydium-sol', label: 'Raydium · LaunchLab', vm: 'sol', enabled: true, family: 'raydium',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://solscan.io/token/${t}`,
+    nativeSymbol: 'SOL',
+    quotes: RAYDIUM_LAUNCHLAB_QUOTES,
+  },
+  {
+    // bonk.fun — the SAME LaunchLab program + configs as raydium-sol above (bonk.fun
+    // is just a LaunchLab frontend), launched with letsbonk.fun's platformId instead
+    // of Raydium's. That's why stock pairing (xStocks quotes) landed here too the
+    // moment Raydium added it to LaunchLab. See launchRaydium() / BONK_PLATFORM_ID.
+    id: 'bonk-sol', label: 'Bonk.fun · LaunchLab', vm: 'sol', enabled: true, family: 'raydium',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://solscan.io/token/${t}`,
+    nativeSymbol: 'SOL',
+    quotes: RAYDIUM_LAUNCHLAB_QUOTES,
+    platformId: 'FfYek5vEz23cMkWsdJwG2oa6EphsvXSHrGpdALN4g6W1', // letsbonk.fun
+  },
+  {
+    // Custom single-sided Raydium CLMM launch — a "curve" that IS a CLMM from
+    // birth. Full supply single-sided (no quote seeded), dev buy tuned to ~15%,
+    // pair against ANY mint. See launchClmmCurve() in solana.js.
+    id: 'clmm-sol', label: 'Raydium · CLMM curve', vm: 'sol', enabled: true, family: 'clmm',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://solscan.io/token/${t}`,
+    nativeSymbol: 'SOL',
+    quotes: [
+      { symbol: 'SOL',  mint: 'So11111111111111111111111111111111111111112' },
+      { symbol: 'USDC', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
+      { symbol: 'custom…', mint: 'custom' },
+    ],
   },
 ];
 let activePad = PADS.find((p) => p.id === 'ours-robinhood') || PADS.find((p) => p.enabled);
@@ -439,6 +874,137 @@ async function setImage(fileOrBlob) {
   setStatus('');
 }
 
+// fetch an image URL to a Blob and load it as the logo. Most token-image CDNs
+// (e.g. cdn.dexscreener.com) block cross-origin fetch(), so we go through
+// images.weserv.nl — it re-serves the image with `Access-Control-Allow-Origin: *`.
+async function loadImageFromUrl(imageUrl) {
+  const toImageBlob = async (r) => {
+    if (!r.ok) throw new Error('img ' + r.status);
+    const b = await r.blob();
+    if (b.size === 0) throw new Error('empty');
+    return b.type.startsWith('image/') ? b : new Blob([await b.arrayBuffer()], { type: 'image/png' });
+  };
+  const weserv = 'https://images.weserv.nl/?url=' + encodeURIComponent(imageUrl.replace(/^https?:\/\//, '')) + '&output=png&n=-1';
+  const candidates = [weserv, imageUrl, 'https://corsproxy.io/?url=' + encodeURIComponent(imageUrl)];
+  for (const u of candidates) {
+    try { await setImage(await toImageBlob(await fetch(u))); return true; } catch { /* next */ }
+  }
+  return false;
+}
+
+// normalize an ipfs://CID (or bare CID) to an https gateway; leave http(s) as-is
+function ipfsHttp(u) {
+  if (!u) return '';
+  if (u.startsWith('ipfs://')) return 'https://ipfs.io/ipfs/' + u.replace(/^ipfs:\/\/(ipfs\/)?/, '');
+  if (/^[a-zA-Z0-9]{46,}$/.test(u)) return 'https://ipfs.io/ipfs/' + u; // bare CID
+  return u;
+}
+
+// VAMP: read a token CA from the clipboard and pull its metadata from ON-CHAIN
+// sources (so coins without a paid DexScreener profile still work), then fill the
+// fields. Solana → Metaplex via Helius getAsset + the token's json_uri. EVM → its
+// on-chain name/symbol, with DexScreener as an image/socials supplement.
+async function vamp() {
+  const hint = (m, err) => { const el = $('vampHint'); el.textContent = m; el.style.color = err ? 'var(--danger)' : 'var(--dim)'; };
+  let text = '';
+  try { text = (await navigator.clipboard.readText() || '').trim(); }
+  catch { hint('clipboard blocked by the browser — copy the CA again and allow clipboard access', true); return; }
+  const evm = text.match(/0x[0-9a-fA-F]{40}/);
+  const solM = text.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/);
+  if (evm) return vampEvm(evm[0], hint);
+  if (solM && isSolAddress(solM[0])) return vampSol(solM[0], hint);
+  hint('no contract address found in your clipboard', true);
+}
+
+// Solana: on-chain Metaplex metadata via Helius getAsset, then the off-chain json
+// for image + socials (works for any SPL/pump.fun token, dex-listed or not).
+async function vampSol(mint, hint) {
+  hint(`vamping ${mint.slice(0, 4)}…${mint.slice(-4)} on-chain…`);
+  let name = '', symbol = '', image = '', uri = '';
+
+  // fast path: Helius DAS getAsset (needs credits) — try each Helius key
+  for (const rpc of [SOL_RPC, ...SOL_RPC_FALLBACKS.filter((u) => u.includes('helius'))]) {
+    try {
+      const a = await fetch(rpc, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAsset', params: { id: mint } }),
+      }).then((r) => r.json());
+      const c = a && a.result && a.result.content;
+      if (c) {
+        const m = c.metadata || {};
+        name = m.name || ''; symbol = (m.symbol || '').replace(/^\$/, '');
+        image = c.links?.image || (c.files || [])[0]?.uri || ''; uri = c.json_uri || '';
+        break;
+      }
+    } catch { /* try next key / fall through to the account read */ }
+  }
+
+  // fallback: read the Metaplex metadata account directly (no DAS credits needed)
+  if (!name && !uri) {
+    hint('reading the on-chain metadata account…');
+    for (const rpc of [SOL_RPC, ...SOL_RPC_FALLBACKS]) {
+      try {
+        const { solTokenMetadata } = await import('./solana.js');
+        const md = await solTokenMetadata(mint, rpc);
+        if (md && (md.name || md.uri)) { name = md.name || ''; symbol = (md.symbol || '').replace(/^\$/, ''); uri = md.uri || ''; break; }
+      } catch { /* try next rpc */ }
+    }
+  }
+  if (!name && !uri && !image) { hint('could not read on-chain metadata (RPC busy or key maxed) — try again in a moment', true); return; }
+
+  // the off-chain JSON carries the image + socials (twitter/telegram/website)
+  let tw = '', tg = '', site = '';
+  if (uri) {
+    try {
+      const j = await fetch(ipfsHttp(uri)).then((r) => r.json());
+      image = image || j.image || '';
+      const ext = j.extensions || j;
+      tw = ext.twitter || j.twitter || '';
+      tg = ext.telegram || j.telegram || '';
+      site = ext.website || j.website || ext.homepage || '';
+      if (!name) name = j.name || '';
+      if (!symbol) symbol = (j.symbol || '').replace(/^\$/, '');
+    } catch { /* gateway/CORS hiccup — use what we have */ }
+  }
+  if (name) $('name').value = name;
+  if (symbol) $('symbol').value = symbol;
+  if (tw && $('twitter')) $('twitter').value = tw;
+  if (site && $('website')) $('website').value = site;
+  const bits = []; if (tw) bits.push('twitter'); if (tg) bits.push('telegram'); if (site) bits.push('website');
+  let note = image ? ((await loadImageFromUrl(ipfsHttp(image))) ? ' · image ✓' : ' · image blocked') : ' · no image';
+  hint(`vamped ${symbol || ''}${name ? ' — ' + name : ''}${note}${bits.length ? ' · ' + bits.join(' + ') : ''}`);
+}
+
+// EVM: DexScreener resolves the token across all chains (name/symbol always; image
+// + socials when the project has a profile). Falls back to on-chain name/symbol.
+async function vampEvm(ca, hint) {
+  hint(`vamping ${ca.slice(0, 6)}…${ca.slice(-4)} …`);
+  let pairs = [];
+  try { pairs = (await fetch('https://api.dexscreener.com/latest/dex/tokens/' + ca).then((r) => r.json()))?.pairs || []; } catch { /* */ }
+  const mine = pairs.filter((p) => p.baseToken?.address?.toLowerCase() === ca.toLowerCase());
+  const list = (mine.length ? mine : pairs).sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+  const p = list[0];
+  const tok = p ? (p.baseToken?.address?.toLowerCase() === ca.toLowerCase() ? p.baseToken
+    : (p.quoteToken?.address?.toLowerCase() === ca.toLowerCase() ? p.quoteToken : p.baseToken)) : null;
+
+  const infos = list.map((x) => x.info || {});
+  const imageUrl = (infos.find((i) => i.imageUrl) || {}).imageUrl || '';
+  const socials = (infos.find((i) => (i.socials || []).length) || {}).socials || [];
+  const websites = (infos.find((i) => (i.websites || []).length) || {}).websites || [];
+
+  if (tok?.name) $('name').value = tok.name;
+  if (tok?.symbol) $('symbol').value = tok.symbol.replace(/^\$/, '');
+  const tw = (socials.find((s) => /twitter|^x$/i.test(s.type || '')) || {}).url || '';
+  const site = (websites[0] || {}).url || '';
+  if (tw && $('twitter')) $('twitter').value = tw;
+  if (site && $('website')) $('website').value = site;
+
+  if (!tok) { hint('no data for that EVM token yet — it may be too new / unindexed. name & ticker can be typed in.', true); return; }
+  const bits = []; if (tw) bits.push('twitter'); if (site) bits.push('website');
+  let note = imageUrl ? ((await loadImageFromUrl(imageUrl)) ? ' · image ✓' : ' · image blocked') : ' · no on-chain image (EVM) — drop it manually';
+  hint(`vamped ${tok.symbol || ''}${tok.name ? ' — ' + tok.name : ''}${note}${bits.length ? ' · ' + bits.join(' + ') : ''}`);
+}
+
 async function squareResize(blob, size) {
   const img = await createImageBitmap(blob);
   const side = Math.min(img.width, img.height);
@@ -461,15 +1027,332 @@ async function uploadToIpfs(blob) {
 }
 
 // ---------------------------------------------------------------------------
+// o1 / Base — launch via the B20LaunchpadFactory (createLaunch), the SAME contract
+// ---------------------------------------------------------------------------
+// launch.o1.exchange uses. createLaunch mints a B20 token from a fixed 1B supply,
+// hands you (+ any insiders) an allocation, and seeds the rest into a Uniswap-v4
+// pool vs ETH — so the token actually shows up + trades on o1. Socials are written
+// as metadataKeys/Values. (The old build called the raw B20 precompile directly,
+// which minted a bare token that never registered on o1's launchpad.)
+const B20_LAUNCHPAD_ABI = [
+  { type: 'function', name: 'configVersion', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint64' }] },
+  { type: 'function', name: 'launchSupply', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  {
+    type: 'function', name: 'quotes', stateMutability: 'view', inputs: [{ name: '', type: 'address' }],
+    outputs: [
+      { name: 'registered', type: 'bool' }, { name: 'decimals', type: 'uint8' },
+      { name: 'startTickToken0Frame', type: 'int24' }, { name: 'creationFee', type: 'uint256' },
+    ],
+  },
+  {
+    type: 'function', name: 'createLaunch', stateMutability: 'payable',
+    inputs: [{ name: 'p', type: 'tuple', components: [
+      { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' },
+      { name: 'contractURI', type: 'string' }, { name: 'salt', type: 'bytes32' },
+      { name: 'quote', type: 'address' },
+      { name: 'allocationRecipients', type: 'address[]' },
+      { name: 'allocationAmounts', type: 'uint256[]' },
+      { name: 'vestedAllocations', type: 'tuple[]', components: [
+        { name: 'beneficiary', type: 'address' }, { name: 'amount', type: 'uint256' },
+        { name: 'steps', type: 'tuple[]', components: [
+          { name: 'delay', type: 'uint32' }, { name: 'cumulativeBps', type: 'uint16' },
+        ] },
+      ] },
+      { name: 'expectedConfigVersion', type: 'uint64' }, { name: 'deadline', type: 'uint64' },
+      { name: 'roleMode', type: 'uint8' },
+      { name: 'metadataKeys', type: 'string[]' }, { name: 'metadataValues', type: 'string[]' },
+    ] }],
+    outputs: [{ name: 'token', type: 'address' }, { name: 'id', type: 'bytes32' }],
+  },
+];
+
+async function launchB20(pad, { name, symbol, logo, description, twitter, website }) {
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  // the launch supply is a fixed 1B. You allocate slices to wallets via the wallet
+  // slots (your dev wallet is pre-filled in slot 1); the unallocated remainder is
+  // seeded into the o1 v4 pool. Allocations are minted directly at launch.
+  const total = padSupply(pad); // 1B — base for % amounts + the pool-room check
+  const supplyWei = parseEther(total.toLocaleString('fullwide', { useGrouping: false }));
+  const allocs = parseDistributions(total); // [{addr, amount(wei)}] from the wallet slots
+  if (!allocs.length) throw new Error('set at least one allocation — your dev wallet is pre-filled, just enter an amount');
+  const recipients = allocs.map((a) => a.addr);
+  const amounts = allocs.map((a) => a.amount);
+  const insiders = allocs.slice(1); // for the status note (everything past the dev slot)
+  const totalAlloc = amounts.reduce((s, a) => s + a, 0n);
+  if (totalAlloc >= supplyWei) throw new Error(`allocations total ${formatEther(totalAlloc)} — must stay under the ${total.toLocaleString()} supply so the pool gets seeded`);
+
+  setStatus('publishing token metadata to IPFS...');
+  const contractURI = 'ipfs://' + await uploadJsonToIpfs({ name, symbol, description, image: logo });
+
+  setStatus('reading launchpad config...');
+  const configVersion = await pub.readContract({ address: pad.launchpad, abi: B20_LAUNCHPAD_ABI, functionName: 'configVersion' });
+  // createLaunch is payable and charges a per-quote launch fee (quotes[quote].creationFee) —
+  // send it as msg.value or the tx reverts with InvalidLaunchFeePayment.
+  const quoteInfo = await pub.readContract({ address: pad.launchpad, abi: B20_LAUNCHPAD_ABI, functionName: 'quotes', args: [ZERO_ADDR] });
+  if (!quoteInfo[0]) throw new Error('native ETH is not a registered quote on this o1 launchpad');
+  const launchFee = quoteInfo[3];
+
+  const metadataKeys = [], metadataValues = [];
+  if (twitter) { metadataKeys.push('twitter'); metadataValues.push(twitter); }
+  if (website) { metadataKeys.push('website'); metadataValues.push(website); }
+
+  const p = {
+    name, symbol, contractURI,
+    salt: keccak256(stringToBytes(`${name}-${symbol}-${account.address}-${Date.now()}`)),
+    quote: ZERO_ADDR,                 // native ETH pair — what o1 launches use
+    allocationRecipients: recipients,
+    allocationAmounts: amounts,
+    vestedAllocations: [],
+    expectedConfigVersion: configVersion,
+    deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
+    roleMode: 0,
+    metadataKeys, metadataValues,
+  };
+
+  const bal = await pub.getBalance({ address: account.address });
+  if (bal === 0n) throw new Error(`no ${pad.nativeSymbol} on Base for gas`);
+  if (bal < launchFee) throw new Error(`need ${formatEther(launchFee)} ${pad.nativeSymbol} for the o1 launch fee, only have ${formatEther(bal)}`);
+
+  setStatus('simulating o1 launch…');
+  let token;
+  try {
+    const sim = await pub.simulateContract({ address: pad.launchpad, abi: B20_LAUNCHPAD_ABI, functionName: 'createLaunch', args: [p], account, value: launchFee });
+    token = sim.result[0];
+  } catch (e) {
+    throw new Error('o1 launch simulation failed: ' + (e.shortMessage || e.message).split('\n')[0]);
+  }
+
+  setStatus('sending createLaunch tx…');
+  const hash = await wallet.writeContract({ address: pad.launchpad, abi: B20_LAUNCHPAD_ABI, functionName: 'createLaunch', args: [p], value: launchFee });
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation…`);
+  const rcpt = await pub.waitForTransactionReceipt({ hash });
+  if (rcpt.status !== 'success') throw new Error('createLaunch reverted');
+
+  rememberLaunch(pad, token, symbol);
+  const walletNote = `${recipients.length} wallet${recipients.length > 1 ? 's' : ''} allocated ${formatEther(totalAlloc).toLocaleString()} tokens`;
+  setStatus(`✅ launched ${symbol} on o1 (Base)\ntoken: ${token}\n${walletNote}, rest seeded into the pool\n${pad.site(token)}`);
+  refreshBalance();
+  renderTokenList();
+  return { token, pub, wallet };
+}
+
+// ---------------------------------------------------------------------------
+// flap.sh — Portal.newTokenV6 tax token (dividends / burn / stock pairings)
+// ---------------------------------------------------------------------------
+// See memory flap-sh-mechanism. Token addr must end in 7777 (vanity) — mined
+// client-side. Tax splits mkt/burn(deflation)/dividend/lp (bps sum 10000).
+const FLAP_VANITY_SUFFIX = '7777';
+const FLAP_FEED = '0xfEEDFEEDfeEDFEedFEEdFEEDFeEdfEEdFeEdFEEd'; // dividendToken = the token itself
+const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
+const FLAP_PARAM_COMPONENTS = [
+  { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' }, { name: 'meta', type: 'string' },
+  { name: 'dexThresh', type: 'uint8' }, { name: 'salt', type: 'bytes32' }, { name: 'migratorType', type: 'uint8' },
+  { name: 'quoteToken', type: 'address' }, { name: 'quoteAmt', type: 'uint256' }, { name: 'beneficiary', type: 'address' },
+  { name: 'permitData', type: 'bytes' }, { name: 'extensionID', type: 'bytes32' }, { name: 'extensionData', type: 'bytes' },
+  { name: 'dexId', type: 'uint8' }, { name: 'lpFeeProfile', type: 'uint8' }, { name: 'buyTaxRate', type: 'uint16' },
+  { name: 'sellTaxRate', type: 'uint16' }, { name: 'taxDuration', type: 'uint64' }, { name: 'antiFarmerDuration', type: 'uint64' },
+  { name: 'mktBps', type: 'uint16' }, { name: 'deflationBps', type: 'uint16' }, { name: 'dividendBps', type: 'uint16' },
+  { name: 'lpBps', type: 'uint16' }, { name: 'minimumShareBalance', type: 'uint256' }, { name: 'dividendToken', type: 'address' },
+  { name: 'commissionReceiver', type: 'address' }, { name: 'tokenVersion', type: 'uint8' },
+];
+const FLAP_PORTAL_ABI = [{
+  type: 'function', name: 'newTokenV6', stateMutability: 'payable',
+  inputs: [{ name: 'params', type: 'tuple', components: FLAP_PARAM_COMPONENTS }],
+  outputs: [{ name: 'token', type: 'address' }],
+}];
+
+// EIP-1167 clone init-code hash for the token implementation this pad deploys
+function flapInitCodeHash(impl) {
+  return keccak256(concat(['0x3d602d80600a3d3981f3363d3d373d3d3d363d73', getAddress(impl), '0x5af43d82803e903d91602b57fd5bf3']));
+}
+function flapTokenAddress(portal, initHash, salt) {
+  return '0x' + keccak256(concat(['0xff', getAddress(portal), salt, initHash])).slice(-40);
+}
+// mine a salt whose CREATE2 token address ends in 7777 (~65k tries avg)
+async function mineFlapSalt(pad) {
+  const initHash = flapInitCodeHash(pad.cloneImpl);
+  const base = `flap-${account.address}-${Date.now()}-${Math.random()}`;
+  for (let n = 0; ; n++) {
+    const salt = keccak256(stringToBytes(`${base}-${n}`));
+    const addr = flapTokenAddress(pad.portal, initHash, salt);
+    if (addr.toLowerCase().endsWith(FLAP_VANITY_SUFFIX)) return { salt, token: getAddress(addr), tries: n + 1 };
+    if (n % 4000 === 0 && n) { setStatus(`mining vanity address (…${FLAP_VANITY_SUFFIX})… ${n.toLocaleString()} tries`); await new Promise((r) => setTimeout(r, 0)); }
+  }
+}
+
+function flapReadForm(pad) {
+  const qsel = document.getElementById('flapQuoteSelect');
+  let quote = pad.quotes.find((q) => q.symbol === qsel.value) || pad.quotes[0];
+  if (quote.address === 'custom') {
+    const c = document.getElementById('flapQuoteCustom').value.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(c)) throw new Error('enter a valid payment token address (0x…)');
+    quote = { symbol: 'custom', address: getAddress(c) };
+  }
+  const taxPct = Math.min(50, Math.max(0, +document.getElementById('flapTax').value || 10));
+  const taxBps = Math.round(taxPct * 100);
+  const mode = document.getElementById('flapMode').value; // standard | burn | dividends
+  const splitPct = Math.min(100, Math.max(0, +document.getElementById('flapSplit').value || 50));
+  const splitBps = Math.round(splitPct * 100);
+  const devBuy = +(document.getElementById('flapDevBuy').value || '0');
+  const devFund = document.getElementById('flapDevFund').value; // BNB | USDC (native pads ignore it)
+
+  let mktBps = 10000, deflationBps = 0, dividendBps = 0, dividendToken = ZERO_ADDR, minimumShareBalance = 0n;
+  if (mode === 'burn') { deflationBps = splitBps; mktBps = 10000 - splitBps; }
+  else if (mode === 'dividends') {
+    dividendBps = splitBps; mktBps = 10000 - splitBps;
+    const dt = document.getElementById('flapDivToken').value; // self | quote | custom
+    if (dt === 'self') dividendToken = FLAP_FEED;
+    else if (dt === 'quote') dividendToken = quote.address;
+    else {
+      const c = document.getElementById('flapDivCustom').value.trim();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(c)) throw new Error('dividend token: enter a valid ERC-20 address');
+      dividendToken = getAddress(c);
+    }
+    const ms = +(document.getElementById('flapMinShare').value || '0');
+    if (!(ms > 0)) throw new Error('dividends mode needs a minimum share balance > 0');
+    minimumShareBalance = parseEther(ms.toString());
+  }
+  return { quote, taxBps, mode, mktBps, deflationBps, dividendBps, lpBps: 0, dividendToken, minimumShareBalance, devBuy, devFund };
+}
+
+// Fund a stock-quote dev buy by swapping BNB/USDC into the pair token through the
+// OpenOcean DEX aggregator (routes across PancakeSwap/Uniswap V2+V3 — the same
+// liquidity GMGN uses), then flap buys with the acquired token. `amountHuman` is a
+// human amount (e.g. "0.5"). Returns the raw amount of `quote` received.
+const OO_NATIVE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE';
+const BSC_USDC = '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d';
+async function aggregatorAcquireQuote(pub, wallet, chainKey, fund, amountHuman, quote) {
+  const inTok = fund === 'BNB' ? OO_NATIVE : getAddress(fund);
+  const url = `https://open-api.openocean.finance/v3/${chainKey}/swap_quote`
+    + `?inTokenAddress=${inTok}&outTokenAddress=${getAddress(quote)}`
+    + `&amount=${amountHuman}&gasPrice=1&slippage=5&account=${account.address}`;
+  const res = await fetch(url).then((r) => r.json()).catch(() => null);
+  const tx = res && res.data;
+  if (!tx || !tx.to || !tx.data) throw new Error('no aggregator route from the funding token to the pair token');
+
+  // ERC-20 funding needs an allowance to the aggregator router
+  if (fund !== 'BNB') {
+    const dec = await pub.readContract({ address: getAddress(fund), abi: ERC20, functionName: 'decimals' });
+    const amtRaw = parseUnits(String(amountHuman), dec);
+    const alw = await pub.readContract({ address: getAddress(fund), abi: ERC20, functionName: 'allowance', args: [account.address, getAddress(tx.to)] });
+    if (alw < amtRaw) {
+      const ah = await wallet.writeContract({ address: getAddress(fund), abi: ERC20, functionName: 'approve', args: [getAddress(tx.to), amtRaw] });
+      await pub.waitForTransactionReceipt({ hash: ah });
+    }
+  }
+
+  const before = await pub.readContract({ address: getAddress(quote), abi: ERC20, functionName: 'balanceOf', args: [account.address] });
+  const hash = await wallet.sendTransaction({ to: getAddress(tx.to), value: BigInt(tx.value || 0), data: tx.data });
+  await pub.waitForTransactionReceipt({ hash });
+  const after = await pub.readContract({ address: getAddress(quote), abi: ERC20, functionName: 'balanceOf', args: [account.address] });
+  const got = after - before;
+  if (got <= 0n) throw new Error('aggregator swap returned no pair tokens');
+  return got;
+}
+
+async function launchFlap(pad, { name, symbol, logo, description, twitter, website, feeRecipient }) {
+  const f = flapReadForm(pad);
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  // flap `meta` is a bare IPFS CID pointing at the metadata JSON (with the image)
+  setStatus('publishing token metadata to IPFS...');
+  const meta = await uploadJsonToIpfs({ name, symbol, description, image: logo, twitter, website });
+
+  const isNative = f.quote.address === ZERO_ADDR;
+  // flap requires a non-zero dividendToken when the quote is an ERC-20; default it
+  // to the quote token itself (harmless in standard mode where dividendBps == 0).
+  let dividendToken = f.dividendToken;
+  if (!isNative && dividendToken === ZERO_ADDR) dividendToken = f.quote.address;
+
+  // dev buy. Native quote: pay msg.value directly. ERC-20/stock quote: acquire the
+  // pair token by swapping BNB/USDC on PancakeSwap, approve it to flap, then flap's
+  // launch does the initial buy with `quoteAmt` — so you never hold the stock.
+  let quoteAmt = 0n, value = 0n;
+  if (f.devBuy > 0) {
+    if (isNative) {
+      quoteAmt = parseEther(f.devBuy.toString());
+      value = quoteAmt;
+    } else {
+      if (pad.chainId !== 56) throw new Error('dev buy on a stock pair is only supported on BNB');
+      const fundIsNative = f.devFund === 'BNB';
+      setStatus(`swapping ${f.devBuy} ${f.devFund} → ${f.quote.symbol} via aggregator…`);
+      const got = await aggregatorAcquireQuote(pub, wallet, 'bsc', fundIsNative ? 'BNB' : BSC_USDC, f.devBuy, f.quote.address);
+      setStatus(`approving ${f.quote.symbol} to flap…`);
+      const alw = await pub.readContract({ address: getAddress(f.quote.address), abi: ERC20, functionName: 'allowance', args: [account.address, pad.portal] });
+      if (alw < got) {
+        const ah = await wallet.writeContract({ address: getAddress(f.quote.address), abi: ERC20, functionName: 'approve', args: [pad.portal, got] });
+        await pub.waitForTransactionReceipt({ hash: ah });
+      }
+      quoteAmt = got; // flap pulls this via allowance during newTokenV6
+    }
+  }
+
+  setStatus(`mining vanity address (…${FLAP_VANITY_SUFFIX})…`);
+  const { salt, token } = await mineFlapSalt(pad);
+
+  const params = {
+    name, symbol, meta, dexThresh: 1, salt, migratorType: 1,
+    quoteToken: f.quote.address, quoteAmt, beneficiary: feeRecipient,
+    permitData: '0x', extensionID: '0x' + '00'.repeat(32), extensionData: '0x',
+    dexId: 0, lpFeeProfile: 0, buyTaxRate: f.taxBps, sellTaxRate: f.taxBps,
+    taxDuration: 3153600000n, antiFarmerDuration: 2592000n,
+    mktBps: f.mktBps, deflationBps: f.deflationBps, dividendBps: f.dividendBps, lpBps: f.lpBps,
+    minimumShareBalance: f.minimumShareBalance, dividendToken,
+    commissionReceiver: ZERO_ADDR, tokenVersion: 6,
+  };
+
+  setStatus('simulating flap launch...');
+  try {
+    await pub.simulateContract({ address: pad.portal, abi: FLAP_PORTAL_ABI, functionName: 'newTokenV6', args: [params], account, value });
+  } catch (e) {
+    throw new Error('flap simulation failed: ' + (e.shortMessage || e.message).split('\n')[0]);
+  }
+
+  setStatus('sending flap newTokenV6 tx...');
+  const hash = await wallet.writeContract({ address: pad.portal, abi: FLAP_PORTAL_ABI, functionName: 'newTokenV6', args: [params], value });
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
+  const rcpt = await pub.waitForTransactionReceipt({ hash });
+  if (rcpt.status !== 'success') throw new Error('flap launch reverted');
+
+  rememberLaunch(pad, token, symbol);
+  const modeNote = f.mode === 'burn' ? `burn ${f.deflationBps / 100}% of tax`
+    : f.mode === 'dividends' ? `dividends ${f.dividendBps / 100}% of tax` : 'standard';
+  setStatus(`✅ launched ${symbol} on flap · ${pad.nativeSymbol === 'BNB' ? 'BNB' : 'Robinhood'}\ntoken: ${token}\npair: ${f.quote.symbol} · tax ${f.taxBps / 100}% · ${modeNote}\n${pad.site(token)}`);
+  refreshBalance();
+  renderTokenList();
+}
+
+// ---------------------------------------------------------------------------
 // launch
 // ---------------------------------------------------------------------------
 async function launch() {
   const pad = activePad;
   if (!pad.enabled) throw new Error('that launchpad is not live yet');
-  if (!account) throw new Error('unlock your wallet first');
+  // EVM pads need an EVM key loaded into `account`. If none is present (e.g. this
+  // browser origin has no key stored, or only a SOL key was imported), pop the key
+  // import form instead of a cryptic error — there is no password, just paste the key.
+  if (pad.vm !== 'sol' && !account) {
+    $('importEvmKey').value = '';
+    $('importErr').textContent = 'paste your EVM private key to launch here';
+    $('keysOverlay').classList.remove('hidden');
+    $('importEvmKey').focus();
+    throw new Error('no EVM key loaded on this site — paste your key in the 🔑 form that just opened (this origin/browser stores keys separately)');
+  }
   const name = document.getElementById('name').value.trim();
-  const symbol = document.getElementById('symbol').value.trim().toUpperCase();
+  // ticker: preserve the user's casing/length (Pons allows arbitrarily long,
+  // mixed-case tickers — no forced uppercase, no length cap)
+  const symbol = document.getElementById('symbol').value.trim();
   if (!name || !symbol) throw new Error('name and ticker required');
+
+  // Uniswap V2 fair launch (no image / bonding curve) — its own EVM flow
+  if (pad.family === 'uniswap') {
+    await launchUniswap(pad, { name, symbol });
+    return;
+  }
+
   if (!logoBlob) throw new Error('image required');
   const description = document.getElementById('desc').value.trim() || DEFAULT_DESC;
   const twitter = document.getElementById('twitter').value.trim();
@@ -481,23 +1364,33 @@ async function launch() {
     return;
   }
 
-  const devBuy = selectedBuyAmount();
-
   const feeRecipientRaw = document.getElementById('feeRecipient').value.trim();
   if (feeRecipientRaw && !/^0x[0-9a-fA-F]{40}$/.test(feeRecipientRaw)) throw new Error('fee recipient is not a valid address');
   const feeRecipient = feeRecipientRaw || account.address;
+
+  // DYORswap V3 launchpad on ARC — API-driven, dev buy in USDC
+  if (pad.family === 'dyorswap') {
+    await launchDyorswap(pad, { name, symbol, description, twitter, website, feeRecipient });
+    return;
+  }
+
+  const devBuy = selectedBuyAmount();
 
   const supplyTokens = padSupply(pad);
   if (pad.customSupply && !(supplyTokens >= 1 && supplyTokens <= 1e18)) throw new Error('supply must be between 1 and 1e18 tokens');
 
   const dists = distroOn ? parseDistributions(supplyTokens) : [];
-  if (dists.length && pad.curve && selectedChip >= 0) {
-    const x = +buyChips[selectedChip];
-    const expected = parseEther(Math.floor((supplyTokens * x) / (pad.curve.cap + x)).toString());
-    const total = dists.reduce((s, d) => s + d.amount, 0n);
-    if (total > expected) throw new Error('distribution total exceeds what your dev buy gets you — bump the dev buy or lower amounts');
+  // o1/B20 allocations are minted NATIVELY at launch (createLaunch) — they don't come
+  // from a dev buy, so skip the curve/dev-buy distribution checks for it entirely.
+  if (pad.family !== 'b20') {
+    if (dists.length && pad.curve && selectedChip >= 0) {
+      const x = +buyChips[selectedChip];
+      const expected = parseEther(Math.floor((supplyTokens * x) / (pad.curve.cap + x)).toString());
+      const total = dists.reduce((s, d) => s + d.amount, 0n);
+      if (total > expected) throw new Error('distribution total exceeds what your dev buy gets you — bump the dev buy or lower amounts');
+    }
+    if (dists.length && selectedChip < 0) throw new Error('distribution needs a dev buy (that is where the tokens come from)');
   }
-  if (dists.length && selectedChip < 0) throw new Error('distribution needs a dev buy (that is where the tokens come from)');
 
   // Rialto hosts + hashes its own image, so it skips the IPFS upload entirely
   if (pad.family === 'rialto') {
@@ -513,9 +1406,53 @@ async function launch() {
   setStatus('uploading image to IPFS...');
   const logo = await uploadToIpfs(logoBlob);
 
-  if (pad.family === 'pons-v2') {
-    const { token, pub, wallet } = await launchPonsV2(pad, {
+  // Pools — open v4 launchpad. createToken (IPFS image) -> distributeToken -> dev buy
+  if (pad.family === 'pools') {
+    const { token, pub, wallet } = await launchPools(pad, { name, symbol, logo, description, twitter, website, devBuy: selectedBuyAmount() });
+    if (token && distroOn) {
+      const dists = parseDistributions(padSupply(pad));
+      if (dists.length) await runDistributions(pad, pub, wallet, token, dists, $('status'));
+    }
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
+  // o1 / Base — B20 token (on-chain allocation + insider allocations, no curve)
+  if (pad.family === 'b20') {
+    await launchB20(pad, { name, symbol, logo, description, twitter, website });
+    return;
+  }
+
+  // flap.sh — tax token with dividends/burn modes + stock pairings (vanity 7777)
+  if (pad.family === 'flap') {
+    await launchFlap(pad, { name, symbol, logo, description, twitter, website, feeRecipient });
+    return;
+  }
+
+  if (pad.family === 'pons-v1') {
+    const { token, pub, wallet } = await launchPonsV1(pad, {
       name, symbol, logo, description, twitter, website, feeRecipient, devBuy,
+    });
+    if (token && dists.length) await runDistributions(pad, pub, wallet, token, dists, $('status'));
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
+  if (pad.family === 'v4curve') {
+    await launchV4Curve(pad, { name, symbol, logo, description, twitter, website });
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
+  if (pad.family === 'pons-v2') {
+    const pair = resolvePonsPair(pad);
+    const devBuyStr = document.getElementById('ponsDevBuy').value.trim() || '0';
+    const buyback = document.getElementById('ponsBuyback').checked;
+    const { token, pub, wallet } = await launchPonsV2(pad, {
+      name, symbol, logo, description, twitter, website, feeRecipient, pair, devBuyStr, buyback,
     });
     if (token && dists.length) await runDistributions(pad, pub, wallet, token, dists, $('status'));
     refreshBalance();
@@ -605,6 +1542,175 @@ async function rialtoAuth(pad) {
   const { token } = await vr.json();
   if (!token) throw new Error('Rialto auth returned no token');
   return token;
+}
+
+// ---------------------------------------------------------------------------
+// DYORswap V3 launchpad (ARC): upload image -> publish metadata -> prepare an
+// unsigned launch tx via the API -> sign + submit. The launchpad deploys the
+// token, pools it vs USDC on Uniswap V3 and locks the LP NFT. Dev buy is USDC.
+// ---------------------------------------------------------------------------
+async function dyorUpload(api, blob) {
+  const fd = new FormData();
+  fd.append('image', new File([blob], 'logo.' + (blob.type === 'image/gif' ? 'gif' : 'png'), { type: blob.type }));
+  const r = await fetch(`${api}/images`, { method: 'POST', body: fd });
+  if (!r.ok) throw new Error(`DYORswap image upload failed (${r.status})`);
+  const { url } = await r.json();
+  if (!url) throw new Error('DYORswap image upload returned no url');
+  return url;
+}
+
+async function dyorPost(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error?.message || j.error || `DYORswap request failed (${r.status})`);
+  return j;
+}
+
+async function launchDyorswap(pad, inp) {
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  // dev buy in USDC (raw decimal string, ≤6 dp), from the selected dev-buy chip
+  const initialBuyEth = selectedChip >= 0 ? buyChips[selectedChip] : '0';
+
+  // step-labeled so any failure says exactly where it happened
+  const step = async (label, fn) => {
+    setStatus(label + '…');
+    try { return await fn(); }
+    catch (e) { throw new Error(`${label} failed: ${e.shortMessage || e.message}`); }
+  };
+
+  const image = await step('uploading image', () => dyorUpload(pad.api, logoBlob));
+  const meta = await step('publishing metadata', () => dyorPost(`${pad.api}/metadata`, {
+    name: inp.name, symbol: inp.symbol, image,
+    description: inp.description,
+    ...(inp.website ? { website: inp.website } : {}),
+    ...(inp.twitter ? { x: inp.twitter } : {}),
+  }));
+  const prep = await step('preparing launch', () => dyorPost(`${pad.api}/launch/prepare`, {
+    name: inp.name, symbol: inp.symbol, metadataUri: meta.uri,
+    feeRecipient: inp.feeRecipient, sender: account.address,
+    initialBuyEth, minTokensOut: '0',
+  }));
+  if (!prep.to || !prep.data) throw new Error('DYORswap prepare returned no transaction');
+
+  const value = BigInt(prep.value || '0');
+  // launches are heavy (~6.4M gas: token deploy + V3 pool + dev-buy swap). Estimate
+  // if the RPC allows, else fall back to a fixed limit — flaky public-RPC estimateGas
+  // on a tx this big is the usual cause of "HTTP request failed".
+  let gas = 8_000_000n;
+  try {
+    gas = ((await pub.estimateGas({ account: account.address, to: prep.to, data: prep.data, value })) * 12n) / 10n;
+  } catch { /* keep the fixed fallback */ }
+
+  const [gasPrice, bal] = await Promise.all([
+    pub.getGasPrice().catch(() => 0n),
+    pub.getBalance({ address: account.address }),
+  ]);
+  const needed = value + gas * gasPrice;
+  if (bal < needed) throw new Error(`insufficient balance: need ~${formatEther(needed)} USDC (dev buy + fee + gas), have ${formatEther(bal)}`);
+
+  const hash = await step('sending launch tx', () => wallet.sendTransaction({ to: prep.to, data: prep.data, value, gas }));
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation…`);
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error('launch tx reverted: ' + hash);
+
+  // the launched token is the ERC-20 mint (Transfer from the zero address, 3 topics)
+  const ZERO_TOPIC = '0x' + '0'.repeat(64);
+  const mint = receipt.logs.find((l) => l.topics[0] === TRANSFER_TOPIC && l.topics.length === 3 && l.topics[1] === ZERO_TOPIC);
+  const token = mint?.address;
+  if (token) rememberLaunch(pad, token, inp.symbol);
+
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${esc(token || '')}<br>` +
+    `pooled vs USDC on Uniswap V3 · <b>LP locked</b>${+initialBuyEth > 0 ? ` · dev buy ${esc(initialBuyEth)} USDC` : ''}<br>` +
+    (token ? `<a href="${pad.site(token)}" target="_blank" rel="noopener">token</a> · <a href="https://dyorv3.org" target="_blank" rel="noopener">dyor</a> · ` : '') +
+    `<a href="${pad.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">launch tx</a>`;
+  refreshBalance();
+  renderTokenList();
+}
+
+// ---------------------------------------------------------------------------
+// Uniswap V2 fair launch: deploy fixed-supply token -> approve router -> add
+// ETH liquidity with the LP minted straight to the dead address (burnt).
+// ---------------------------------------------------------------------------
+async function launchUniswap(pad, inp) {
+  const cfg = UNISWAP_CHAINS[pad.chainId];
+  if (!cfg) throw new Error('Uniswap not configured for this chain');
+
+  const supplyTokens = padSupply(pad); // whole tokens
+  if (!(supplyTokens >= 1 && supplyTokens <= 1e18)) throw new Error('supply must be between 1 and 1e18 tokens');
+  const supply = parseEther(supplyTokens.toLocaleString('fullwide', { useGrouping: false }));
+
+  const ethRaw = $('uniEth').value.trim();
+  const ethLiq = parseEther(ethRaw || '0');
+  if (ethLiq <= 0n) throw new Error('enter the amount of ETH to pool as liquidity');
+
+  const pct = Math.min(100, Math.max(1, +($('uniPct').value.trim() || 100)));
+  const tokenToPool = (supply * BigInt(Math.round(pct * 100))) / 10000n;
+  const slipPct = Math.min(50, Math.max(0, +($('uniSlippage').value.trim() || 2)));
+  const bpsKeep = BigInt(Math.round((100 - slipPct) * 100));
+  const minToken = (tokenToPool * bpsKeep) / 10000n;
+  const minEth = (ethLiq * bpsKeep) / 10000n;
+
+  // fee (buy/sell tax) -> fee wallet. 0% deploys the plain token (no tax code);
+  // >0% deploys the tax variant. Only supported on mainnet (deterministic pair).
+  const feePct = Math.min(20, Math.max(0, +($('uniFee').value.trim() || 0)));
+  const feeBps = Math.round(feePct * 100);
+  const feeWallet = $('uniFeeWallet').value.trim();
+  if (feeBps > 0) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(feeWallet)) throw new Error('fee wallet is not a valid address');
+    if (pad.chainId !== 1) throw new Error('the buy/sell fee token is mainnet-only for now — set fee to 0 on other chains');
+  }
+  const taxed = feeBps > 0;
+
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  const bal = await pub.getBalance({ address: account.address });
+  if (bal < ethLiq) throw new Error(`insufficient balance: need ${formatEther(ethLiq)} ETH for liquidity + gas, have ${formatEther(bal)}`);
+
+  // 1) deploy the token (constructor mints full supply to us)
+  setStatus('deploying token…');
+  const deployHash = taxed
+    ? await wallet.deployContract({ abi: FAIRTOKEN_TAX_ABI, bytecode: FAIRTOKEN_TAX_BYTECODE, args: [inp.name, inp.symbol, supply, getAddress(feeWallet), feeBps] })
+    : await wallet.deployContract({ abi: FAIRTOKEN_ABI, bytecode: FAIRTOKEN_BYTECODE, args: [inp.name, inp.symbol, supply] });
+  setStatus(`deploy tx: ${deployHash}\nwaiting…`);
+  const deployRcpt = await pub.waitForTransactionReceipt({ hash: deployHash, confirmations: 1 });
+  if (deployRcpt.status !== 'success' || !deployRcpt.contractAddress) throw new Error('token deploy failed');
+  const token = getAddress(deployRcpt.contractAddress);
+
+  // 2) approve the router for the pooled amount
+  setStatus('approving router…');
+  const approveHash = await wallet.writeContract({
+    address: token, abi: FAIRTOKEN_ABI, functionName: 'approve', args: [cfg.router, tokenToPool],
+  });
+  const approveRcpt = await pub.waitForTransactionReceipt({ hash: approveHash, confirmations: 1 });
+  if (approveRcpt.status !== 'success') throw new Error('approve failed');
+
+  // 3) add liquidity with LP minted to the dead address (permanently burnt)
+  setStatus('adding liquidity + burning LP…');
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
+  const lpHash = await wallet.writeContract({
+    address: cfg.router, abi: UNISWAP_V2_ROUTER_ABI, functionName: 'addLiquidityETH',
+    args: [token, tokenToPool, minToken, minEth, DEAD_ADDRESS, deadline], value: ethLiq,
+  });
+  setStatus(`liquidity tx: ${lpHash}\nwaiting…`);
+  const lpRcpt = await pub.waitForTransactionReceipt({ hash: lpHash, confirmations: 1 });
+  if (lpRcpt.status !== 'success') throw new Error('addLiquidityETH reverted: ' + lpHash);
+
+  const pair = await pub.readContract({ address: cfg.factory, abi: UNISWAP_V2_FACTORY_ABI, functionName: 'getPair', args: [token, cfg.weth] }).catch(() => null);
+  rememberLaunch(pad, token, inp.symbol);
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${esc(token)}<br>` +
+    `${pct}% of supply pooled vs ${esc(formatEther(ethLiq))} ETH · <b>LP burnt</b>` +
+    `${pct < 100 ? ` · ${esc(formatEther(supply - tokenToPool))} tokens kept` : ''}` +
+    `${taxed ? ` · <b>${feePct}% fee</b> → ${esc(feeWallet.slice(0, 6) + '…' + feeWallet.slice(-4))}` : ''}<br>` +
+    `<a href="${cfg.explorer}/token/${esc(token)}" target="_blank" rel="noopener">token</a> · ` +
+    (pair ? `<a href="https://app.uniswap.org/explore/tokens/ethereum/${esc(token)}" target="_blank" rel="noopener">uniswap</a> · ` : '') +
+    `<a href="${cfg.explorer}/tx/${esc(lpHash)}" target="_blank" rel="noopener">liquidity tx</a>`;
+  refreshBalance();
+  renderTokenList();
 }
 
 // Upload the logo to Rialto's asset store (they host + hash it); returns the URL
@@ -784,10 +1890,20 @@ function solParamsFromUI(pad) {
   };
 }
 
+// resolve the Raydium quote mint from its dropdown (preset or custom)
+function raydiumQuoteMint(pad) {
+  const sel = $('raydiumQuoteSelect').value;
+  const q = (pad.quotes || []).find((x) => x.symbol === sel) || (pad.quotes || [])[0];
+  if (q.mint === 'custom') {
+    const m = $('raydiumQuoteCustom').value.trim();
+    if (!isSolAddress(m)) throw new Error('enter a valid custom quote mint address');
+    return m;
+  }
+  return q.mint;
+}
+
 async function launchSol(pad, inp) {
   if (!solKeyB58) throw new Error('no SOL key stored — re-import your wallet with a SOL private key');
-  const quoteMint = solQuoteMint(pad);
-  const params = solParamsFromUI(pad);
 
   setStatus('uploading image + metadata to IPFS...');
   const imgHash = (await uploadToIpfs(logoBlob)).replace('ipfs://', '');
@@ -798,9 +1914,61 @@ async function launchSol(pad, inp) {
   });
   const uri = IPFS_GW(metaHash);
 
+  // Raydium LaunchLab path
+  if (pad.family === 'raydium') {
+    const quoteMint = raydiumQuoteMint(pad);
+    const buyAmountUi = $('raydiumDevBuy').value.trim() || '0';
+    setStatus('loading Solana module...');
+    const { launchRaydium } = await import('./solana.js');
+    const res = await launchRaydium({
+      rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint,
+      name: inp.name, symbol: inp.symbol, uri, buyAmountUi,
+      migrateType: 'cpmm', platformId: pad.platformId, onStatus: (m) => setStatus(m),
+    });
+    rememberLaunch(pad, res.mint, inp.symbol);
+    $('status').innerHTML =
+      `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>` +
+      `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">token on solscan</a>` +
+      (res.sig ? ` · <a href="${pad.explorer}/tx/${res.sig}" target="_blank" rel="noopener">launch tx</a>` : '');
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
+  // Custom single-sided CLMM curve path
+  if (pad.family === 'clmm') {
+    const q = pad.quotes.find((x) => x.symbol === $('clmmQuoteSelect').value) || pad.quotes[0];
+    const quote = q.mint === 'custom' ? $('clmmQuoteCustom').value.trim() : q.mint;
+    if (!isSolAddress(quote)) throw new Error('enter a valid quote mint address');
+    const supplyTokens = +($('clmmSupply').value.trim().replace(/,/g, '')) || 1000000000;
+    const devBuyQuote = +($('clmmDevBuy').value.trim() || '0');
+    const targetPct = +($('clmmTargetPct').value.trim() || '15');
+    const feeRecipientRaw = $('clmmFeeRecipient').value.trim();
+    if (feeRecipientRaw && !isSolAddress(feeRecipientRaw)) throw new Error('fee recipient is not a valid Solana address');
+    setStatus('loading Solana module...');
+    const { launchClmmCurve } = await import('./solana.js');
+    const res = await launchClmmCurve({
+      rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint: quote,
+      name: inp.name, symbol: inp.symbol, uri, supplyTokens, decimals: 6,
+      devBuyQuote, targetPct, feeRecipient: feeRecipientRaw || null,
+      onStatus: (m) => setStatus(m),
+    });
+    rememberLaunch(pad, res.mint, inp.symbol);
+    $('status').innerHTML =
+      `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>` +
+      `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">token on solscan</a> · ` +
+      `<a href="https://raydium.io/clmm/create-position/?pool_id=${res.poolId}" target="_blank" rel="noopener">CLMM pool</a>` +
+      (res.buySig ? ` · dev buy ✓` : '');
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
+  // Meteora DBC path
+  const quoteMint = solQuoteMint(pad);
+  const params = solParamsFromUI(pad);
   setStatus('loading Solana module...');
   const { launchMeteora } = await import('./solana.js');
-
   const res = await launchMeteora({
     rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint,
     name: inp.name, symbol: inp.symbol, uri, params,
@@ -816,83 +1984,427 @@ async function launchSol(pad, inp) {
   renderTokenList();
 }
 
-// pons v2 launch: pre-launch checks -> economics pin -> launchToken -> dev buy
-// on the returned curve (v2 has no initial-buy param in the launch tx itself)
-async function launchPonsV2(pad, inp) {
+// Pons v1 launch — PonsLaunchFactory.launchToken(params, launchConfigId, dexId, salt).
+// Direct DEX launch paired vs WETH (config 0). Tickers can be arbitrarily long.
+const PONS_V1_FACTORY_ABI = [
+  { type: 'function', name: 'launchEnabled', stateMutability: 'view', inputs: [], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'launchFee', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'whitelistedLaunchers', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'bool' }] },
+  {
+    type: 'function', name: 'launchToken', stateMutability: 'payable',
+    inputs: [
+      { name: 'params', type: 'tuple', components: [
+        { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' },
+        { name: 'logo', type: 'string' }, { name: 'description', type: 'string' },
+        { name: 'socials', type: 'tuple', components: [
+          { name: 'twitter', type: 'string' }, { name: 'telegram', type: 'string' },
+          { name: 'discord', type: 'string' }, { name: 'website', type: 'string' }, { name: 'farcaster', type: 'string' },
+        ] },
+        { name: 'feeWallet', type: 'address' },
+      ] },
+      { name: 'launchConfigId', type: 'uint256' }, { name: 'dexId', type: 'uint256' }, { name: 'salt', type: 'bytes32' },
+    ],
+    outputs: [{ name: 'token', type: 'address' }],
+  },
+  {
+    type: 'function', name: 'predictTokenAddress', stateMutability: 'view',
+    inputs: [
+      { name: 'params', type: 'tuple', components: [
+        { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' },
+        { name: 'logo', type: 'string' }, { name: 'description', type: 'string' },
+        { name: 'socials', type: 'tuple', components: [
+          { name: 'twitter', type: 'string' }, { name: 'telegram', type: 'string' },
+          { name: 'discord', type: 'string' }, { name: 'website', type: 'string' }, { name: 'farcaster', type: 'string' },
+        ] },
+        { name: 'feeWallet', type: 'address' },
+      ] },
+      { name: 'launchConfigId', type: 'uint256' }, { name: 'dexId', type: 'uint256' },
+      { name: 'salt', type: 'bytes32' }, { name: 'deployer', type: 'address' },
+    ],
+    outputs: [{ type: 'address' }],
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Pools — open-to-everyone Uniswap-v4 launchpad (LiquidityLauncher).
+// ---------------------------------------------------------------------------
+const POOLS_LAUNCHER_ABI = [
+  { type: 'function', name: 'createToken', stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'factory', type: 'address' }, { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' },
+      { name: 'decimals', type: 'uint8' }, { name: 'initialSupply', type: 'uint128' },
+      { name: 'recipient', type: 'address' }, { name: 'tokenData', type: 'bytes' },
+    ], outputs: [{ name: 'token', type: 'address' }] },
+  { type: 'function', name: 'distributeToken', stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'distribution', type: 'tuple', components: [
+        { name: 'strategy', type: 'address' }, { name: 'amount', type: 'uint128' }, { name: 'configData', type: 'bytes' },
+      ] },
+      { name: 'salt', type: 'bytes32' },
+    ], outputs: [] },
+  { type: 'event', name: 'TokenCreated', inputs: [{ name: 'tokenAddress', type: 'address', indexed: false }] },
+];
+// v4 hop-path swap router (used for the optional dev buy)
+const POOLS_ROUTER_ABI = [{
+  type: 'function', name: 'swap', stateMutability: 'payable',
+  inputs: [
+    { name: 'hops', type: 'tuple[]', components: [
+      { name: 'kind', type: 'uint8' }, { name: 'tokenIn', type: 'address' }, { name: 'tokenOut', type: 'address' },
+      { name: 'c3', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' },
+      { name: 'hooks', type: 'address' }, { name: 'hookData', type: 'bytes' }, { name: 'a9', type: 'address' }, { name: 'b10', type: 'bytes32' },
+    ] },
+    { name: 'recipient', type: 'address' }, { name: 'amountIn', type: 'uint256' }, { name: 'minOut', type: 'uint256' }, { name: 'deadline', type: 'uint256' },
+  ], outputs: [],
+}];
+const POOLS_TOKEN_DATA_TUPLE = [{ type: 'tuple', components: [{ type: 'string' }, { type: 'string' }, { type: 'string' }, { type: 'bytes' }] }];
+// deterministic token-address prediction (needed before the token exists, so its
+// address can be baked into the atomic launch+buy calldata)
+const POOLS_GRAFFITI_ABI = [{ type: 'function', name: 'getGraffiti', stateMutability: 'pure', inputs: [{ type: 'address' }], outputs: [{ type: 'bytes32' }] }];
+const POOLS_PREDICT_ABI = [{ type: 'function', name: 'getUERC20Address', stateMutability: 'view', inputs: [{ type: 'string' }, { type: 'string' }, { type: 'uint8' }, { type: 'address' }, { type: 'bytes32' }], outputs: [{ type: 'address' }] }];
+// creator fee claiming — every launch mints you a "Fee Beneficiary" NFT (pad.feeNft)
+// whose id equals the LP position id; collectFees([ids]) on pad.feeHolder sweeps the
+// 0.25% swap fees your single-sided position has earned. Position id is captured from
+// the launch receipt (below) so claiming never needs a slow log scan.
+const POOLS_COLLECT_ABI = [{ type: 'function', name: 'collectFees', stateMutability: 'nonpayable', inputs: [{ name: 'ids', type: 'uint256[]' }], outputs: [] }];
+
+// Pull the LP position id from a launch receipt: the Fee Beneficiary NFT mint
+// (Transfer 0x0 -> you, tokenId in topics[3]). Returns a decimal string or null.
+function poolsPositionIdFromReceipt(pad, receipt) {
+  const ZT = '0x' + '0'.repeat(64);
+  const me = account.address.toLowerCase();
+  const mint = receipt.logs.find((l) =>
+    l.address.toLowerCase() === pad.feeNft.toLowerCase()
+    && l.topics[0] === TRANSFER_TOPIC && l.topics.length === 4
+    && l.topics[1] === ZT && ('0x' + l.topics[2].slice(26)).toLowerCase() === me);
+  return mint ? BigInt(mint.topics[3]).toString() : null;
+}
+
+// every Pools liquidity strategy we've seen — the distributeToken tx moves supply
+// into one of these, and that same tx mints your Fee Beneficiary NFT
+const POOLS_STRATEGIES = [
+  '0xcE57498D3474DCC244dFb6710fFbE6D4441cD2b2', // current live default
+  '0x60D73b21cDf2EA846ab3d58699BBbb8F29d72491', // earlier strategy (older launches)
+];
+
+// Backfill: find a token's position id from chain (for launches recorded before we
+// started capturing it). Search the token's transfer into any known strategy, then
+// read the Fee Beneficiary mint from that tx — works across strategy versions.
+async function findPoolsPositionId(pad, token) {
+  const pub = publicClientFor(pad);
+  for (const strat of POOLS_STRATEGIES) {
+    const stratTopic = '0x' + '0'.repeat(24) + strat.slice(2).toLowerCase();
+    const logs = await pub.getLogs({ address: getAddress(token), topics: [TRANSFER_TOPIC, null, stratTopic], fromBlock: pad.startBlock, toBlock: 'latest' }).catch(() => []);
+    // dedupe by tx and check the earliest ones — the distributeToken (which mints your
+    // Fee Beneficiary NFT) is right after createToken; later txs are just trades
+    const txs = [...new Set(logs.map((l) => l.transactionHash))].slice(0, 20);
+    for (const hash of txs) {
+      const r = await pub.getTransactionReceipt({ hash }).catch(() => null);
+      const id = r && poolsPositionIdFromReceipt(pad, r);
+      if (id) return id;
+    }
+  }
+  return null;
+}
+
+// Pools launch via the canonical LiquidityLauncher 0x0000ffff — the one Axiom AND gmgn
+// both label "pools". One tx: launcher.multicall([createToken, distributeToken,
+// distributeWithNative]). distributeToken opens the fee-2500 / tickSpacing-25 v4 pool;
+// distributeWithNative does the ATOMIC dev buy in the same tx (no snipe gap). devBuy=0
+// launches the pool only. Recipe reverse-engineered + validated live; see poolsAtomic.js.
+async function launchPools(pad, { name, symbol, logo, description, twitter, website, devBuy }) {
   const pub = publicClientFor(pad);
   const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+  const buy = devBuy && devBuy > 0n ? devBuy : 0n;
+  // slot1 (website) is the single link slot — prefer the tweet/twitter link so it renders
+  const tokenData = buildPoolsTokenData({ logo, description, link: twitter || website });
 
-  setStatus('running pre-launch checks...');
-  const [enabled, fee, maxTax] = await Promise.all([
-    pub.readContract({ address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'launchEnabled' }),
-    pub.readContract({ address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'launchFee' }),
-    pub.readContract({ address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'maxCreatorTaxBps' }),
-  ]);
-  if (!enabled) throw new Error('pons v2 launches are currently paused');
-  const creatorTaxBps = Math.min(pad.creatorTaxBps || 0, Number(maxTax));
+  // 1) predict the token address (recipient = launcher, salt = graffiti(you)) so it can
+  //    be baked into the calldata before it exists on-chain
+  setStatus('predicting token address…');
+  const gsalt = await pub.readContract({ address: pad.launcher, abi: POOLS_GRAFFITI_ABI, functionName: 'getGraffiti', args: [getAddress(account.address)] });
+  const token = getAddress(await pub.readContract({ address: pad.uercFactory, abi: POOLS_PREDICT_ABI, functionName: 'getUERC20Address', args: [name, symbol, 18, getAddress(pad.launcher), gsalt] }));
 
-  // economics pin — makes the tx revert if the protocol changes fee economics
-  // between this read and inclusion (the docs' front-running protection)
-  const expectedEconomics = await pub.readContract({
-    address: pad.factory, abi: PONS_FACTORY_ABI,
-    functionName: 'previewLaunchEconomics', args: [pad.launchConfigId, pad.pairToken],
+  // 2) build the launcher multicall (createToken + open pool + atomic dev buy if any)
+  const nonce = `${name}-${symbol}-${account.address}-${Date.now()}`;
+  const data = buildPoolsLaunch({
+    name, symbol, tokenData, token, creator: getAddress(account.address), devBuy: buy,
+    dtSalt: keccak256(stringToBytes(`${nonce}-dt`)),
+    dwnSalt: keccak256(stringToBytes(`${nonce}-buy`)),
   });
 
-  const value = fee + inp.devBuy;
+  // 3) SIMULATE first — if it reverts, nothing is sent (no void)
+  setStatus(buy > 0n ? 'simulating atomic launch + buy…' : 'simulating launch…');
+  await pub.call({ account: getAddress(account.address), to: getAddress(pad.launcher), data, value: buy });
+
+  // 4) send the single tx
+  setStatus(buy > 0n ? `atomic launch + dev buy ${formatEther(buy)} ETH…` : 'launching…');
+  const hash = await wallet.sendTransaction({ to: getAddress(pad.launcher), data, value: buy });
+  const rcpt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (rcpt.status !== 'success') throw new Error('launch reverted');
+  rememberLaunch(pad, token, symbol, poolsPositionIdFromReceipt(pad, rcpt));
+
+  let buyNote = '';
+  if (buy > 0n) {
+    let bought = 0n;
+    try { bought = await pub.readContract({ address: token, abi: ERC20, functionName: 'balanceOf', args: [account.address] }); } catch { /* ignore */ }
+    buyNote = bought > 0n
+      ? ` · dev buy ✓ (${formatEther(buy)} ETH → ${(Number(bought / 10n ** 15n) / 1000).toLocaleString()} tokens)`
+      : ' · <span class="err">dev buy: received 0 (check the pool)</span>';
+  }
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓${buy > 0n ? ' (atomic)' : ''}</span> ${token}${buyNote}<br>` +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">launch tx</a>`;
+  return { token, pub, wallet };
+}
+
+// resolve the Pons pair token from the UI (preset symbol or a custom address)
+function resolvePonsPair(pad) {
+  const sel = document.getElementById('ponsQuoteSelect').value;
+  if (sel === 'custom…' || sel === 'custom') {
+    const c = document.getElementById('ponsQuoteCustom').value.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(c)) throw new Error('enter a valid approved pair token address (0x…)');
+    return { address: getAddress(c), symbol: 'custom' };
+  }
+  const q = (pad.quotes || []).find((x) => x.symbol === sel) || (pad.quotes || [])[0];
+  return { address: getAddress(q.address), symbol: q.symbol };
+}
+
+// Pons v2 — bonding-curve launch on the (re-enabled) PonsV2LaunchFactory, paired
+// vs an approved stock. Dev buy runs on the returned curve (ERC-20 pair: approve
+// then buy). VOID-SAFETY: simulate-first + verify the pair is approved.
+async function launchPonsV2(pad, inp) {
+  // fail fast with a readable message instead of a raw MetadataTooLong revert
+  checkPonsV2Metadata({
+    name: inp.name, symbol: inp.symbol, logo: inp.logo, description: inp.description,
+    twitter: inp.twitter, website: inp.website,
+  });
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+  const pairAddr = inp.pair.address;
+
+  setStatus('running pre-launch checks...');
+  const [enabled, fee, maxTax, approved] = await Promise.all([
+    pub.readContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'launchEnabled' }),
+    pub.readContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'launchFee' }),
+    pub.readContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'maxCreatorTaxBps' }).catch(() => 10000n),
+    pub.readContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'approvedPairTokens', args: [pairAddr] }).catch(() => true),
+  ]);
+  if (!enabled) throw new Error('pons v2 launches are currently paused');
+  // native ETH (0x0) is a distinct pair handled specially by the factory (not on the
+  // approvedPairTokens allowlist); stocks must be approved.
+  const isNative = pairAddr === ZERO_ADDR;
+  if (!isNative && !approved) throw new Error(`${inp.pair.symbol} is not an approved Pons v2 pair — pick ETH / NVDA / AAPL / GME`);
+  const creatorTaxBps = Math.min(pad.creatorTaxBps || 0, Number(maxTax));
+
+  const pairDecimals = isNative ? 18 : await pub.readContract({ address: pairAddr, abi: ERC20, functionName: 'decimals' });
+  const devBuyRaw = parseUnits(String(inp.devBuyStr || '0'), pairDecimals);
+
+  const expectedEconomics = await pub.readContract({
+    address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'previewLaunchEconomics', args: [pad.launchConfigId, pairAddr],
+  });
+
   const bal = await pub.getBalance({ address: account.address });
-  if (bal < value) throw new Error(`insufficient balance: need ${formatEther(value)}+gas, have ${formatEther(bal)} ${pad.nativeSymbol}`);
+  if (isNative) {
+    // launch fee + the native dev buy both come out of ETH
+    if (bal < fee + devBuyRaw) throw new Error(`insufficient ETH: need ${formatEther(fee + devBuyRaw)}+gas, have ${formatEther(bal)}`);
+  } else {
+    if (bal < fee) throw new Error(`insufficient ${pad.nativeSymbol} for the launch fee: need ${formatEther(fee)}+gas, have ${formatEther(bal)}`);
+    if (devBuyRaw > 0n) {
+      const held = await pub.readContract({ address: pairAddr, abi: ERC20, functionName: 'balanceOf', args: [account.address] });
+      if (held < devBuyRaw) throw new Error(`dev buy needs ${inp.devBuyStr} ${inp.pair.symbol} in your wallet (have ${formatUnits(held, pairDecimals)})`);
+    }
+  }
 
   const params = {
     name: inp.name, symbol: inp.symbol, logo: inp.logo, description: inp.description,
     socials: { twitter: inp.twitter, telegram: '', discord: '', website: inp.website, farcaster: '' },
     creatorFeeRecipient: inp.feeRecipient,
-    creatorTaxBps,
-    buybackEnabled: !!pad.buybackEnabled,
+    creatorTaxBps, buybackEnabled: inp.buyback !== undefined ? !!inp.buyback : !!pad.buybackEnabled,
     expectedEconomics,
+    salt: keccak256(stringToBytes(`${inp.name}-${inp.symbol}-${account.address}-${Date.now()}`)),
   };
-  const args = [params, pad.launchConfigId, pad.pairToken];
+  // exempt the launcher + your whitelisted wallets from the 99%/3s snipe tax. dedupe
+  // in case the connected wallet is already in the list.
+  const exemptions = [...new Set([account.address.toLowerCase(), ...PONS_V2_TAX_WHITELIST.map((a) => a.toLowerCase())])];
 
-  // simulate first: surfaces reverts with a readable message and gives us the
-  // (token, curve) return values, which writeContract alone can't
-  setStatus('simulating launch...');
-  const { result: [token, curve] } = await pub.simulateContract({
-    address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'launchToken',
-    args, value: fee, account,
-  });
+  let token, curve, hash, buyNote = '';
 
-  setStatus('sending launch tx...');
-  const hash = await wallet.writeContract({
-    address: pad.factory, abi: PONS_FACTORY_ABI, functionName: 'launchToken', args, value: fee,
-  });
+  if (devBuyRaw > 0n) {
+    // ATOMIC launch + dev buy in ONE tx via PonsV2LaunchAndBuy — no gap for snipers.
+    // ERC-20 pair: approve the pair token to the forwarder first (it pulls it).
+    if (!isNative) {
+      const alw = await pub.readContract({ address: pairAddr, abi: ERC20, functionName: 'allowance', args: [account.address, PONS_V2_FORWARDER_ADDR] });
+      if (alw < devBuyRaw) {
+        setStatus(`approving ${inp.pair.symbol} to the launcher…`);
+        const ah = await wallet.writeContract({ address: pairAddr, abi: ERC20, functionName: 'approve', args: [PONS_V2_FORWARDER_ADDR, devBuyRaw] });
+        await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+      }
+    }
+    const value = isNative ? fee + devBuyRaw : fee; // native: fee + buy; ERC-20: fee only (quote pulled)
+    const args = [params, pad.launchConfigId, pairAddr, devBuyRaw, 0n, account.address, exemptions];
+    setStatus('simulating atomic launch + dev buy…');
+    const { result } = await pub.simulateContract({ address: PONS_V2_FORWARDER_ADDR, abi: PONS_V2_FORWARDER_ABI, functionName: 'launchAndBuy', args, value, account });
+    [token, curve] = result;
+    setStatus('sending atomic launch + dev buy tx…');
+    hash = await wallet.writeContract({ address: PONS_V2_FORWARDER_ADDR, abi: PONS_V2_FORWARDER_ABI, functionName: 'launchAndBuy', args, value });
+    buyNote = ` · dev buy ✓ (${inp.devBuyStr} ${inp.pair.symbol}, atomic)`;
+  } else {
+    // no dev buy — plain launchToken
+    const args = [params, pad.launchConfigId, pairAddr, exemptions];
+    setStatus('simulating launch...');
+    const { result } = await pub.simulateContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'launchToken', args, value: fee, account });
+    [token, curve] = result;
+    setStatus('sending launch tx...');
+    hash = await wallet.writeContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'launchToken', args, value: fee });
+  }
+
   setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
   const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
   if (receipt.status !== 'success') throw new Error('tx reverted: ' + hash);
   rememberLaunch(pad, token, inp.symbol);
 
-  let buyNote = '';
-  if (inp.devBuy > 0n) {
-    setStatus('launched — sending dev buy on the curve...');
-    try {
-      // native pair: quoteIn must equal sent value; minTokensOut 0 is safe as
-      // the first buy on a fresh curve
-      const buyHash = await wallet.writeContract({
-        address: curve, abi: PONS_CURVE_ABI, functionName: 'buy',
-        args: [inp.devBuy, 0n, account.address], value: inp.devBuy,
-      });
-      const buyRcpt = await pub.waitForTransactionReceipt({ hash: buyHash, confirmations: 1 });
-      buyNote = buyRcpt.status === 'success'
-        ? ' · dev buy ✓'
-        : ' · <span class="err">dev buy reverted</span>';
-    } catch (e) {
-      buyNote = ` · <span class="err">dev buy failed (${e.shortMessage || e.message})</span>`;
-    }
-  }
-
-  const el = $('status');
-  el.innerHTML =
+  $('status').innerHTML =
     `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}${buyNote}<br>` +
     `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a>`;
   return { token, curve, pub, wallet };
+}
+
+// ---------------------------------------------------------------------------
+// Our own Uniswap-v4 bonding curve. One tx deploys (token, curve) and opens the
+// curve; an optional dev buy is a second tx straight into curve.buy(). Any
+// ERC-20 (or native ETH) works as the quote — there is no allowlist to satisfy.
+// ---------------------------------------------------------------------------
+async function launchV4Curve(pad, inp) {
+  if (!pad.factory) throw new Error('the v4 curve factory is not deployed yet');
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  const q = pad.quotes.find((x) => x.symbol === $('v4curveQuoteSelect').value) || pad.quotes[0];
+  const isCustom = q.address === 'custom';
+  const quoteToken = isCustom ? $('v4curveQuoteCustom').value.trim() : q.address;
+  if (!/^0x[a-fA-F0-9]{40}$/.test(quoteToken)) throw new Error('enter a valid quote token address');
+  const isNative = quoteToken === ZERO_ADDR;
+
+  // a custom quote can be any ERC-20, so read its decimals rather than assume 18
+  const decimals = isNative ? 18
+    : (isCustom ? await pub.readContract({ address: quoteToken, abi: ERC20, functionName: 'decimals' }) : q.decimals);
+
+  const threshStr = $('v4curveThreshold').value.trim();
+  if (!(+threshStr > 0)) throw new Error('set a graduation threshold');
+  const graduationThreshold = parseUnits(threshStr, decimals);
+
+  const supplyStr = $('v4curveSupply').value.trim().replace(/,/g, '');
+  if (!(+supplyStr > 0)) throw new Error('set a supply');
+  const supply = parseEther(supplyStr);
+
+  const devBuyStr = $('v4curveDevBuy').value.trim() || '0';
+  const devBuyRaw = +devBuyStr > 0 ? parseUnits(devBuyStr, decimals) : 0n;
+
+  const fee = await pub.readContract({ address: pad.factory, abi: V4CURVE_ABI, functionName: 'launchFee' });
+
+  const params = {
+    name: inp.name, symbol: inp.symbol, logo: inp.logo, description: inp.description,
+    twitter: inp.twitter, website: inp.website,
+    quoteToken, graduationThreshold, supply,
+    poolFee: pad.poolFee, tickSpacing: pad.tickSpacing, hooks: ZERO_ADDR, feeBps: pad.feeBps,
+  };
+
+  setStatus('simulating launch...');
+  const { result } = await pub.simulateContract({
+    address: pad.factory, abi: V4CURVE_ABI, functionName: 'launch', args: [params], value: fee, account,
+  });
+  const [token, curve] = result;
+
+  setStatus('sending launch tx...');
+  const hash = await wallet.writeContract({
+    address: pad.factory, abi: V4CURVE_ABI, functionName: 'launch', args: [params], value: fee,
+  });
+  setStatus(`tx sent: ${hash}
+waiting for confirmation...`);
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error('tx reverted: ' + hash);
+
+  // optional dev buy — a separate call into the curve now that it exists
+  let buyNote = '';
+  if (devBuyRaw > 0n) {
+    if (!isNative) {
+      setStatus(`approving ${q.symbol} to the curve...`);
+      const ah = await wallet.writeContract({ address: quoteToken, abi: ERC20, functionName: 'approve', args: [curve, devBuyRaw] });
+      await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+    }
+    setStatus('buying...');
+    const bh = await wallet.writeContract({
+      address: curve, abi: V4CURVE_BUY_ABI, functionName: 'buy',
+      args: [devBuyRaw, 0n, account.address], value: isNative ? devBuyRaw : 0n,
+    });
+    await pub.waitForTransactionReceipt({ hash: bh, confirmations: 1 });
+    buyNote = ` · dev buy ✓ (${devBuyStr} ${isCustom ? 'quote' : q.symbol})`;
+  }
+
+  rememberLaunch(pad, token, inp.symbol);
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}${buyNote}<br>` +
+    `curve: ${curve}<br>` +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a>`;
+  return { token, curve, pub, wallet };
+}
+
+async function launchPonsV1(pad, inp) {
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  setStatus('running pre-launch checks...');
+  const [enabled, fee] = await Promise.all([
+    pub.readContract({ address: pad.factory, abi: PONS_V1_FACTORY_ABI, functionName: 'launchEnabled' }),
+    pub.readContract({ address: pad.factory, abi: PONS_V1_FACTORY_ABI, functionName: 'launchFee' }),
+  ]);
+  if (!enabled) throw new Error('Pons launches are currently paused');
+
+  const params = {
+    name: inp.name, symbol: inp.symbol, logo: inp.logo, description: inp.description,
+    socials: { twitter: inp.twitter, telegram: '', discord: '', website: inp.website, farcaster: '' },
+    feeWallet: inp.feeRecipient,
+  };
+  const salt = keccak256(stringToBytes(`${inp.name}-${inp.symbol}-${account.address}-${Date.now()}`));
+  const args = [params, pad.launchConfigId, pad.dexId, salt];
+
+  // optional dev buy: launchToken is payable — value beyond the fee is the initial buy
+  const devBuy = inp.devBuy || 0n;
+  const value = fee + devBuy;
+  const bal = await pub.getBalance({ address: account.address });
+  if (bal < value) throw new Error(`insufficient balance: need ${formatEther(value)}+gas, have ${formatEther(bal)} ${pad.nativeSymbol}`);
+
+  // deterministic token address (also validates params without sending)
+  let token;
+  try {
+    token = await pub.readContract({
+      address: pad.factory, abi: PONS_V1_FACTORY_ABI, functionName: 'predictTokenAddress',
+      args: [params, pad.launchConfigId, pad.dexId, salt, account.address],
+    });
+  } catch { /* fall back to the simulate result below */ }
+
+  setStatus('simulating launch...');
+  const sim = await pub.simulateContract({
+    address: pad.factory, abi: PONS_V1_FACTORY_ABI, functionName: 'launchToken', args, value, account,
+  });
+  if (!token) token = sim.result;
+
+  setStatus('sending launch tx...');
+  const hash = await wallet.writeContract({
+    address: pad.factory, abi: PONS_V1_FACTORY_ABI, functionName: 'launchToken', args, value,
+  });
+  setStatus(`tx sent: ${hash}
+waiting for confirmation...`);
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error('tx reverted: ' + hash);
+  rememberLaunch(pad, token, inp.symbol);
+
+  const el = $('status');
+  el.innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}${devBuy > 0n ? ' · dev buy ' + formatEther(devBuy) + ' ETH' : ''}<br>` +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a>`;
+  return { token, curve: null, pub, wallet };
 }
 
 // ---------------------------------------------------------------------------
@@ -917,7 +2429,8 @@ function padSupply(pad) {
 function updateBuyPreview() {
   const el = $('buyPreview');
   const curve = activePad.curve;
-  if (selectedChip < 0 || !curve) { el.innerHTML = ''; return; }
+  // Pools/v4 pads have no closed-form curve cap — the estimate would be NaN, so skip it
+  if (selectedChip < 0 || !curve || curve.cap == null) { el.innerHTML = ''; return; }
   const x = +buyChips[selectedChip];
   const supply = padSupply(activePad);
   const tokens = (supply * x) / (curve.cap + x);
@@ -1157,18 +2670,34 @@ function deleteDistSet() {
 // ---------------------------------------------------------------------------
 const LAUNCHES_KEY = 'launches.v1';
 const loadLaunches = () => JSON.parse(localStorage.getItem(LAUNCHES_KEY) || '[]');
-function rememberLaunch(pad, token, symbol) {
+function rememberLaunch(pad, token, symbol, positionId) {
   const all = loadLaunches();
-  if (!all.some((l) => l.token.toLowerCase() === token.toLowerCase())) {
-    all.push({ pad: pad.id, token, symbol });
-    localStorage.setItem(LAUNCHES_KEY, JSON.stringify(all));
+  const existing = all.find((l) => l.token.toLowerCase() === token.toLowerCase());
+  if (existing) {
+    if (positionId && !existing.positionId) { existing.positionId = positionId; localStorage.setItem(LAUNCHES_KEY, JSON.stringify(all)); }
+    return;
   }
+  all.push({ pad: pad.id, token, symbol, ...(positionId ? { positionId } : {}) });
+  localStorage.setItem(LAUNCHES_KEY, JSON.stringify(all));
 }
 
 async function discoverMyTokens(pad) {
-  // pons v2's TokenLaunched field layout isn't published yet — rely on the
-  // local launch memory until the ABI lands and this can filter logs too
+  // pons v1: the locker knows every token where you're the fee recipient — enumerate
+  // it so you see them all (even ones launched elsewhere), not just local memory
+  if (pad.family === 'pons-v1') {
+    const pub = publicClientFor(pad);
+    const n = await pub.readContract({ address: pad.locker, abi: PONS_LOCKER_ABI, functionName: 'feeRecipientTokenCount', args: [account.address] }).catch(() => 0n);
+    const out = [];
+    for (let i = 0n; i < n; i++) {
+      const t = await pub.readContract({ address: pad.locker, abi: PONS_LOCKER_ABI, functionName: 'feeRecipientTokens', args: [account.address, i] }).catch(() => null);
+      if (t) out.push(t);
+    }
+    return out;
+  }
+  // pons v2 fees aggregate in the escrow (not per-token) — handled separately
   if (pad.family === 'pons-v2') return [];
+  // pools has no deployer-indexed launch event; discovery is via local launch memory
+  if (pad.family === 'pools') return [];
   // Rialto has no per-token locker in this app; discovery is via its API, and
   // fee claiming isn't wired — fall back to local memory only
   if (pad.family === 'rialto') return [];
@@ -1182,7 +2711,7 @@ async function discoverMyTokens(pad) {
   return logs.map((l) => l.args.token);
 }
 
-const claimPad = () => (activePad.enabled && activePad.locker ? activePad : PADS.find((p) => p.enabled && p.locker));
+const claimPad = () => (activePad.enabled && (activePad.locker || activePad.feeHolder) ? activePad : PADS.find((p) => p.enabled && (p.locker || p.feeHolder)));
 
 async function getMyTokens(pad) {
   const onchain = await discoverMyTokens(pad);
@@ -1192,6 +2721,8 @@ async function getMyTokens(pad) {
 
 async function renderTokenList() {
   const box = $('tokenList');
+  // Solana / Meteora launches claim through the DBC partner-fee path, not a locker
+  if (activePad.vm === 'sol' && activePad.family === 'meteora') return renderMeteoraClaims(box);
   if (!account) { box.innerHTML = '<div class="empty">unlock wallet to load your launches</div>'; return; }
   const pad = claimPad();
   box.innerHTML = '<div class="empty">loading…</div>';
@@ -1226,8 +2757,11 @@ async function renderTokenList() {
 async function claimAllFees(btn) {
   const out = $('claimStatus');
   const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
+  // Solana / Meteora claims run off the SOL key, not an EVM account
+  if (activePad.vm === 'sol' && activePad.family === 'meteora') { await claimAllMeteora(btn); return; }
   if (!account) { say('unlock wallet first', true); return; }
   const pad = claimPad();
+  if (pad.family === 'pools') { await claimAllPoolsFees(pad, btn); return; }
   // pons v2 escrow aggregates all fees per recipient — one claim() covers
   // every launch, no per-token loop needed
   if (pad.family === 'pons-v2') { await claimFees(pad, null, btn); return; }
@@ -1277,10 +2811,47 @@ async function claimFees(pad, token, btn) {
   const out = $('claimStatus');
   const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
   if (!account) { say('unlock wallet first', true); return; }
+  if (pad.family === 'pools') { await claimPoolsFees(pad, token, btn); return; }
   if (btn) btn.disabled = true;
   try {
+    // AUTO-ROUTE: if this token is a Pons v1 token (its LP fees live in the Pons
+    // locker), claim it through the Pons locker regardless of the selected pad —
+    // avoids calling the wrong locker's claimFees (which reverts UnknownToken).
+    if (token && pad.family !== 'pons-v1' && pad.family !== 'pons-v2') {
+      try {
+        const pp = ponsChain();
+        const redir = await publicClientFor(pp).readContract({ address: PONS_LOCKER_ADDR, abi: PONS_LOCKER_ABI, functionName: 'feeRedirects', args: [token] });
+        if (redir && redir.toLowerCase() !== ZERO_ADDR.toLowerCase()) pad = pp;
+      } catch { /* not a Pons token — use the given pad */ }
+    }
     const pub = publicClientFor(pad);
     const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+    // --- Pons v1: collectFees(token). VOID-SAFETY: confirm where the money goes
+    // (feeRedirects) and simulate to see the exact amounts before sending.
+    if (pad.family === 'pons-v1') {
+      const redirect = await pub.readContract({ address: pad.locker, abi: PONS_LOCKER_ABI, functionName: 'feeRedirects', args: [token] });
+      if (redirect.toLowerCase() !== account.address.toLowerCase()) {
+        say(`⚠ this token's fees go to <b>${esc(redirect)}</b>, not your wallet — not claiming (nothing lost). Change it with setFeeRedirect if that's wrong.`, true);
+        return;
+      }
+      let amt0 = 0n, amt1 = 0n;
+      try {
+        const sim = await pub.simulateContract({ address: pad.locker, abi: PONS_LOCKER_ABI, functionName: 'collectFees', args: [token], account });
+        [amt0, amt1] = sim.result;
+      } catch (e) {
+        say(`nothing to claim on this token (${(e.shortMessage || e.message).split('\n')[0]})`); return;
+      }
+      if (amt0 === 0n && amt1 === 0n) { say('no fees accrued on this token yet'); return; }
+      say(`claiming ${formatEther(amt0)} ${pad.nativeSymbol} + ${formatEther(amt1)} tokens → your wallet…`);
+      const h = await wallet.writeContract({ address: pad.locker, abi: PONS_LOCKER_ABI, functionName: 'collectFees', args: [token] });
+      const r = await pub.waitForTransactionReceipt({ hash: h, confirmations: 1 });
+      if (r.status !== 'success') throw new Error('collectFees reverted');
+      say(`<span style="color:var(--accent)">FEES CLAIMED ✓</span> ${formatEther(amt0)} ${pad.nativeSymbol} + ${formatEther(amt1)} tokens → you · <a href="${pad.explorer}/tx/${h}" target="_blank" rel="noopener">tx</a>`);
+      refreshBalance(); renderTokenList();
+      return;
+    }
+
     say('claiming fees…');
     // pons v2: native fees via escrow.claim(); pass a token address to claim
     // ERC-20 balances (custom pairs / released buyback vests) instead
@@ -1302,6 +2873,217 @@ async function claimFees(pad, token, btn) {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+// --- Meteora (Solana DBC) fee claiming. Your launches route 100% of trading fees
+// to the config feeClaimer (your SOL wallet), accrued in the quote token. We list
+// every pool your wallet created, show what's owed, and claim it via the DBC SDK. --
+const SOL_QUOTE_SYMBOLS = {
+  So11111111111111111111111111111111111111112: 'SOL',
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC',
+};
+function fmtSolAmount(rawStr, decimals) {
+  try { return Number(BigInt(rawStr)) / 10 ** (decimals || 9); } catch { return 0; }
+}
+
+async function renderMeteoraClaims(box) {
+  if (!solKeyB58) { box.innerHTML = '<div class="empty">import a SOL key to see your Meteora launches</div>'; return; }
+  box.innerHTML = '<div class="empty">loading your Meteora pools…</div>';
+  try {
+    const owner = solPubkeyFromSecret(solKeyB58);
+    const { getMeteoraFees } = await import('./solana.js');
+    const rows = await getMeteoraFees({ rpcUrl: activePad.rpc, owner });
+    if (!rows.length) { box.innerHTML = '<div class="empty">no Meteora launches from this wallet yet</div>'; return; }
+    // most fees first
+    rows.sort((a, b) => (BigInt(b.claimableQuote) > BigInt(a.claimableQuote) ? 1 : -1));
+    box.innerHTML = '';
+    for (const r of rows) {
+      const sym = SOL_QUOTE_SYMBOLS[r.quoteMint] || 'quote';
+      const amt = fmtSolAmount(r.claimableQuote, r.quoteDecimals);
+      const has = BigInt(r.claimableQuote) > 0n || BigInt(r.claimableBase) > 0n;
+      const row = document.createElement('div');
+      row.className = 'token-row';
+      row.innerHTML =
+        `<span class="sym">${esc((r.baseMint || r.pool).slice(0, 4))}…</span>` +
+        `<span class="addr"><a href="https://solscan.io/account/${esc(r.pool)}" target="_blank" rel="noopener">` +
+        `${amt.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${sym} claimable</a></span>`;
+      const btn = document.createElement('button');
+      btn.className = has ? 'mini accent' : 'mini';
+      btn.textContent = 'CLAIM';
+      btn.onclick = () => claimMeteora(r.pool, btn);
+      row.appendChild(btn);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    box.innerHTML = `<div class="empty">couldn't load Meteora pools: ${esc(e.shortMessage || e.message)}</div>`;
+  }
+}
+
+async function claimMeteora(pool, btn) {
+  const out = $('claimStatus');
+  const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
+  if (!solKeyB58) { say('import a SOL key first', true); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const { claimMeteoraFees } = await import('./solana.js');
+    const res = await claimMeteoraFees({ rpcUrl: activePad.rpc, secretKey: solKeyB58, pool, onStatus: (m) => say(m) });
+    const amt = fmtSolAmount(res.claimedQuote, 9);
+    say(`<span style="color:var(--accent)">FEES CLAIMED ✓</span> → your wallet · <a href="https://solscan.io/tx/${res.sig}" target="_blank" rel="noopener">tx</a>`);
+    refreshBalance(); renderTokenList();
+  } catch (e) {
+    const msg = e.shortMessage || e.message;
+    say(/nothing to claim/i.test(msg) ? 'nothing to claim on this pool yet' : msg, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function claimAllMeteora(btn) {
+  const out = $('claimStatus');
+  const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
+  if (!solKeyB58) { say('import a SOL key first', true); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const owner = solPubkeyFromSecret(solKeyB58);
+    const { getMeteoraFees, claimMeteoraFees } = await import('./solana.js');
+    say('checking which pools have fees…');
+    const rows = await getMeteoraFees({ rpcUrl: activePad.rpc, owner });
+    const claimable = rows.filter((r) => BigInt(r.claimableQuote) > 0n || BigInt(r.claimableBase) > 0n);
+    if (!claimable.length) { say(`nothing to claim across ${rows.length} pool${rows.length === 1 ? '' : 's'}`); return; }
+    let ok = 0;
+    for (const r of claimable) {
+      say(`claiming ${ok + 1}/${claimable.length}…`);
+      try { await claimMeteoraFees({ rpcUrl: activePad.rpc, secretKey: solKeyB58, pool: r.pool }); ok++; } catch { /* skip pools that reject */ }
+    }
+    say(`<span style="color:var(--accent)">CLAIMED ${ok}/${claimable.length} ✓</span> → your wallet`);
+    refreshBalance(); renderTokenList();
+  } catch (e) {
+    say(e.shortMessage || e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// --- Pools creator-fee claiming. Your single-sided position earns 0.25% of every
+// trade; collectFees([positionId]) on pad.feeHolder sweeps it to you (the position
+// NFT owner), so there's no void. Position id comes from the launch record (captured
+// at launch) or an on-chain lookup, and we simulate before sending. ----------------
+async function poolsPositionIdFor(pad, token) {
+  const rec = loadLaunches().find((l) => l.token.toLowerCase() === token.toLowerCase());
+  if (rec && rec.positionId) return rec.positionId;
+  const id = await findPoolsPositionId(pad, token);
+  if (id) rememberLaunch(pad, token, rec?.symbol || '', id); // cache for next time
+  return id;
+}
+
+async function claimPoolsFees(pad, token, btn) {
+  const out = $('claimStatus');
+  const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
+  if (!account) { say('unlock wallet first', true); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const pub = publicClientFor(pad);
+    const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+    say('finding your fee position…');
+    const id = await poolsPositionIdFor(pad, token);
+    if (!id) { say("couldn't find a fee position for this token (were you its launcher?)", true); return; }
+    // simulate-first: if nothing is owed, this reverts and we send nothing
+    try {
+      await pub.simulateContract({ address: pad.feeHolder, abi: POOLS_COLLECT_ABI, functionName: 'collectFees', args: [[BigInt(id)]], account });
+    } catch (e) {
+      say(`nothing to claim on this token yet (${(e.shortMessage || e.message).split('\n')[0]})`); return;
+    }
+    say('claiming your 0.25% swap fees → your wallet…');
+    const hash = await wallet.writeContract({ address: pad.feeHolder, abi: POOLS_COLLECT_ABI, functionName: 'collectFees', args: [[BigInt(id)]] });
+    const r = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+    if (r.status !== 'success') throw new Error('collectFees reverted');
+    say(`<span style="color:var(--accent)">FEES CLAIMED ✓</span> position #${id} → you · <a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx</a>`);
+    refreshBalance();
+  } catch (e) {
+    say(e.shortMessage || e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function claimAllPoolsFees(pad, btn) {
+  const out = $('claimStatus');
+  const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
+  if (btn) btn.disabled = true;
+  try {
+    const pub = publicClientFor(pad);
+    const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+    say('gathering your fee positions…');
+    const tokens = loadLaunches().filter((l) => l.pad === pad.id).map((l) => l.token);
+    if (!tokens.length) { say('no Pools launches from this wallet yet', true); return; }
+    const ids = [];
+    for (const t of tokens) { const id = await poolsPositionIdFor(pad, t).catch(() => null); if (id) ids.push(BigInt(id)); }
+    if (!ids.length) { say("couldn't resolve any fee positions", true); return; }
+    // keep only positions that actually have fees (simulate each), then sweep in one tx
+    say(`checking ${ids.length} position${ids.length > 1 ? 's' : ''} for fees…`);
+    const claimable = (await Promise.all(ids.map((id) =>
+      pub.simulateContract({ address: pad.feeHolder, abi: POOLS_COLLECT_ABI, functionName: 'collectFees', args: [[id]], account })
+        .then(() => id).catch(() => null)))).filter(Boolean);
+    if (!claimable.length) { say(`nothing to claim across ${ids.length} position${ids.length > 1 ? 's' : ''}`); return; }
+    say(`claiming ${claimable.length} position${claimable.length > 1 ? 's' : ''} → your wallet…`);
+    await pub.simulateContract({ address: pad.feeHolder, abi: POOLS_COLLECT_ABI, functionName: 'collectFees', args: [claimable], account });
+    const hash = await wallet.writeContract({ address: pad.feeHolder, abi: POOLS_COLLECT_ABI, functionName: 'collectFees', args: [claimable] });
+    const r = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+    if (r.status !== 'success') throw new Error('collectFees reverted');
+    say(`<span style="color:var(--accent)">CLAIMED ${claimable.length}/${ids.length} ✓</span> → your wallet · <a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx</a>`);
+    refreshBalance();
+  } catch (e) {
+    say(e.shortMessage || e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// --- Pons v2 escrow claiming (independent of the pad selector, since v2 launching
+// is off). balanceOf/claim() send to msg.sender = you — no void. -----------------
+const ponsChain = () => PADS.find((p) => p.id === 'pons-v1'); // same chain (4663)
+async function refreshPonsV2Bal() {
+  const el = $('ponsV2Bal');
+  if (!account) { el.textContent = ''; return; }
+  try {
+    const pub = publicClientFor(ponsChain());
+    const nativeBal = await pub.readContract({ address: PONS_ESCROW_ADDR, abi: PONS_ESCROW_ABI, functionName: 'balanceOf', args: [account.address] });
+    const t = $('ponsV2Token').value.trim();
+    let extra = '';
+    if (/^0x[0-9a-fA-F]{40}$/.test(t)) {
+      const tb = await pub.readContract({ address: PONS_ESCROW_ADDR, abi: PONS_ESCROW_ABI, functionName: 'balanceOfToken', args: [account.address, getAddress(t)] });
+      extra = ` · ${formatEther(tb)} of ${t.slice(0, 6)}…`;
+    }
+    el.textContent = `claimable: ${formatEther(nativeBal)} ETH${extra}`;
+  } catch { $('ponsV2Bal').textContent = ''; }
+}
+async function claimPonsV2() {
+  const out = $('ponsV2Status');
+  const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
+  if (!account) { say('unlock wallet first', true); return; }
+  const btn = $('ponsV2ClaimBtn'); btn.disabled = true;
+  try {
+    const pad = ponsChain();
+    const pub = publicClientFor(pad);
+    const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+    const t = $('ponsV2Token').value.trim();
+    const isToken = /^0x[0-9a-fA-F]{40}$/.test(t);
+    if (t && !isToken) { say('that is not a valid token address', true); return; }
+    // void-safety: claim() / claimToken() pay msg.sender (you). Confirm a balance first.
+    const bal = isToken
+      ? await pub.readContract({ address: PONS_ESCROW_ADDR, abi: PONS_ESCROW_ABI, functionName: 'balanceOfToken', args: [account.address, getAddress(t)] })
+      : await pub.readContract({ address: PONS_ESCROW_ADDR, abi: PONS_ESCROW_ABI, functionName: 'balanceOf', args: [account.address] });
+    if (bal === 0n) { say(`nothing to claim in the v2 escrow${isToken ? ' for that token' : ''}`); return; }
+    say(`claiming ${formatEther(bal)} ${isToken ? 'tokens' : 'ETH'} → your wallet…`);
+    const h = isToken
+      ? await wallet.writeContract({ address: PONS_ESCROW_ADDR, abi: PONS_ESCROW_ABI, functionName: 'claimToken', args: [getAddress(t)] })
+      : await wallet.writeContract({ address: PONS_ESCROW_ADDR, abi: PONS_ESCROW_ABI, functionName: 'claim' });
+    const r = await pub.waitForTransactionReceipt({ hash: h, confirmations: 1 });
+    if (r.status !== 'success') throw new Error('claim reverted');
+    say(`<span style="color:var(--accent)">CLAIMED ✓</span> ${formatEther(bal)} ${isToken ? 'tokens' : 'ETH'} → you · <a href="${pad.explorer}/tx/${h}" target="_blank" rel="noopener">tx</a>`);
+    refreshPonsV2Bal(); refreshBalance();
+  } catch (e) { say(e.shortMessage || e.message, true); }
+  finally { btn.disabled = false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,14 +3118,84 @@ function renderPads() {
 // show/hide the per-pad input sections + wallet for the active pad
 function applyPadUI(pad) {
   const sol = pad.vm === 'sol';
+  const meteora = pad.family === 'meteora';
+  const raydium = pad.family === 'raydium';
+  const clmm = pad.family === 'clmm';
+  const uni = pad.family === 'uniswap';
+  const dyor = pad.family === 'dyorswap';
+  const b20 = pad.family === 'b20';
+  const flap = pad.family === 'flap';
+  const ponsV2 = pad.family === 'pons-v2';
+  const v4curve = pad.family === 'v4curve';
   $('supplyRow').classList.toggle('hidden', !pad.customSupply || sol);
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
-  $('solRow').classList.toggle('hidden', !sol);
-  $('devBuyBlock').classList.toggle('hidden', sol); // dev buy / distro are EVM-only
-  $('distroBlock').classList.toggle('hidden', sol);
+  $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
+  $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
+  $('clmmRow').classList.toggle('hidden', !clmm);      // single-sided CLMM curve
+  $('uniRow').classList.toggle('hidden', !uni);
+  $('flapRow').classList.toggle('hidden', !flap);
+  $('ponsRow').classList.toggle('hidden', !ponsV2);    // Pons v2 pair + dev buy
+  $('v4curveRow').classList.toggle('hidden', !v4curve); // our v4 curve: any quote + threshold
+  // B20 has no bonding curve / dev buy — you mint a fixed on-chain allocation. Its
+  // "distributions" are the insider allocations (minted at creation, not transfers).
+  // flap/pons-v2 have their own dev-buy field (in the pair token), so hide the ETH one.
+  $('devBuyBlock').classList.toggle('hidden', sol || uni || b20 || flap || ponsV2);
+  $('distroBlock').classList.toggle('hidden', sol || uni || dyor || flap);
+  if (flap) updateFlapUI(pad);
+  if (ponsV2) updatePonsUI(pad);
+  if (v4curve) updateV4CurveUI(pad);
+  // o1 / B20: fixed 1B supply. The DISTRO slots ARE the wallet allocations (minted
+  // natively at launch, not post-launch transfers) — pre-fill the dev wallet in slot 1
+  // and open the panel so it's obvious you can add more.
+  const distLabel = $('distroBlock').querySelector('label');
+  if (distLabel) distLabel.textContent = b20 ? 'WALLET ALLOCATIONS' : 'DISTRO';
+  const distHint = $('distPanel').querySelector('.hint');
+  if (distHint) distHint.textContent = b20
+    ? 'amount in tokens (e.g. 200000000) or % of the 1B supply (e.g. 20%). minted directly to each wallet at launch — no dev buy, no post-launch transfers. whatever you don’t allocate seeds the pool.'
+    : 'amount in tokens (e.g. 10000000) or % of supply (e.g. 2%). sent from your wallet right after launch — needs a dev buy big enough to cover it.';
+  // o1's total supply is FIXED at 1B on-chain, so always show it (read-only); other
+  // pads keep the editable supply field.
+  $('supply').readOnly = !!b20;
+  if (b20) {
+    $('supply').value = (pad.defaultSupply || 1_000_000_000).toLocaleString('en-US');
+    if (account && !$('distRows').children.length) $('distRows').appendChild(distRow(account.address, '200000000'));
+    distroOn = true;
+    $('distToggle').textContent = 'on'; $('distToggle').classList.add('active');
+    $('distPanel').classList.remove('hidden');
+  }
   if (pad.family === 'rialto') refreshRialtoQuotes(pad);
-  if (sol) updateSolQuoteUI(pad);
+  if (meteora) updateSolQuoteUI(pad);
+  if (raydium) updateRaydiumUI(pad);
+  if (clmm) updateClmmUI(pad);
   updateWalletChip(pad);
+}
+
+// CLMM curve: populate quote dropdown, toggle custom-mint field + quote symbol
+function updateClmmUI(pad) {
+  const qs = $('clmmQuoteSelect');
+  if (qs.dataset.padId !== pad.id) {
+    qs.innerHTML = pad.quotes.map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}</option>`).join('');
+    qs.dataset.padId = pad.id;
+  }
+  const q = pad.quotes.find((x) => x.symbol === qs.value) || pad.quotes[0];
+  const isCustom = q.mint === 'custom';
+  $('clmmQuoteCustom').classList.toggle('hidden', !isCustom);
+  const sym = isCustom ? 'quote' : q.symbol;
+  $('clmmDevSym').textContent = sym;
+  $('clmmSeedSym').textContent = sym;
+}
+
+// Raydium: populate the quote dropdown, toggle the custom-mint field + dev-buy symbol
+function updateRaydiumUI(pad) {
+  const qs = $('raydiumQuoteSelect');
+  if (qs.dataset.padId !== pad.id) {
+    qs.innerHTML = pad.quotes.map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}</option>`).join('');
+    qs.dataset.padId = pad.id;
+  }
+  const q = pad.quotes.find((x) => x.symbol === qs.value) || pad.quotes[0];
+  const isCustom = q.mint === 'custom';
+  $('raydiumQuoteCustom').classList.toggle('hidden', !isCustom);
+  $('raydiumDevSym').textContent = isCustom ? 'quote' : q.symbol;
 }
 
 // Solana quote dropdown -> custom-mint field + default migration threshold
@@ -1361,6 +3213,65 @@ function updateSolQuoteUI(pad) {
     : `token pooled against ${q.symbol} · threshold in ${q.symbol}`;
 }
 
+// flap: populate quote dropdown, toggle mode-dependent fields, set dev-buy symbol
+function updateFlapUI(pad) {
+  const qs = $('flapQuoteSelect');
+  if (qs.dataset.padId !== pad.id) {
+    qs.innerHTML = pad.quotes.map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}</option>`).join('');
+    qs.dataset.padId = pad.id;
+  }
+  const quote = pad.quotes.find((q) => q.symbol === qs.value) || pad.quotes[0];
+  const isCustom = quote.address === 'custom';
+  $('flapQuoteCustom').classList.toggle('hidden', !isCustom);
+  const nativeQuote = quote.address === '0x0000000000000000000000000000000000000000';
+  const mode = $('flapMode').value;
+  $('flapSplitWrap').classList.toggle('hidden', mode === 'standard');
+  $('flapDivWrap').classList.toggle('hidden', mode !== 'dividends');
+  $('flapDivCustom').classList.toggle('hidden', $('flapDivToken').value !== 'custom');
+  // dev buy: native quote pays in the native coin; a stock/ERC-20 quote (BSC only)
+  // is funded by BNB/USDC swapped on PancakeSwap into the pair token.
+  const dev = $('flapDevBuy');
+  const swapFundable = !nativeQuote && !isCustom && pad.chainId === 56;
+  dev.disabled = !nativeQuote && !swapFundable;
+  dev.title = dev.disabled ? 'dev buy needs the native pair, or a stock pair on BNB (funded via an aggregator swap)' : '';
+  $('flapDevFundWrap').classList.toggle('hidden', !swapFundable);
+  $('flapDevSym').textContent = swapFundable ? ($('flapDevFund').value || 'BNB') : pad.nativeSymbol;
+  $('flapHint').textContent = mode === 'dividends'
+    ? `${$('flapSplit').value || 50}% of the ${$('flapTax').value || 10}% tax paid to holders in ${$('flapDivToken').value === 'self' ? symbolOrToken() : $('flapDivToken').value === 'quote' ? quote.symbol : 'a custom token'} · address mined to end 7777`
+    : mode === 'burn'
+      ? `${$('flapSplit').value || 50}% of the ${$('flapTax').value || 10}% tax burned each trade · address mined to end 7777`
+      : `${$('flapTax').value || 10}% buy/sell tax → your wallet · address mined to end 7777`;
+}
+function symbolOrToken() { const s = document.getElementById('symbol'); return (s && s.value.trim()) || 'the token'; }
+
+// Pons v2: populate the pair dropdown, toggle the custom field + dev-buy symbol
+function updatePonsUI(pad) {
+  const qs = $('ponsQuoteSelect');
+  if (qs.dataset.padId !== pad.id) {
+    qs.innerHTML = pad.quotes.map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}</option>`).join('');
+    qs.dataset.padId = pad.id;
+  }
+  const q = pad.quotes.find((x) => x.symbol === qs.value) || pad.quotes[0];
+  const isCustom = q.address === 'custom';
+  $('ponsQuoteCustom').classList.toggle('hidden', !isCustom);
+  $('ponsDevSym').textContent = isCustom ? 'pair' : q.symbol;
+}
+
+// our v4 curve: quote dropdown -> custom field + threshold/dev-buy unit labels
+function updateV4CurveUI(pad) {
+  const qs = $('v4curveQuoteSelect');
+  if (qs.dataset.padId !== pad.id) {
+    qs.innerHTML = pad.quotes.map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}</option>`).join('');
+    qs.dataset.padId = pad.id;
+  }
+  const q = pad.quotes.find((x) => x.symbol === qs.value) || pad.quotes[0];
+  const isCustom = q.address === 'custom';
+  $('v4curveQuoteCustom').classList.toggle('hidden', !isCustom);
+  const sym = isCustom ? 'quote' : q.symbol;
+  $('v4curveThreshSym').textContent = sym;
+  $('v4curveDevSym').textContent = sym;
+}
+
 function updateWalletChip(pad) {
   if (pad.vm === 'sol') {
     if (!solKeyB58) { $('walletAddr').textContent = 'no SOL key'; $('walletChip').title = 'import a SOL key to launch here'; return; }
@@ -1375,9 +3286,25 @@ function updateWalletChip(pad) {
 
 async function refreshFeeNote() {
   if (!activePad.enabled) return;
+  if (activePad.family === 'uniswap') {
+    $('feeNote').textContent = 'deploy + approve + add-liquidity gas · your ETH pooled as liquidity';
+    return;
+  }
+  if (activePad.family === 'dyorswap') {
+    $('feeNote').textContent = 'launch fee ~0.0005 USDC + optional USDC dev buy + gas · paired vs USDC on Uniswap V3 · LP locked';
+    return;
+  }
   if (activePad.family === 'rialto') {
     const bps = rialtoConfig?.initial_protocol_fee_bps ?? 3000;
     $('feeNote').textContent = `Rialto protocol fee ${(bps / 100).toFixed(1)}% on trades + gas`;
+    return;
+  }
+  if (activePad.family === 'b20') {
+    $('feeNote').textContent = 'B20 on Base · no launch fee · you mint the on-chain + insider allocations · gas only';
+    return;
+  }
+  if (activePad.family === 'flap') {
+    $('feeNote').textContent = `flap tax token · buy/sell tax splits per mode · address mined to end 7777 · optional dev buy + gas (${activePad.nativeSymbol})`;
     return;
   }
   try {
@@ -1484,6 +3411,14 @@ function init() {
     updateRialtoHint(activePad);
   });
   $('solQuoteSelect').addEventListener('change', () => updateSolQuoteUI(activePad));
+  $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
+  $('clmmQuoteSelect').addEventListener('change', () => { if (activePad.family === 'clmm') updateClmmUI(activePad); });
+  $('ponsQuoteSelect').addEventListener('change', () => { if (activePad.family === 'pons-v2') updatePonsUI(activePad); });
+  $('v4curveQuoteSelect').addEventListener('change', () => { if (activePad.family === 'v4curve') updateV4CurveUI(activePad); });
+  for (const id of ['flapQuoteSelect', 'flapMode', 'flapDivToken', 'flapTax', 'flapSplit', 'flapDevFund']) {
+    const el = $(id);
+    if (el) el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => { if (activePad.family === 'flap') updateFlapUI(activePad); });
+  }
 
   $('distToggle').onclick = toggleDistro;
   $('distAdd').onclick = () => $('distRows').appendChild(distRow());
@@ -1503,8 +3438,17 @@ function init() {
 
   $('refreshTokens').onclick = renderTokenList;
   $('claimAll').onclick = () => claimAllFees($('claimAll'));
+  $('ponsV2ClaimBtn').onclick = claimPonsV2;
+  $('ponsV2Refresh').onclick = refreshPonsV2Bal;
+  $('ponsV2Token').addEventListener('input', refreshPonsV2Bal);
   $('claimAddrBtn').onclick = () => {
     const addr = $('claimAddr').value.trim();
+    // Solana / Meteora: paste a DBC pool address (base58) to claim its fees
+    if (activePad.vm === 'sol' && activePad.family === 'meteora') {
+      if (!isSolAddress(addr)) { $('claimStatus').innerHTML = '<span class="err">not a valid Solana pool address</span>'; return; }
+      claimMeteora(addr, $('claimAddrBtn'));
+      return;
+    }
     if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
       $('claimStatus').innerHTML = '<span class="err">not a valid token address</span>';
       return;
@@ -1525,8 +3469,13 @@ function init() {
 
   $('walletChip').onclick = () => {
     const addr = activePad.vm === 'sol' ? (solKeyB58 && solPubkeyFromSecret(solKeyB58)) : account?.address;
-    if (addr) navigator.clipboard.writeText(addr);
+    if (addr) { navigator.clipboard.writeText(addr); return; }
+    // no key loaded for this chain — open the import form
+    $('importErr').textContent = '';
+    $('keysOverlay').classList.remove('hidden');
   };
+
+  $('vampBtn').onclick = vamp;
 
   // image: click / drop / paste
   const drop = $('drop'), file = $('file');
@@ -1545,7 +3494,7 @@ function init() {
     const btn = $('launchBtn');
     btn.disabled = true;
     try { await launch(); }
-    catch (e) { setStatus(e.shortMessage || e.message, true); }
+    catch (e) { setStatus((e && (e.shortMessage || e.message)) || String(e) || 'launch failed (no error detail — check the RPC/console)', true); }
     finally { btn.disabled = false; }
   };
 
