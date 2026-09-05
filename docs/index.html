@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>launcher</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #14171c;
+    --panel2: #1a1e24;
+    --border: #262b33;
+    --text: #e6e9ee;
+    --dim: #8a93a1;
+    --accent: #4ade80;
+    --danger: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    min-height: 100vh; display: flex; justify-content: center; padding: 24px 12px;
+  }
+  .app { width: 100%; max-width: 460px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  header h1 { font-size: 15px; letter-spacing: 3px; font-weight: 600; }
+  .wallet-chip {
+    display: flex; gap: 8px; align-items: center; cursor: pointer;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; font-size: 12px; color: var(--dim);
+  }
+  .wallet-chip .bal { color: var(--text); }
+  .wallet-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+  .wallet-chip .dot.on { background: var(--accent); }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  label { display: block; font-size: 10px; letter-spacing: 2px; color: var(--dim); margin: 14px 0 5px; }
+  label:first-child { margin-top: 0; }
+  select {
+    width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--dim); padding: 6px 8px; font: inherit; font-size: 12px; outline: none;
+  }
+  input[type=text], input[type=password], input[type=number], textarea {
+    width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 10px 12px; font: inherit; outline: none;
+  }
+  input:focus, textarea:focus { border-color: #3b4453; }
+
+  .row { display: flex; gap: 10px; }
+  .row > div { flex: 1; }
+
+  .drop {
+    width: 96px; height: 96px; border: 1px dashed var(--border); border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    color: var(--dim); font-size: 26px; overflow: hidden; background: var(--panel2);
+    flex: none;
+  }
+  .drop.has img { width: 100%; height: 100%; object-fit: cover; }
+  .drop.drag { border-color: var(--accent); }
+  .drop-hint { font-size: 11px; color: var(--dim); margin-top: 6px; }
+
+  .pads { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pad {
+    padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--dim); font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .pad.active { border-color: var(--accent); color: var(--accent); }
+  .pad:disabled { opacity: .4; cursor: default; }
+  .pad input {
+    width: 56px; background: none; border: none; color: var(--accent);
+    font: inherit; font-size: 12px; outline: none; text-align: center; padding: 0;
+  }
+  .hint { letter-spacing: 0; text-transform: none; opacity: .7; }
+  .buy-preview { font-size: 12px; color: var(--dim); margin-top: 8px; min-height: 16px; }
+  .buy-preview b { color: var(--text); font-weight: 600; }
+  .chip-edit-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .chip-edit-row input { flex: 1; }
+  .chip-edit-row .x {
+    background: none; border: 1px solid var(--border); border-radius: 7px;
+    color: var(--dim); font: inherit; padding: 8px 11px; cursor: pointer;
+  }
+  .chip-edit-row .x:hover { color: var(--danger); border-color: var(--danger); }
+  .mini {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 7px;
+    color: var(--dim); font: inherit; font-size: 11px; padding: 4px 9px; cursor: pointer;
+  }
+  .mini:hover { color: var(--text); }
+  .mini.wide { width: 100%; padding: 10px 0; }
+  .mini:disabled { opacity: .5; cursor: default; }
+  .mini.accent { color: var(--accent); border-color: var(--accent); }
+  .token-list .empty { font-size: 12px; color: var(--dim); }
+  .token-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 0;
+    border-bottom: 1px solid var(--border); font-size: 12px;
+  }
+  .token-row:last-child { border-bottom: none; }
+  .token-row .sym { color: var(--text); font-weight: 700; }
+  .token-row .addr { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .token-row .addr a { color: var(--dim); text-decoration: none; }
+  .token-row .addr a:hover { color: var(--accent); }
+
+  .launch-btn {
+    width: 100%; margin-top: 18px; padding: 13px; border: none; border-radius: 10px;
+    background: var(--accent); color: #04160b; font: inherit; font-weight: 700;
+    letter-spacing: 2px; cursor: pointer; font-size: 14px;
+  }
+  .launch-btn:disabled { opacity: .5; cursor: default; }
+  .fee-note { text-align: center; font-size: 11px; color: var(--dim); margin-top: 8px; }
+
+  .status { margin-top: 12px; font-size: 12px; color: var(--dim); word-break: break-all; white-space: pre-wrap; }
+  .status a { color: var(--accent); }
+  .status .err { color: var(--danger); }
+
+  /* modal */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.65); display: flex;
+    align-items: center; justify-content: center; padding: 16px; z-index: 10;
+  }
+  .overlay.hidden { display: none; }
+  .modal { width: 100%; max-width: 400px; }
+  .modal h2 { font-size: 13px; letter-spacing: 2px; margin-bottom: 4px; }
+  .modal .sub { font-size: 11px; color: var(--dim); }
+  .modal button.primary {
+    width: 100%; margin-top: 16px; padding: 11px; border: none; border-radius: 8px;
+    background: var(--accent); color: #04160b; font: inherit; font-weight: 700; cursor: pointer;
+  }
+  .modal .err { color: var(--danger); font-size: 12px; margin-top: 8px; min-height: 16px; }
+  .modal .ghost { background: none; border: none; color: var(--dim); font: inherit; font-size: 11px; margin-top: 10px; cursor: pointer; width: 100%; }
+  details.adv { margin-top: 14px; }
+  details.adv summary { font-size: 11px; color: var(--dim); cursor: pointer; letter-spacing: 1px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="app" id="appRoot" style="display:none">
+  <header>
+    <h1>LAUNCHER</h1>
+    <div style="display:flex;gap:10px;align-items:center">
+      <a href="trade.html" style="color:var(--dim);font-size:12px;text-decoration:none" title="buy / sell DBC tokens with SOL">🔀 trade</a>
+      <a id="keysLink" style="color:var(--dim);font-size:12px;text-decoration:none;cursor:pointer" title="import / update keys">🔑 keys</a>
+      <a href="fees.html" style="color:var(--dim);font-size:12px;text-decoration:none" title="sweep all creator fees">💸 fees</a>
+      <a href="force-migrate.html" style="color:var(--dim);font-size:12px;text-decoration:none" title="force-migrate a stuck Pons v2 bonding curve">🚑 migrate</a>
+      <a href="swap.html" style="color:var(--dim);font-size:12px;text-decoration:none" title="buy / sell any token with a WETH pool on Robinhood chain">💱 swap</a>
+      <a href="openfour.html" style="color:var(--dim);font-size:12px;text-decoration:none" title="trade four.meme OpenFour bonding curves on BNB Chain">🟡 openfour</a>
+      <div class="wallet-chip" id="walletChip" title="wallet">
+        <span class="dot" id="walletDot"></span>
+        <span id="walletAddr">locked</span>
+        <span class="bal" id="walletBal"></span>
+      </div>
+    </div>
+  </header>
+
+  <div class="card">
+    <label>LAUNCHPAD</label>
+    <div class="pads" id="pads"></div>
+
+    <label>IMAGE</label>
+    <div style="display:flex; gap:12px; align-items:flex-start;">
+      <div class="drop" id="drop">+</div>
+      <div class="drop-hint">click, drag, or just paste (ctrl+v) an image anywhere</div>
+    </div>
+    <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
+
+    <button type="button" id="vampBtn"
+      style="width:100%;margin:10px 0 2px;padding:9px;background:linear-gradient(90deg,#7c3aed,#db2777);color:#fff;border:none;border-radius:8px;font:inherit;font-weight:600;letter-spacing:1px;cursor:pointer">
+      🧛 VAMP — copy a token's CA, then click to steal its name/ticker/pic/socials
+    </button>
+    <div class="hint" id="vampHint" style="font-size:11px;margin:0 0 8px"></div>
+
+    <div class="row">
+      <div>
+        <label>NAME</label>
+        <input type="text" id="name" autocomplete="off" spellcheck="false">
+      </div>
+      <div style="flex:0 0 130px">
+        <label>TICKER</label>
+        <input type="text" id="symbol" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+
+    <div class="row hidden" id="supplyRow">
+      <div>
+        <label>SUPPLY (TOKENS)</label>
+        <input type="text" id="supply" value="420690000000" spellcheck="false">
+      </div>
+    </div>
+
+    <div class="row hidden" id="quoteRow">
+      <div>
+        <label>PAIR AGAINST</label>
+        <select id="quoteSelect"></select>
+        <div class="hint" id="quoteHint" style="font-size:11px;margin-top:4px"></div>
+      </div>
+    </div>
+
+    <!-- Solana / Meteora DBC -->
+    <div id="solRow" class="hidden">
+      <label>PAIR AGAINST (QUOTE)</label>
+      <select id="solQuoteSelect">
+        <option value="SOL">SOL</option>
+        <option value="USDC">USDC</option>
+        <option value="CUSTOM">custom mint…</option>
+      </select>
+      <input type="text" id="solCustomMint" class="hidden" spellcheck="false"
+             style="margin-top:8px" placeholder="quote mint address">
+      <div class="hint" id="solQuoteHint" style="font-size:11px;margin-top:4px"></div>
+
+      <details class="adv" id="solParams">
+        <summary>bonding-curve parameters (pump.fun defaults)</summary>
+        <div class="row">
+          <div><label>TOTAL SUPPLY</label><input type="text" id="solSupply" value="1000000000" spellcheck="false"></div>
+          <div style="flex:0 0 120px"><label>FEE (BPS)</label><input type="text" id="solFeeBps" value="100" spellcheck="false"></div>
+        </div>
+        <div class="row">
+          <div><label>MIGRATION THRESHOLD (QUOTE)</label><input type="text" id="solMigThreshold" spellcheck="false"></div>
+          <div style="flex:0 0 120px"><label>% ON MIGRATION</label><input type="text" id="solMigPct" value="20" spellcheck="false"></div>
+        </div>
+        <label>FEE WALLET (ALL TRADING FEES)</label>
+        <input type="text" id="solFeeWallet" value="H5GAYEieNUyTmHFD4foJEKSpkggEDHBV9ffGebrD6wAW" spellcheck="false">
+        <div class="hint" style="font-size:11px;margin-top:4px">1% buy &amp; sell → this wallet · LP burnt · mint authority disabled · migrates to DAMM v2</div>
+      </details>
+    </div>
+
+    <!-- Raydium LaunchLab -->
+    <div id="raydiumRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST (QUOTE)</label><select id="raydiumQuoteSelect"></select></div>
+        <div style="flex:0 0 150px"><label>DEV BUY (<span id="raydiumDevSym">SOL</span>, opt.)</label><input type="text" id="raydiumDevBuy" value="0" spellcheck="false"></div>
+      </div>
+      <input type="text" id="raydiumQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="quote mint address (needs a LaunchLab config)">
+      <div class="hint" id="raydiumHint" style="font-size:11px;margin-top:4px">bonding curve · no liquidity to seed · graduates to a Raydium AMM pool · quote needs a LaunchLab config</div>
+    </div>
+
+    <!-- Custom single-sided Raydium CLMM curve -->
+    <div id="clmmRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST (QUOTE)</label><select id="clmmQuoteSelect"></select></div>
+        <div style="flex:0 0 150px"><label>TOTAL SUPPLY</label><input type="text" id="clmmSupply" value="1000000000" spellcheck="false"></div>
+      </div>
+      <input type="text" id="clmmQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="quote mint address (any SPL/Token-2022)">
+      <div class="row" style="margin-top:8px">
+        <div><label>DEV BUY (<span id="clmmDevSym">SOL</span>)</label><input type="text" id="clmmDevBuy" value="5" spellcheck="false"></div>
+        <div style="flex:0 0 120px"><label>TARGET %</label><input type="text" id="clmmTargetPct" value="15" spellcheck="false"></div>
+      </div>
+      <label>FEE RECIPIENT (position NFT owner)</label>
+      <input type="text" id="clmmFeeRecipient" placeholder="your SOL wallet (default)" spellcheck="false">
+      <div class="hint" style="font-size:11px;margin-top:4px">full supply single-sided (no <span id="clmmSeedSym">SOL</span> seeded) = the curve · born as a Raydium CLMM · your dev buy is tuned to ~target% · fees accrue to the position holder</div>
+    </div>
+
+    <!-- Uniswap V2 fair launch -->
+    <div id="uniRow" class="hidden">
+      <div class="row">
+        <div><label>ETH LIQUIDITY</label><input type="text" id="uniEth" placeholder="1.0" spellcheck="false"></div>
+        <div style="flex:0 0 120px"><label>% TO POOL</label><input type="text" id="uniPct" value="100" spellcheck="false"></div>
+      </div>
+      <div class="row">
+        <div style="flex:0 0 130px"><label>BUY/SELL FEE (%)</label><input type="text" id="uniFee" value="1" spellcheck="false"></div>
+        <div><label>FEE WALLET</label><input type="text" id="uniFeeWallet" value="0xbE8af7E12B536aB55fbaf92EDbb512972e0504dA" spellcheck="false"></div>
+      </div>
+      <div class="hint" style="font-size:11px;margin-top:4px">supply pooled vs your ETH on Uniswap V2 · <b>LP burnt</b> · not mintable · no owner. Fee &gt; 0 taxes each buy/sell to the wallet (mainnet); set 0 for a plain no-fee token.</div>
+      <details class="adv">
+        <summary>slippage</summary>
+        <label>SLIPPAGE (%)</label>
+        <input type="text" id="uniSlippage" value="2">
+      </details>
+    </div>
+
+    <!-- flap.sh tax token: pairing + dividends/burn modes -->
+    <div id="flapRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST</label><select id="flapQuoteSelect"></select></div>
+        <div style="flex:0 0 120px"><label>TAX (%)</label><input type="text" id="flapTax" value="1" spellcheck="false"></div>
+      </div>
+      <input type="text" id="flapQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="payment token address (0x…)">
+      <div class="row">
+        <div><label>MODE</label>
+          <select id="flapMode">
+            <option value="dividends" selected>dividends (reflections)</option>
+            <option value="standard">standard (tax → you)</option>
+            <option value="burn">burn (deflationary)</option>
+          </select>
+        </div>
+        <div style="flex:0 0 150px" id="flapSplitWrap" class="hidden"><label>SHARE OF TAX (%)</label><input type="text" id="flapSplit" value="100" spellcheck="false"></div>
+      </div>
+      <div id="flapDivWrap" class="hidden">
+        <div class="row">
+          <div><label>DIVIDEND TOKEN</label>
+            <select id="flapDivToken">
+              <option value="self">this token</option>
+              <option value="quote">the pair token</option>
+              <option value="custom">custom ERC-20…</option>
+            </select>
+          </div>
+          <div style="flex:0 0 150px"><label>MIN SHARE BAL</label><input type="text" id="flapMinShare" value="1" spellcheck="false"></div>
+        </div>
+        <input type="text" id="flapDivCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="dividend token address (0x…)">
+      </div>
+      <div class="row">
+        <div><label>DEV BUY (<span id="flapDevSym">BNB</span>, optional)</label><input type="text" id="flapDevBuy" value="0" spellcheck="false"></div>
+        <div style="flex:0 0 130px" id="flapDevFundWrap" class="hidden"><label>FUND WITH</label>
+          <select id="flapDevFund"><option value="BNB">BNB</option><option value="USDC">USDC</option></select>
+        </div>
+      </div>
+      <div class="hint" id="flapHint" style="font-size:11px;margin-top:4px">tax token · address mined to end in 7777 · buy/sell tax splits per mode</div>
+    </div>
+
+    <!-- Pons v2: pair token + dev buy -->
+    <div id="v4curveRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST (QUOTE)</label><select id="v4curveQuoteSelect"></select></div>
+        <div style="flex:0 0 170px"><label>GRADUATE AT (<span id="v4curveThreshSym">ETH</span>)</label><input type="text" id="v4curveThreshold" value="4.2" spellcheck="false"></div>
+      </div>
+      <input type="text" id="v4curveQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="any ERC-20 quote token address (0x…)">
+      <div class="row" style="margin-top:8px">
+        <div><label>SUPPLY</label><input type="text" id="v4curveSupply" value="1000000000" spellcheck="false"></div>
+        <div style="flex:0 0 170px"><label>DEV BUY (<span id="v4curveDevSym">ETH</span>, opt.)</label><input type="text" id="v4curveDevBuy" value="0" spellcheck="false"></div>
+      </div>
+      <div class="hint" id="v4curveHint" style="font-size:11px;margin-top:6px">our own curve · ANY quote token (no allowlist) · graduates straight into a Uniswap v4 pool · anyone can trigger graduation the moment the threshold is hit, so it can never get stuck</div>
+    </div>
+
+    <div id="ponsRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST</label><select id="ponsQuoteSelect"></select></div>
+        <div style="flex:0 0 150px"><label>DEV BUY (<span id="ponsDevSym">NVDA</span>)</label><input type="text" id="ponsDevBuy" value="0" spellcheck="false"></div>
+      </div>
+      <input type="text" id="ponsQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="approved pair token address (0x…)">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+        <input type="checkbox" id="ponsBuyback" checked style="width:auto;margin:0">
+        <span>BUYBACK — Pons auto-spends part of <b>your</b> creator fee buying the token back (vested 5yr, split you/protocol · not burned)</span>
+      </label>
+      <div class="hint" id="ponsHint" style="font-size:11px;margin-top:4px">bonding curve · paired vs an approved token · dev buy in that token (held in your wallet)</div>
+    </div>
+
+    <div class="row">
+      <div><label>TWITTER (OPT.)</label><input type="text" id="twitter" placeholder="https://x.com/..."></div>
+      <div><label>WEBSITE (OPT.)</label><input type="text" id="website" placeholder="https://..."></div>
+    </div>
+
+    <div id="devBuyBlock">
+      <label>DEV BUY</label>
+      <div class="pads" id="buyChips"></div>
+      <div class="buy-preview" id="buyPreview"></div>
+    </div>
+
+    <div id="distroBlock">
+    <label>DISTRO</label>
+    <div class="pads">
+      <button class="pad" id="distToggle">off</button>
+    </div>
+    <div id="distPanel" class="hidden" style="margin-top:10px">
+      <div class="pads" id="distSetChips"></div>
+      <div id="distRows"></div>
+      <div class="pads" style="margin-top:8px">
+        <button class="mini" id="distAdd">+ add wallet</button>
+        <button class="mini" id="distSave">save as set</button>
+        <button class="mini" id="distDelete">del set</button>
+      </div>
+      <div class="hint" style="font-size:11px;margin-top:6px">amount in tokens (e.g. 10000000) or % of supply (e.g. 2%). sent from your wallet right after launch — needs a dev buy big enough to cover it.</div>
+    </div>
+    </div>
+
+    <details class="adv" id="descBlock">
+      <summary>description · fee recipient</summary>
+      <label>DESCRIPTION</label>
+      <textarea id="desc" rows="2">aaaaaaaaaa</textarea>
+      <label>FEE SHARE RECIPIENT</label>
+      <input type="text" id="feeRecipient" placeholder="your imported wallet (default)" spellcheck="false">
+      <div class="hint" style="font-size:11px;margin-top:4px">creator trading fees route here. leave empty = your wallet.</div>
+    </details>
+
+    <button class="launch-btn" id="launchBtn">LAUNCH</button>
+    <div class="fee-note" id="feeNote"></div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <label style="margin-top:0">MY TOKENS · CLAIM FEES <button class="mini" id="refreshTokens" title="refresh">↻</button> <button class="mini accent" id="claimAll">CLAIM ALL</button></label>
+    <div id="tokenList" class="token-list"><div class="empty">unlock wallet to load your launches</div></div>
+    <div class="row" style="margin-top:10px">
+      <div><input type="text" id="claimAddr" placeholder="or paste a token (0x…) / Meteora pool address" spellcheck="false"></div>
+      <div style="flex:0 0 90px"><button class="mini wide" id="claimAddrBtn">CLAIM</button></div>
+    </div>
+    <div class="status" id="claimStatus"></div>
+
+    <label style="margin-top:12px">PONS V2 ESCROW <button class="mini" id="ponsV2Refresh" title="refresh">↻</button> <span id="ponsV2Bal" style="color:var(--dim);font-size:11px"></span></label>
+    <div class="row">
+      <div><input type="text" id="ponsV2Token" placeholder="pair token addr (blank = native ETH)" spellcheck="false"></div>
+      <div style="flex:0 0 90px"><button class="mini wide" id="ponsV2ClaimBtn">CLAIM</button></div>
+    </div>
+    <div class="status" id="ponsV2Status"></div>
+  </div>
+</div>
+
+<!-- import / update keys (post-setup) -->
+<div class="overlay hidden" id="keysOverlay">
+  <div class="card modal">
+    <h2>IMPORT / UPDATE KEYS</h2>
+    <p class="sub">Add or replace a key. Stored in this browser only (unencrypted); leave a field blank to keep the current key.</p>
+    <label>SOL PRIVATE KEY</label>
+    <input type="password" id="importSolKey" placeholder="base58 (Phantom export) or [1,2,…]" autocomplete="off">
+    <label>EVM PRIVATE KEY</label>
+    <input type="password" id="importEvmKey" placeholder="0x… (leave blank to keep current)" autocomplete="off">
+    <div class="err" id="importErr"></div>
+    <button class="primary" id="importBtn">SAVE</button>
+    <button class="ghost" id="clearKeys">clear all stored keys</button>
+    <button class="ghost" id="importCancel">cancel</button>
+  </div>
+</div>
+
+<!-- edit buy amounts -->
+<div class="overlay hidden" id="chipsOverlay">
+  <div class="card modal">
+    <h2>EDIT BUY AMOUNTS</h2>
+    <p class="sub">These become your one-click dev-buy buttons.</p>
+    <div id="chipEditRows"></div>
+    <button class="ghost" id="chipAdd" style="text-align:left">+ add amount</button>
+    <button class="primary" id="chipSave">SAVE</button>
+    <button class="ghost" id="chipCancel">cancel</button>
+  </div>
+</div>
+
+<!-- first-run: import key (plaintext local store, no password) -->
+<div class="overlay hidden" id="setupOverlay">
+  <div class="card modal">
+    <h2>ADD YOUR KEY(S)</h2>
+    <p class="sub">Stored in this browser only (unencrypted) and used to sign locally — nothing leaves this device but signed transactions. Paste an EVM key, a SOL key, or both.</p>
+    <label>EVM PRIVATE KEY (OPT.)</label>
+    <input type="password" id="setupKey" placeholder="0x..." autocomplete="off">
+    <label>SOL PRIVATE KEY (OPT.)</label>
+    <input type="password" id="setupSolKey" placeholder="base58 (phantom export)" autocomplete="off">
+    <div class="err" id="setupErr"></div>
+    <button class="primary" id="setupBtn">SAVE</button>
+    <button class="ghost" id="resetVault">clear stored key(s)</button>
+  </div>
+</div>
+
+<script type="module" src="app.js?v=31"></script>
+</body>
+</html>

@@ -17,16 +17,26 @@
 // a Token-2022 mint (like the pump token) works too as long as its only
 // extensions are metadata-related AND migration targets DAMM v2 (not v1).
 // ---------------------------------------------------------------------------
-import { Connection, Keypair, PublicKey, ComputeBudgetProgram, VersionedTransaction, sendAndConfirmTransaction } from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
+import { Connection, Keypair, PublicKey, ComputeBudgetProgram, VersionedTransaction, sendAndConfirmTransaction, SystemProgram, Transaction, TransactionInstruction } from '@solana/web3.js';
+import {
+  TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync,
+  MINT_SIZE, getMinimumBalanceForRentExemptMint,
+  createInitializeMint2Instruction, createAssociatedTokenAccountInstruction,
+  createMintToInstruction, createSetAuthorityInstruction, AuthorityType,
+} from '@solana/spl-token';
 import BN from 'bn.js';
 import bs58 from 'bs58';
+import Decimal from 'decimal.js';
 import {
   DynamicBondingCurveClient, buildCurve, swapQuote, getCurrentPoint,
   deriveDbcPoolAddress, deriveDbcTokenVaultAddress, deriveMintMetadata, METAPLEX_PROGRAM_ID,
   TokenType, TokenDecimal, TokenAuthorityOption,
   BaseFeeMode, CollectFeeMode, MigrationOption, MigrationFeeOption, ActivationType,
 } from '@meteora-ag/dynamic-bonding-curve-sdk';
+import {
+  Raydium, TxVersion, LAUNCHPAD_PROGRAM, getPdaLaunchpadConfigId, LaunchpadConfig,
+  CLMM_PROGRAM_ID, TickUtil,
+} from '@raydium-io/raydium-sdk-v2';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const JUP = 'https://lite-api.jup.ag/swap/v1';
@@ -203,6 +213,79 @@ export function solAddressFromSecret(secret) {
 }
 
 // ---------------------------------------------------------------------------
+// Meteora DBC fee claiming. Our launches route 100% of trading fees to the
+// config's feeClaimer, accrued in the QUOTE token (collectFeeMode=QuoteToken,
+// creatorTradingFeePercentage=0). This lists what's owed per pool and claims it.
+// The stored SOL wallet must BE the pool's feeClaimer, or the program rejects it.
+// ---------------------------------------------------------------------------
+
+// List every DBC pool this wallet created, with its unclaimed partner fee.
+// Returns [{ pool, baseMint, quoteMint, quoteDecimals, claimableQuote, claimableBase }]
+// (claimable* are raw integer strings in the token's base units).
+export async function getMeteoraFees({ rpcUrl, owner }) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const client = new DynamicBondingCurveClient(connection, 'confirmed');
+  const rows = await client.state.getPoolsFeesByCreator(new PublicKey(owner));
+  const quoteCache = new Map(); // config -> { mint, decimals }
+  const out = [];
+  for (const r of rows) {
+    let baseMint = null, quoteMint = null, quoteDecimals = 9;
+    try {
+      const pool = await client.state.getPool(r.poolAddress);
+      baseMint = pool?.baseMint?.toBase58?.() || null;
+      const cfgKey = pool?.config?.toBase58?.();
+      if (cfgKey) {
+        if (!quoteCache.has(cfgKey)) {
+          const cfg = await client.state.getPoolConfig(pool.config);
+          const qm = cfg?.quoteMint;
+          const dec = qm ? (await readQuoteMint(connection, qm)).decimals : 9;
+          quoteCache.set(cfgKey, { mint: qm?.toBase58?.() || null, decimals: dec });
+        }
+        const q = quoteCache.get(cfgKey);
+        quoteMint = q.mint; quoteDecimals = q.decimals;
+      }
+    } catch { /* pool details are best-effort; the fee numbers still stand */ }
+    out.push({
+      pool: r.poolAddress.toBase58(),
+      baseMint, quoteMint, quoteDecimals,
+      claimableQuote: r.partnerQuoteFee.toString(),
+      claimableBase: r.partnerBaseFee.toString(),
+    });
+  }
+  return out;
+}
+
+// Claim the unclaimed partner trading fees for one DBC pool to the fee wallet
+// (= the caller, which must be the pool's feeClaimer). Returns { sig, claimedQuote, claimedBase }.
+export async function claimMeteoraFees({ rpcUrl, secretKey, pool, onStatus }) {
+  const say = (m) => onStatus && onStatus(m);
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const payer = keypairFromSecret(secretKey);
+  const client = new DynamicBondingCurveClient(connection, 'confirmed');
+  const poolPk = new PublicKey(pool);
+
+  say('reading claimable fees…');
+  const metrics = await client.state.getPoolFeeMetrics(poolPk);
+  const maxBase = metrics.current.partnerBaseFee;
+  const maxQuote = metrics.current.partnerQuoteFee;
+  if (maxBase.isZero() && maxQuote.isZero()) throw new Error('nothing to claim on this pool yet');
+
+  say('building claim tx…');
+  const tx = await client.partner.claimPartnerTradingFee({
+    feeClaimer: payer.publicKey,
+    payer: payer.publicKey,
+    pool: poolPk,
+    maxBaseAmount: maxBase,
+    maxQuoteAmount: maxQuote,
+    receiver: payer.publicKey,
+  });
+  addPriority(tx);
+  say('sending claim tx…');
+  const sig = await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' });
+  return { sig, claimedBase: maxBase.toString(), claimedQuote: maxQuote.toString() };
+}
+
+// ---------------------------------------------------------------------------
 // Router: buy/sell a DBC token with SOL by chaining Jupiter (SOL<->quote) with
 // the DBC curve (quote<->token). Sequential — leg 1 confirms, then we read the
 // actual amount received and feed it into leg 2.
@@ -373,4 +456,378 @@ export async function routerSell({ rpcUrl, secretKey, tokenMint, uiTokens, slipp
   const jq = await jupiterQuote(info.quoteMint.toBase58(), SOL_MINT, quoteOut.toString(), slippageBps);
   const jupSig = await jupiterSwap(connection, owner, jq);
   return { dbcSig, jupSig, solOut: jq.outAmount };
+}
+
+// ---------------------------------------------------------------------------
+// Raydium LaunchLab — bonding-curve launch, no liquidity to seed. The quote mint
+// must have an on-chain LaunchpadConfig (SOL / USD1 / Anon / USDC / USDT / EURC /
+// TRUMP / NVDAx / SPYx / CRCLx are live, incl. stock-pegged xStocks quotes); the
+// token graduates to a Raydium AMM/CPMM pool. Base decimals fixed at 6. Same
+// program + configs power both raydium.io and letsbonk.fun — only platformId
+// differs (see RAYDIUM_PLATFORM_ID / BONK_PLATFORM_ID below).
+//   raydium.launchpad.createLaunchpad -> create the mint + open the curve.
+// ---------------------------------------------------------------------------
+export const RAYDIUM_QUOTES = {
+  SOL:   { mint: 'So11111111111111111111111111111111111111112', symbol: 'SOL',   decimals: 9 },
+  USD1:  { mint: 'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB',  symbol: 'USD1',  decimals: 6 },
+  Anon:  { mint: '9McvH6w97oewLmPxqQEoHUAv3u5iYMyQ9AeZZhguYf1T', symbol: 'Anon',  decimals: 9 },
+  USDC:  { mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', symbol: 'USDC',  decimals: 6 },
+  USDT:  { mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', symbol: 'USDT',  decimals: 6 },
+  EURC:  { mint: 'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', symbol: 'EURC',  decimals: 6 },
+  TRUMP: { mint: '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN', symbol: 'TRUMP', decimals: 6 },
+  NVDAx: { mint: 'Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh',  symbol: 'NVDAx', decimals: 8 },
+  SPYx:  { mint: 'XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W',  symbol: 'SPYx',  decimals: 8 },
+  CRCLx: { mint: 'XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1',  symbol: 'CRCLx', decimals: 8 },
+};
+
+// Platform ids for the two LaunchLab frontends — same program, same configs,
+// different branding/fee-split. Omit to fall back to the SDK's own default
+// (Raydium's platformId, i.e. the raydium.io frontend).
+export const RAYDIUM_PLATFORM_ID = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
+export const BONK_PLATFORM_ID = 'FfYek5vEz23cMkWsdJwG2oa6EphsvXSHrGpdALN4g6W1';
+
+// human amount -> smallest units, precise (no float drift)
+function toRawUnits(amountStr, decimals) {
+  const s = String(amountStr || '0').trim();
+  if (!s || +s <= 0) return new BN(0);
+  const [whole, frac = ''] = s.split('.');
+  const fracPadded = (frac + '0'.repeat(decimals)).slice(0, decimals);
+  return new BN((whole || '0') + fracPadded).add(new BN(0)); // normalize
+}
+
+// SOL and USD1 are the only quotes with real defaultParams in Raydium's
+// fetchLaunchConfigs() API — every other config (Anon included: its API entry
+// comes back zeroed) needs supply/totalSellA/totalFundRaisingB passed in
+// explicitly or createLaunchpad throws trying to read defaultParams off an
+// undefined/zeroed config entry.
+const PLATFORM_DEFAULT_QUOTES = new Set([
+  'So11111111111111111111111111111111111111112',
+  'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB',
+]);
+// Curve override reproducing the observed "bonk pair" launch
+// (ErCiVpFvrmwHskgrkS536hfS2v1UEZAqRhxun9JQLi1Z on letsbonk.fun): fixed 1B
+// supply, 79.31% sold via the curve, raising the equivalent of 3,274.601594
+// quote tokens — which gives the same ~0.33x starting / ~4.83x migration
+// market-cap-to-raise ratios regardless of which quote token is chosen.
+const CURVE_SUPPLY = new BN('1000000000000000');  // 1B tokens @ 6 decimals
+const CURVE_SELL_A = new BN('793100000000000');   // 79.31% of supply
+const CURVE_RAISE_B_MICRO = new BN('3274601594'); // human raise amount * 1e6
+function curveRaiseTargetRaw(quoteDecimals) {
+  return quoteDecimals >= 6
+    ? CURVE_RAISE_B_MICRO.mul(new BN(10).pow(new BN(quoteDecimals - 6)))
+    : CURVE_RAISE_B_MICRO.div(new BN(10).pow(new BN(6 - quoteDecimals)));
+}
+
+// Poll getSignatureStatuses over plain HTTP instead of trusting a websocket
+// onSignature subscription — proven reliable even in bursts, unlike the SDK's
+// internal wait (see launchRaydium below for why that one gets bypassed).
+async function confirmSignaturesHttp(connection, sigs, { timeoutMs = 45000, intervalMs = 2000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const pending = new Set(sigs);
+  while (pending.size && Date.now() < deadline) {
+    const list = [...pending];
+    const { value } = await connection.getSignatureStatuses(list, { searchTransactionHistory: true });
+    value.forEach((status, i) => {
+      const s = list[i];
+      if (!status) return; // not seen by this RPC node yet
+      if (status.err) throw new Error(`tx ${s} failed on-chain: ${JSON.stringify(status.err)}`);
+      if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') pending.delete(s);
+    });
+    if (pending.size) await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  if (pending.size) throw new Error(`no confirmation after ${Math.round(timeoutMs / 1000)}s for: ${[...pending].join(', ')} — it may still land, check Solscan`);
+}
+
+export async function launchRaydium(opts) {
+  const { rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId, onStatus } = opts;
+  const say = (m) => onStatus && onStatus(m);
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const owner = keypairFromSecret(secretKey);
+
+  say('loading Raydium SDK…');
+  const raydium = await Raydium.load({
+    connection, owner, cluster: 'mainnet',
+    disableFeatureCheck: true, disableLoadToken: true, blockhashCommitment: 'finalized',
+  });
+
+  const programId = LAUNCHPAD_PROGRAM;
+  const quote = new PublicKey(quoteMint);
+  // config PDA binds the quote mint (index 0, constant-product curveType 0)
+  const configId = getPdaLaunchpadConfigId(programId, quote, 0, 0).publicKey;
+  const configData = await connection.getAccountInfo(configId);
+  if (!configData) {
+    throw new Error('no LaunchLab config exists for that quote token — LaunchLab needs a config per quote (SOL / USD1 / Anon / USDC / USDT / EURC / TRUMP / NVDAx / SPYx / CRCLx are live). For an arbitrary quote, use the Meteora pad instead.');
+  }
+  const configInfo = LaunchpadConfig.decode(configData.data);
+  const mintBInfo = await raydium.token.getTokenInfo(configInfo.mintB);
+
+  const pair = Keypair.generate(); // base mint keypair
+  const buyRaw = toRawUnits(buyAmountUi, mintBInfo.decimals);
+  const doBuy = buyRaw.gtn(0);
+
+  let curveOverride = {};
+  if (!PLATFORM_DEFAULT_QUOTES.has(configInfo.mintB.toBase58())) {
+    let raiseB = curveRaiseTargetRaw(mintBInfo.decimals);
+    if (configInfo.minFundRaisingB && raiseB.lt(configInfo.minFundRaisingB)) raiseB = configInfo.minFundRaisingB;
+    curveOverride = { supply: CURVE_SUPPLY, totalSellA: CURVE_SELL_A, totalFundRaisingB: raiseB };
+  }
+
+  // Raydium's own confirm-wait can reject with a bare `undefined` (no Error, no
+  // message) on timeout or on-chain failure — normalize everything here so the
+  // caller always gets a real, readable Error instead of silently losing it.
+  const asError = (e, fallback) => {
+    if (e instanceof Error && e.message) return e;
+    const logs = e?.logs || e?.transactionLogs;
+    const msg = e?.message || e?.error?.message || (Array.isArray(logs) ? logs.join('\n') : '') || fallback;
+    return new Error(msg);
+  };
+
+  say('building launch tx…');
+  let execute, extInfo;
+  try {
+    ({ execute, extInfo } = await raydium.launchpad.createLaunchpad({
+      programId,
+      platformId: platformId ? new PublicKey(platformId) : undefined,
+      mintA: pair.publicKey,
+      decimals: 6,
+      name, symbol, uri,
+      ...curveOverride,
+      // CPMM, not legacy AMM v4 — v4 needs an OpenBook market per pair (extra cost,
+      // and doesn't exist for arbitrary/stock/custom quotes anyway); CPMM works for
+      // any pair and matches what live LaunchLab pools actually migrate to (verified
+      // on-chain: both the letsbonk.fun/TRUMP and raydium.io/NVDAx example pools
+      // migrated with migrateType=1/cpmm, not 0/amm).
+      migrateType: migrateType || 'cpmm',
+      configId, configInfo,
+      mintBDecimals: mintBInfo.decimals,
+      txVersion: TxVersion.V0,
+      slippage: new BN(100), // 1%
+      buyAmount: doBuy ? buyRaw : new BN(1),
+      createOnly: !doBuy, // no dev buy -> create the mint only
+      extraSigners: [pair],
+      computeBudgetConfig: { units: 600000, microLamports: 100000 },
+    }));
+  } catch (e) {
+    throw asError(e, 'failed to build the launch tx (unknown error)');
+  }
+
+  // sequentially:false skips the SDK's own confirmation wait (an internal
+  // websocket onSignature subscription with a hardcoded 60s timeout that
+  // rejects with a bare `undefined` on timeout/failure — no message, no logs).
+  // We send here, then confirm ourselves over plain HTTP polling below, which
+  // is slower per call but gives real, attributable errors.
+  say('sending launch tx…');
+  let sent;
+  try {
+    sent = await execute({ sequentially: false });
+  } catch (e) {
+    throw asError(e, `launch tx failed to send (mint would have been ${pair.publicKey.toBase58()})`);
+  }
+  const sigs = Array.isArray(sent?.txIds) ? sent.txIds : (sent?.txId ? [sent.txId] : []);
+  if (!sigs.length) throw new Error('launch tx sent but returned no signature — check your wallet/RPC connection');
+
+  say('confirming launch tx…');
+  try {
+    await confirmSignaturesHttp(connection, sigs);
+  } catch (e) {
+    throw asError(e, `sent (${sigs.join(', ')}) but confirmation failed — check Solscan, it may still land`);
+  }
+  const sig = sigs[0];
+
+  return {
+    mint: pair.publicKey.toBase58(),
+    sig,
+    poolId: extInfo?.address?.poolId?.toBase58?.() || null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Single-sided Raydium CLMM launch ("curve" that IS a CLMM from birth).
+//
+// Flow: (1) create the token mint + Metaplex metadata, mint the full supply to
+// the creator, revoke mint+freeze authority. (2) create a Raydium CLMM pool vs
+// the chosen quote at a computed low start price. (3) open a SINGLE-SIDED
+// concentrated position holding ~all supply in a range ABOVE spot — that range
+// is the curve (no quote/SOL seeded). (4) optional dev buy: swap `devBuy` quote
+// in as the first trade, tuned so it acquires ~`targetPct`% of supply.
+//
+// The token mint is ground so it sorts BEFORE the quote mint (token = mintA),
+// so "single-sided token above price" is always the upper range. Fees accrue to
+// the position-NFT owner = feeRecipient (defaults to the creator).
+// ---------------------------------------------------------------------------
+const METADATA_PROGRAM = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+
+// borsh CreateMetadataAccountV3 data (name/symbol/uri, no royalties, mutable)
+function encodeMetadataV3(name, symbol, uri) {
+  const str = (s) => {
+    const b = Buffer.from(s, 'utf8'); const len = Buffer.alloc(4); len.writeUInt32LE(b.length);
+    return Buffer.concat([len, b]);
+  };
+  return Buffer.concat([
+    Buffer.from([33]),                    // CreateMetadataAccountV3 discriminator
+    str(name), str(symbol), str(uri),
+    Buffer.from([0, 0]),                  // sellerFeeBasisPoints u16 = 0
+    Buffer.from([0]),                     // creators: Option None
+    Buffer.from([0]),                     // collection: Option None
+    Buffer.from([0]),                     // uses: Option None
+    Buffer.from([1]),                     // isMutable = true
+    Buffer.from([0]),                     // collectionDetails: Option None
+  ]);
+}
+function metadataPda(mint) {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from('metadata'), METADATA_PROGRAM.toBuffer(), mint.toBuffer()], METADATA_PROGRAM,
+  )[0];
+}
+
+// grind a mint keypair that sorts before `other` (so token becomes CLMM mintA)
+function grindMintBefore(other) {
+  const o = other.toBuffer();
+  for (let i = 0; i < 100000; i++) {
+    const kp = Keypair.generate();
+    if (Buffer.compare(kp.publicKey.toBuffer(), o) < 0) return kp;
+  }
+  throw new Error('could not grind a mint address');
+}
+
+// pick start price P0 (quote per token) + upper price Pb so a `devBuyQuote` buy
+// walks price P0->P1 acquiring ~targetFrac of the supply held single-sided in
+// [P0, Pb]. Range ratio fixed wide; solved from the CLMM x/y invariants.
+function computeCurvePrices({ supplyTokens, devBuyQuote, targetFrac, rangeRatio = 1000 }) {
+  const b = Math.sqrt(rangeRatio);                 // sqrt(Pb/P0)
+  const rhs = targetFrac * (1 - 1 / b);            // (1 - 1/u) = targetFrac*(1 - 1/b)
+  const u = 1 / (1 - rhs);                          // sqrt(P1/P0)
+  const P0 = (devBuyQuote * (1 - 1 / b)) / (supplyTokens * (u - 1));
+  return { startPrice: P0, upperPrice: P0 * rangeRatio };
+}
+
+export async function launchClmmCurve(opts) {
+  const {
+    rpcUrl, secretKey, quoteMint, name, symbol, uri,
+    supplyTokens, decimals = 6, devBuyQuote = 0, targetPct = 15,
+    feeRecipient, onStatus,
+  } = opts;
+  const say = (m) => onStatus && onStatus(m);
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const owner = keypairFromSecret(secretKey);
+  const quote = new PublicKey(quoteMint);
+  const feeOwner = feeRecipient ? new PublicKey(feeRecipient) : owner.publicKey;
+
+  const { program: quoteProgram, decimals: quoteDecimals } = await readQuoteMint(connection, quote);
+
+  // 1) token mint (ground to sort before the quote so token = CLMM mintA)
+  say('creating token mint...');
+  const mintKp = grindMintBefore(quote);
+  const mint = mintKp.publicKey;
+  const ownerAta = getAssociatedTokenAddressSync(mint, owner.publicKey);
+  const supplyRaw = new BN(String(supplyTokens)).mul(new BN(10).pow(new BN(decimals)));
+  const rent = await getMinimumBalanceForRentExemptMint(connection);
+  const mintTx = new Transaction().add(
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200000 }),
+    SystemProgram.createAccount({ fromPubkey: owner.publicKey, newAccountPubkey: mint, space: MINT_SIZE, lamports: rent, programId: TOKEN_PROGRAM_ID }),
+    createInitializeMint2Instruction(mint, decimals, owner.publicKey, null),
+    createAssociatedTokenAccountInstruction(owner.publicKey, ownerAta, owner.publicKey, mint),
+    createMintToInstruction(mint, ownerAta, owner.publicKey, BigInt(supplyRaw.toString())),
+    new TransactionInstruction({
+      programId: METADATA_PROGRAM,
+      keys: [
+        { pubkey: metadataPda(mint), isSigner: false, isWritable: true },
+        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: owner.publicKey, isSigner: true, isWritable: false },
+        { pubkey: owner.publicKey, isSigner: true, isWritable: true },
+        { pubkey: owner.publicKey, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: encodeMetadataV3(name, symbol, uri),
+    }),
+    createSetAuthorityInstruction(mint, owner.publicKey, AuthorityType.MintTokens, null),
+  );
+  const mintSig = await sendAndConfirmTransaction(connection, mintTx, [owner, mintKp], { commitment: 'confirmed' });
+  say('mint created (' + mintSig.slice(0, 8) + '...) - building CLMM pool...');
+
+  // 2) create the CLMM pool at the computed start price
+  const raydium = await Raydium.load({ connection, owner, cluster: 'mainnet', disableFeatureCheck: true, disableLoadToken: true, blockhashCommitment: 'finalized' });
+  const clmmConfigs = await raydium.api.getClmmConfigs();
+  const cfg = clmmConfigs.find((c) => Number(c.tradeFeeRate) === 10000) || clmmConfigs[clmmConfigs.length - 1];
+  const { startPrice, upperPrice } = computeCurvePrices({
+    supplyTokens: Number(supplyTokens),
+    devBuyQuote: Number(devBuyQuote) || 0.0001,
+    targetFrac: Math.min(0.95, Math.max(0.001, (Number(targetPct) || 15) / 100)),
+  });
+  const mint1 = { address: mint.toBase58(), programId: TOKEN_PROGRAM_ID.toBase58(), decimals };
+  const mint2 = { address: quote.toBase58(), programId: quoteProgram.toBase58(), decimals: quoteDecimals };
+  const { execute: execPool, extInfo } = await raydium.clmm.createPool({
+    programId: CLMM_PROGRAM_ID, mint1, mint2,
+    ammConfig: { ...cfg, id: new PublicKey(cfg.id), fundOwner: '', description: '' },
+    initialPrice: new Decimal(startPrice), txVersion: TxVersion.V0,
+    computeBudgetConfig: { units: 600000, microLamports: 100000 },
+  });
+  const { txId: poolSig } = await execPool({ sendAndConfirm: true });
+  const poolId = extInfo.address.id.toBase58();
+  say('pool created (' + poolSig.slice(0, 8) + '...) - opening single-sided position...');
+
+  // 3) single-sided token position across [startPrice, upperPrice] (above spot)
+  const { poolInfo, poolKeys } = await raydium.clmm.getPoolInfoFromRpc(poolId);
+  const spacing = poolInfo.config.tickSpacing;
+  const lower = TickUtil.toTickIndex(TickUtil.priceToTick(new Decimal(startPrice), decimals, quoteDecimals), spacing);
+  const upper = TickUtil.toTickIndex(TickUtil.priceToTick(new Decimal(upperPrice), decimals, quoteDecimals), spacing);
+  // keep the whole range strictly ABOVE the opening tick so the position is
+  // single-sided (token only) — no quote needed to open it
+  const tickLower = Math.min(lower, upper) + spacing;
+  const tickUpper = Math.max(lower, upper);
+  const baseAmount = supplyRaw.muln(999).divn(1000);
+  const { execute: execPos } = await raydium.clmm.openPositionFromBase({
+    poolInfo, poolKeys,
+    tickLower, tickUpper,
+    base: 'MintA', baseAmount, otherAmountMax: new BN(0),
+    ownerInfo: { useSOLBalance: true }, nft2022: true,
+    txVersion: TxVersion.V0, computeBudgetConfig: { units: 600000, microLamports: 100000 },
+  });
+  const { txId: posSig } = await execPos({ sendAndConfirm: true });
+  say('position opened (' + posSig.slice(0, 8) + '...)');
+
+  // 4) optional dev buy — swap devBuyQuote of the quote into the pool
+  let buySig = null;
+  if (Number(devBuyQuote) > 0) {
+    say('dev buy: swapping ' + devBuyQuote + ' for ~' + targetPct + '%...');
+    const data = await raydium.clmm.getPoolInfoFromRpc(poolId);
+    const amountIn = new BN(String(Math.floor(Number(devBuyQuote) * 10 ** quoteDecimals)));
+    const { execute: execSwap } = await raydium.clmm.swap({
+      poolInfo: data.poolInfo, poolKeys: data.poolKeys,
+      inputMint: quote.toBase58(), amountIn, amountOutMin: new BN(0),
+      observationId: data.computePoolInfo.observationId,
+      ownerInfo: { useSOLBalance: true }, remainingAccounts: [],
+      txVersion: TxVersion.V0, computeBudgetConfig: { units: 600000, microLamports: 100000 },
+    });
+    const r = await execSwap({ sendAndConfirm: true });
+    buySig = r.txId;
+  }
+
+  if (!feeOwner.equals(owner.publicKey)) {
+    say('note: position NFT stays with the launcher; transfer it to redirect fees');
+  }
+  return { mint: mint.toBase58(), poolId, mintSig, poolSig, posSig, buySig, startPrice, upperPrice };
+}
+
+// Read a token's on-chain Metaplex metadata (name/symbol/uri) by fetching the
+// metadata PDA account directly — works on any RPC (no DAS/getAsset credits
+// needed). Used by the Vamp button as a key-independent fallback.
+export async function solTokenMetadata(mint, rpcUrl) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const METADATA_PROGRAM = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+  const mintPk = new PublicKey(mint);
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('metadata'), METADATA_PROGRAM.toBuffer(), mintPk.toBuffer()], METADATA_PROGRAM,
+  );
+  const acc = await connection.getAccountInfo(pda);
+  if (!acc || !acc.data) return null;
+  const data = acc.data;
+  let o = 1 + 32 + 32; // key(1) + updateAuthority(32) + mint(32)
+  const readStr = () => {
+    const len = data.readUInt32LE(o); o += 4;
+    const s = data.slice(o, o + len).toString('utf8').replace(/\0/g, '').trim(); o += len;
+    return s;
+  };
+  const name = readStr(), symbol = readStr(), uri = readStr();
+  return { name, symbol, uri };
 }

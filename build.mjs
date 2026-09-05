@@ -39,6 +39,24 @@ await esbuild.build({
   outfile: 'docs/fees.js',
 });
 
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/force-migrate.js'],
+  outfile: 'docs/force-migrate.js',
+});
+
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/swap.js'],
+  outfile: 'docs/swap.js',
+});
+
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/openfour.js'],
+  outfile: 'docs/openfour.js',
+});
+
 // trade page: browser-native shell that lazy-imports the Solana bundle
 await esbuild.build({
   ...base,
