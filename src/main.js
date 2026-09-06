@@ -475,6 +475,54 @@ const PONS_V2_PAIRS = [
   { symbol: 'custom…', address: 'custom', decimals: 18 },
 ];
 
+// Every quote (numeraire) long.xyz lists on Robinhood Chain, pulled from
+// their app bundle: 1 stable, 6 ETFs, 33 tokenized stocks. All 18dp except
+// USDG at 6dp. The 'custom' entry accepts any ERC-20 - the Airlock does not
+// gate the numeraire, only the modules.
+const LONG_QUOTES = [
+  { symbol: 'USDG', address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', decimals: 6, kind: 'stable', name: "Global Dollar" },
+  { symbol: 'CUSO', address: '0xa30FA36Db767ad9eD3f7a60fC79526fB4d56D344', decimals: 18, kind: 'etf', name: "21Shares Crypto Basket" },
+  { symbol: 'QQQ', address: '0xD5f3879160bc7c32ebb4dC785F8a4F505888de68', decimals: 18, kind: 'etf', name: "Invesco QQQ" },
+  { symbol: 'SGOV', address: '0x92FD66527192E3e61d4DDd13322Aa222DE86F9B5', decimals: 18, kind: 'etf', name: "iShares 0-3 Month Treasury Bond ETF" },
+  { symbol: 'SLV', address: '0x411eFb0E7f985935DAec3D4C3ebaEa0d0AD7D89f', decimals: 18, kind: 'etf', name: "iShares Silver Trust" },
+  { symbol: 'SPY', address: '0x117cc2133c37B721F49dE2A7a74833232B3B4C0C', decimals: 18, kind: 'etf', name: "SPDR S&P 500 ETF" },
+  { symbol: 'XLK', address: '0x15Cd20759CE7F3285c29A319dE2D1A2e098c6f43', decimals: 18, kind: 'etf', name: "Technology Select Sector SPDR ETF" },
+  { symbol: 'AAPL', address: '0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9', decimals: 18, kind: 'stock', name: "Apple" },
+  { symbol: 'AMD', address: '0x86923f96303D656E4aa86D9d42D1e57ad2023fdC', decimals: 18, kind: 'stock', name: "Advanced Micro Devices" },
+  { symbol: 'AMZN', address: '0x12f190a9F9d7D37a250758b26824B97CE941bF54', decimals: 18, kind: 'stock', name: "Amazon" },
+  { symbol: 'ASML', address: '0x47F93d52cBeC7C6D2CfC080e154002370a60dAEA', decimals: 18, kind: 'stock', name: "ASML Holding" },
+  { symbol: 'BABA', address: '0xad25Ac6C84D497db898fa1E8387bf6Af3532a1c4', decimals: 18, kind: 'stock', name: "Alibaba" },
+  { symbol: 'BE', address: '0x822CC93fFD030293E9842c30BBD678F530701867', decimals: 18, kind: 'stock', name: "Bloom Energy" },
+  { symbol: 'CCL', address: '0x9651342CeA770aE9a2969Ba2A52611523146aef9', decimals: 18, kind: 'stock', name: "Carnival" },
+  { symbol: 'COIN', address: '0x6330D8C3178a418788dF01a47479c0ce7CCF450b', decimals: 18, kind: 'stock', name: "Coinbase" },
+  { symbol: 'COST', address: '0x4EA005168D7F09a7A0Ba9D1DEf21a479950E44C2', decimals: 18, kind: 'stock', name: "Costco" },
+  { symbol: 'CRCL', address: '0xdF0992E440dD0be65BD8439b609d6D4366bf1CB5', decimals: 18, kind: 'stock', name: "Circle" },
+  { symbol: 'CRWV', address: '0x5f10A1C971B69e47e059e1dC91901B59b3fB49C3', decimals: 18, kind: 'stock', name: "CoreWeave" },
+  { symbol: 'DELL', address: '0x941AE714EC6D8130c7B75d67160Ca08f1e7d11Dd', decimals: 18, kind: 'stock', name: "Dell" },
+  { symbol: 'GME', address: '0x1b0E319c6A659F002271B69dB8A7df2F911c153E', decimals: 18, kind: 'stock', name: "GameStop" },
+  { symbol: 'GOOGL', address: '0x2e0847E8910a9732eB3fb1bb4b70a580ADAD4FE3', decimals: 18, kind: 'stock', name: "Alphabet" },
+  { symbol: 'INTC', address: '0xc72b96e0E48ecd4DC75E1e45396e26300BC39681', decimals: 18, kind: 'stock', name: "Intel" },
+  { symbol: 'META', address: '0xc0D6457C16Cc70d6790Dd43521C899C87ce02f35', decimals: 18, kind: 'stock', name: "Meta" },
+  { symbol: 'MSFT', address: '0xe93237C50D904957Cf27E7B1133b510C669c2e74', decimals: 18, kind: 'stock', name: "Microsoft" },
+  { symbol: 'MSTR', address: '0xec262a75e413fAfD0dF80480274532C79D42da09', decimals: 18, kind: 'stock', name: "Strategy" },
+  { symbol: 'MU', address: '0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD', decimals: 18, kind: 'stock', name: "Micron" },
+  { symbol: 'NFLX', address: '0xE0444EF8BF4eD74f74FD73686e2ddF4C1c5591E8', decimals: 18, kind: 'stock', name: "Netflix" },
+  { symbol: 'NU', address: '0x408c14038a04f7bD235329E26d2bf569ee20e250', decimals: 18, kind: 'stock', name: "Nu Holdings" },
+  { symbol: 'NVDA', address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC', decimals: 18, kind: 'stock', name: "NVIDIA" },
+  { symbol: 'ORCL', address: '0xb0992820E760d836549ba69BC7598b4af75dEE03', decimals: 18, kind: 'stock', name: "Oracle" },
+  { symbol: 'PLTR', address: '0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A', decimals: 18, kind: 'stock', name: "Palantir" },
+  { symbol: 'RBLX', address: '0xF0C4BF4C582cb3836e98394b1d4e7B7281101bE8', decimals: 18, kind: 'stock', name: "Roblox" },
+  { symbol: 'RDDT', address: '0x05b37Fb53A299a1b874A619e1c4C404D52C36F4C', decimals: 18, kind: 'stock', name: "Reddit" },
+  { symbol: 'SNDK', address: '0xB90A19fF0Af67f7779afF50A882A9CfF42446400', decimals: 18, kind: 'stock', name: "SanDisk" },
+  { symbol: 'SOFI', address: '0x98E75885157C80992A8D41b696D8c9C6Fb30A926', decimals: 18, kind: 'stock', name: "SoFi Technologies" },
+  { symbol: 'SPCX', address: '0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa', decimals: 18, kind: 'stock', name: "SpaceX" },
+  { symbol: 'TSLA', address: '0x322F0929c4625eD5bAd873c95208D54E1c003b2d', decimals: 18, kind: 'stock', name: "Tesla" },
+  { symbol: 'TSM', address: '0x58FfE4a942d3885bAa22D7520691F611EF09e7AA', decimals: 18, kind: 'stock', name: "Taiwan Semiconductor" },
+  { symbol: 'UPS', address: '0xf23250dac154D05Bb671CB0d0eBEf3c635c79CE2', decimals: 18, kind: 'stock', name: "UPS" },
+  { symbol: 'USAR', address: '0xd917B029C761D264c6A312BBbcDA868658eF86a6', decimals: 18, kind: 'stock', name: "USA Rare Earth" },
+  { symbol: 'custom…', address: 'custom', decimals: 18, kind: 'custom', name: 'any ERC-20' },
+];
+
 const PADS = [
   {
     // our own factory — contracts/LaunchFactory.sol, deployed 2026-07-12.
@@ -694,6 +742,19 @@ const PADS = [
     nativeSymbol: 'SOL',
     quoteSel: 'SOL',           // SOL | USDC | CUSTOM (from the dropdown)
     quoteMint: null,           // resolved from quoteSel / custom input
+  },
+  {
+    // long.xyz - a Doppler v4 launchpad on Robinhood chain that pairs new
+    // tokens against tokenized stocks rather than ETH. Launch goes through
+    // their Airlock (permissionless, given whitelisted modules); the Doppler
+    // SDK does the module encoding and mines the v4 hook salt. See src/long.js.
+    id: 'long-robinhood', label: 'long.xyz · Stocks', vm: 'evm', enabled: true, family: 'long',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    airlock: '0xeb7C034704eF8Dcd2D32324c1545f62fB4aD0862',
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
+    nativeSymbol: 'ETH', curve: null,
+    quotes: LONG_QUOTES,
   },
   {
     // Our own Uniswap-v4 bonding curve on Robinhood chain. Unlike every other
@@ -1435,6 +1496,36 @@ async function launch() {
       name, symbol, logo, description, twitter, website, feeRecipient, devBuy,
     });
     if (token && dists.length) await runDistributions(pad, pub, wallet, token, dists, $('status'));
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
+  if (pad.family === 'long') {
+    const q = pad.quotes.find((x) => x.symbol === $('longQuoteSelect').value) || pad.quotes[0];
+    const numeraire = q.address === 'custom' ? $('longQuoteCustom').value.trim() : q.address;
+    if (!/^0x[a-fA-F0-9]{40}$/.test(numeraire)) throw new Error('enter a valid numeraire (stock) address');
+    const supplyTokens = $('longSupply').value.trim().replace(/,/g, '');
+    const tokensToSell = $('longToSell').value.trim().replace(/,/g, '');
+    if (!(+supplyTokens > 0)) throw new Error('set a supply');
+    if (!(+tokensToSell > 0)) throw new Error('set how many tokens to sell on the curve');
+
+    const keys = loadKeys();
+    if (!keys?.evm) throw new Error('no EVM key loaded — paste your key in the key form');
+
+    setStatus('loading long.xyz module...');
+    const { launchLong } = await import('./long.js');
+    const res = await launchLong({
+      privateKey: keys.evm, name, symbol, tokenURI: logo,
+      numeraire, supplyTokens, tokensToSell,
+      onStatus: (m) => setStatus(m),
+    });
+
+    if (res.token) rememberLaunch(pad, res.token, symbol);
+    $('status').innerHTML =
+      `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.token ?? '(see tx)'}<br>` +
+      `paired against ${esc(q.symbol === 'custom…' ? numeraire : q.symbol)}<br>` +
+      (res.hash ? `<a href="${pad.explorer}/tx/${res.hash}" target="_blank" rel="noopener">tx on explorer</a>` : '');
     refreshBalance();
     renderTokenList();
     return;
@@ -3127,6 +3218,7 @@ function applyPadUI(pad) {
   const flap = pad.family === 'flap';
   const ponsV2 = pad.family === 'pons-v2';
   const v4curve = pad.family === 'v4curve';
+  const long = pad.family === 'long';
   $('supplyRow').classList.toggle('hidden', !pad.customSupply || sol);
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
@@ -3136,6 +3228,7 @@ function applyPadUI(pad) {
   $('flapRow').classList.toggle('hidden', !flap);
   $('ponsRow').classList.toggle('hidden', !ponsV2);    // Pons v2 pair + dev buy
   $('v4curveRow').classList.toggle('hidden', !v4curve); // our v4 curve: any quote + threshold
+  $('longRow').classList.toggle('hidden', !long);       // long.xyz: stock numeraire + supply
   // B20 has no bonding curve / dev buy — you mint a fixed on-chain allocation. Its
   // "distributions" are the insider allocations (minted at creation, not transfers).
   // flap/pons-v2 have their own dev-buy field (in the pair token), so hide the ETH one.
@@ -3144,6 +3237,7 @@ function applyPadUI(pad) {
   if (flap) updateFlapUI(pad);
   if (ponsV2) updatePonsUI(pad);
   if (v4curve) updateV4CurveUI(pad);
+  if (long) updateLongUI(pad);
   // o1 / B20: fixed 1B supply. The DISTRO slots ARE the wallet allocations (minted
   // natively at launch, not post-launch transfers) — pre-fill the dev wallet in slot 1
   // and open the panel so it's obvious you can add more.
@@ -3270,6 +3364,26 @@ function updateV4CurveUI(pad) {
   const sym = isCustom ? 'quote' : q.symbol;
   $('v4curveThreshSym').textContent = sym;
   $('v4curveDevSym').textContent = sym;
+}
+
+// long.xyz: numeraire dropdown grouped by asset class, plus the custom field
+function updateLongUI(pad) {
+  const qs = $('longQuoteSelect');
+  if (qs.dataset.padId !== pad.id) {
+    const groups = { stable: 'STABLE', etf: 'ETFs', stock: 'STOCKS', custom: '' };
+    let html = '';
+    for (const g of ['stable', 'etf', 'stock', 'custom']) {
+      const list = pad.quotes.filter((q) => q.kind === g);
+      if (!list.length) continue;
+      const opts = list.map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}${q.name && q.kind !== 'custom' ? ' — ' + esc(q.name) : ''}</option>`).join('');
+      html += groups[g] ? `<optgroup label="${groups[g]}">${opts}</optgroup>` : opts;
+    }
+    qs.innerHTML = html;
+    qs.value = 'NVDA';
+    qs.dataset.padId = pad.id;
+  }
+  const q = pad.quotes.find((x) => x.symbol === qs.value) || pad.quotes[0];
+  $('longQuoteCustom').classList.toggle('hidden', q.address !== 'custom');
 }
 
 function updateWalletChip(pad) {
@@ -3415,6 +3529,7 @@ function init() {
   $('clmmQuoteSelect').addEventListener('change', () => { if (activePad.family === 'clmm') updateClmmUI(activePad); });
   $('ponsQuoteSelect').addEventListener('change', () => { if (activePad.family === 'pons-v2') updatePonsUI(activePad); });
   $('v4curveQuoteSelect').addEventListener('change', () => { if (activePad.family === 'v4curve') updateV4CurveUI(activePad); });
+  $('longQuoteSelect').addEventListener('change', () => { if (activePad.family === 'long') updateLongUI(activePad); });
   for (const id of ['flapQuoteSelect', 'flapMode', 'flapDivToken', 'flapTax', 'flapSplit', 'flapDevFund']) {
     const el = $(id);
     if (el) el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => { if (activePad.family === 'flap') updateFlapUI(activePad); });

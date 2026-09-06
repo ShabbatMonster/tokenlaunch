@@ -30,7 +30,7 @@ await esbuild.build({
   ...base,
   entryPoints: ['src/main.js'],
   outfile: 'docs/app.js',
-  external: ['./solana.js'],
+  external: ['./solana.js', './long.js'],
 });
 
 await esbuild.build({
@@ -55,6 +55,17 @@ await esbuild.build({
   ...base,
   entryPoints: ['src/openfour.js'],
   outfile: 'docs/openfour.js',
+});
+
+// long.xyz pad: pulls in the Doppler SDK, so it is its own lazily-imported
+// bundle rather than bloating app.js
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/long.js'],
+  outfile: 'docs/long.js',
+  inject: ['src/node-shim.js'],
+  define: { global: 'globalThis', 'process.env.NODE_ENV': '"production"' },
+  plugins: [singleBufferProcess, NodeModulesPolyfillPlugin()],
 });
 
 // trade page: browser-native shell that lazy-imports the Solana bundle
