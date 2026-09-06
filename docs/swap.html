@@ -113,7 +113,18 @@
     <div class="status" id="swapStatus"></div>
   </div>
 
-  <p class="note">Two venues are searched for every token.
+  <p class="note"><b>Bonding curve.</b> A poz.fun / Pons v2 token has no DEX pool
+  at all until it graduates &mdash; the only liquidity is the launch curve, which holds the
+  whole float. Terminals that find markets by scanning DEX factories see nothing and call the
+  token untradeable; it is not. If the token names a curve that has not graduated, that curve
+  is offered directly via its own <code>buy</code>&thinsp;/&thinsp;<code>sell</code>.
+  Two things are surfaced that you cannot see elsewhere: the live <b>snipe tax</b> (starts near
+  99% and decays to zero over the first few seconds &mdash; buying into it is close to a total
+  loss), and the real <b>exit liquidity</b>, which is the quote the curve actually holds rather
+  than its mostly-virtual reserve. Selling past that reverts with a bare arithmetic panic, so
+  it gets translated into plain language.</p>
+
+  <p class="note">Three venues are searched for every token.
   <b>Abyss</b> pools route through the same router the reference trade used
   (<span id="routerAddr"></span>). Any pool on that factory works, not just WETH ones —
   USDG-quoted and token/token pools are traded directly via <code>exactInputSingle</code>,
@@ -130,7 +141,7 @@
   non-zero price is proven to exist, not assumed. Selling into a v4 pool needs two one-time
   Permit2 approvals, which the SELL button handles for you.</p>
 
-  <p class="note">Every swap on either venue is simulated first to get the real output
+  <p class="note">Every swap on every venue is simulated first to get the real output
   before your slippage is applied as the minimum.</p>
 </div>
 
