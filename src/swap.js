@@ -5,8 +5,10 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 
 // ---------------------------------------------------------------------------
-// Swap — trades any token on Robinhood chain that has a pool on either of the
-// two venues that actually exist here, against whatever that pool is quoted in.
+// Swap — trades any token on Robinhood chain, across every venue that exists
+// here, against whatever that venue is quoted in. Four are searched:
+// the bonding curve a launchpad token sits on before it graduates, a long.xyz
+// zap, Abyss, and Uniswap v4.
 //
 //   venue "abyss" — a v3-style DEX. Modelled on the reference trade
 //     tx 0x7c6277f6…c7a9d -> router.exactInputSingleFromETH(key, …) with the
@@ -51,6 +53,10 @@ const UNIVERSAL_ROUTER = getAddress('0x8876789976decbfcbbbe364623c63652db8c0904'
 const PERMIT2 = getAddress('0x000000000022d473030f116ddee9f6b43ac78ba3');
 const V4_QUOTER = getAddress('0x8dc178efb8111bb0973dd9d722ebeff267c98f94');
 const MULTICALL3 = getAddress('0xca11bde05977b3631167028862be2a173976ca11');
+
+// long.xyz runs a Doppler Airlock. Its assets are registered there, which is how
+// their numeraire and pool hook get discovered rather than guessed.
+const AIRLOCK = getAddress('0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862');
 
 // Known launchpad hooks, used only as a fallback when a token does not name its
 // own factory. Pons v2 and poz.fun run byte-identical factories, but each mines
@@ -171,6 +177,39 @@ const CURVE_ABI = [
   { type: 'error', name: 'UnexpectedNativeValue', inputs: [] },
   { type: 'error', name: 'ZeroAmount', inputs: [] },
   { type: 'error', name: 'ZeroAddress', inputs: [] },
+];
+
+const AIRLOCK_ABI = [{
+  type: 'function', name: 'getAssetData', stateMutability: 'view',
+  inputs: [{ name: 'asset', type: 'address' }],
+  outputs: [
+    { name: 'numeraire', type: 'address' }, { name: 'timelock', type: 'address' },
+    { name: 'governance', type: 'address' }, { name: 'liquidityMigrator', type: 'address' },
+    { name: 'poolInitializer', type: 'address' }, { name: 'pool', type: 'address' },
+    { name: 'migrationPool', type: 'address' }, { name: 'numTokensToSell', type: 'uint256' },
+    { name: 'totalSupply', type: 'uint256' }, { name: 'integrator', type: 'address' },
+  ],
+}];
+
+// A long.xyz coin paired against a basket vault ships its own zap router: the
+// vault names it as minter(), and it exposes buy()/sell() straight against
+// native ETH. Signatures resolved from the deployed implementation and
+// confirmed live — buy() is buy(minAmountOut, deadline) payable, verified by
+// simulating every plausible argument order (the others revert).
+const ZAP_ABI = [
+  { type: 'function', name: 'buy', stateMutability: 'payable', outputs: [{ type: 'uint256' }],
+    inputs: [{ name: 'minAmountOut', type: 'uint256' }, { name: 'deadline', type: 'uint256' }] },
+  { type: 'function', name: 'sell', stateMutability: 'nonpayable', outputs: [{ type: 'uint256' }],
+    inputs: [{ name: 'amountIn', type: 'uint256' }, { name: 'minAmountOut', type: 'uint256' }, { name: 'deadline', type: 'uint256' }] },
+  { type: 'function', name: 'coin', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
+  { type: 'function', name: 'VAULT', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
+  { type: 'function', name: 'configured', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+  { type: 'error', name: 'InsufficientAllowance', inputs: [] },
+  { type: 'error', name: 'Insufficient', inputs: [] },
+  { type: 'error', name: 'BadArgs', inputs: [] },
+];
+const VAULT_ABI = [
+  { type: 'function', name: 'minter', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
 ];
 
 const V4_POOL_KEY = [
@@ -310,7 +349,9 @@ async function findAbyssPools(token) {
 const DYNAMIC_FEE = 0x800000;
 const V4_SHAPES = [
   [0, 200], [10000, 200], [0, 60], [3000, 60], [10000, 60], [2500, 25],
-  [500, 10], [100, 1], [0, 8], [30000, 200], [DYNAMIC_FEE, 60], [DYNAMIC_FEE, 200],
+  [500, 10], [100, 1], [0, 8], [30000, 200],
+  // long.xyz / Doppler multicurve pools are dynamic-fee on tickSpacing 8
+  [DYNAMIC_FEE, 8], [DYNAMIC_FEE, 60], [DYNAMIC_FEE, 200],
 ];
 
 const v4PoolId = (k) => keccak256(encodeAbiParameters(V4_POOL_KEY, [k.currency0, k.currency1, k.fee, k.tickSpacing, k.hooks]));
@@ -330,14 +371,16 @@ async function launchpadHints(token) {
   return { curve, factory, pairToken, hook };
 }
 
-async function findV4Pools(token) {
+async function findV4Pools(token, dop) {
   const hints = await launchpadHints(token);
 
   // NB: `.map(getAddress)` would hand the array index to viem as an EIP-1191
   // chainId and blow up on the second element — always wrap it.
   const norm = (a) => getAddress(a);
-  const hooks = [...new Set([hints.hook, ...KNOWN_HOOKS, ZERO].filter(Boolean).map(norm))];
-  const quotes = [...new Set([hints.pairToken, ZERO, WETH].filter(Boolean).map(norm))];
+  // a Doppler pool's hook IS its poolInitializer (the address carries the v4
+  // permission bits), and its quote is the Airlock-registered numeraire
+  const hooks = [...new Set([hints.hook, dop?.poolInitializer, ...KNOWN_HOOKS, ZERO].filter(Boolean).map(norm))];
+  const quotes = [...new Set([hints.pairToken, dop?.numeraire, ZERO, WETH].filter(Boolean).map(norm))];
 
   // build every candidate key, with the currencies in v4's canonical order
   const cands = [];
@@ -401,6 +444,65 @@ async function findV4Pools(token) {
     });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Doppler / long.xyz discovery
+//
+// The other case terminals miss, for the opposite reason to a bonding curve:
+// the pool exists and is deep, but it is not quoted in anything you hold. A
+// long.xyz coin is paired against its own numeraire — for LONGfolio that is
+// L8NG, an 8-token basket vault that itself has no pool against ETH anywhere.
+// So "swap in" looks impossible: there is no ETH route, and routers that only
+// know ETH-quoted pools find nothing.
+//
+// There is a route. The vault names a minter(), which is really a zap router
+// carrying the pool's v4 hook, and it exposes buy()/sell() straight against
+// native ETH — it wraps, mints the vault token and swaps the v4 pool in one
+// call. So the zap is offered as the venue, and the underlying v4 pool is
+// offered too for anyone already holding the numeraire.
+//
+// Everything here is derived and then checked, never assumed: the Airlock
+// names the numeraire and the pool initializer (whose address carries the v4
+// hook permission bits), the numeraire names the zap, and the zap is only
+// trusted once coin() and VAULT() point back at this exact token and numeraire.
+// ---------------------------------------------------------------------------
+async function dopplerHints(token) {
+  const d = await pub.readContract({
+    address: AIRLOCK, abi: AIRLOCK_ABI, functionName: 'getAssetData', args: [token],
+  }).catch(() => null);
+  if (!d || getAddress(d[0]) === ZERO) return null;
+  return { numeraire: getAddress(d[0]), poolInitializer: getAddress(d[4]) };
+}
+
+async function findZapPool(token, hints) {
+  if (!hints) return [];
+  const minter = await pub.readContract({
+    address: hints.numeraire, abi: VAULT_ABI, functionName: 'minter',
+  }).catch(() => null);
+  if (!minter || getAddress(minter) === ZERO) return [];
+  const zap = getAddress(minter);
+
+  // only trust it if it points back at this token and this numeraire
+  const [coin, vault, configured] = await Promise.all([
+    pub.readContract({ address: zap, abi: ZAP_ABI, functionName: 'coin' }).catch(() => null),
+    pub.readContract({ address: zap, abi: ZAP_ABI, functionName: 'VAULT' }).catch(() => null),
+    pub.readContract({ address: zap, abi: ZAP_ABI, functionName: 'configured' }).catch(() => null),
+  ]);
+  if (!coin || getAddress(coin) !== token) return [];
+  if (!vault || getAddress(vault) !== hints.numeraire) return [];
+  if (configured === false) return [];
+
+  const numeraireSymbol = await pub.readContract({
+    address: hints.numeraire, abi: ERC20, functionName: 'symbol',
+  }).catch(() => '???');
+
+  return [{
+    venue: 'zap', label: 'long.xyz zap (ETH)', zap,
+    quote: ZERO, quoteSymbol: 'ETH', quoteDecimals: 18,
+    numeraire: hints.numeraire, numeraireSymbol,
+    fee: 0, liquidity: 0n,
+  }];
 }
 
 // ---------------------------------------------------------------------------
@@ -484,14 +586,22 @@ function curveEstimate(p, amountIn, taxBps) {
 
 // ---------------------------------------------------------------------------
 async function findPools(token) {
-  const [abyss, v4, curve] = await Promise.all([
+  // one Airlock lookup, shared by the v4 sweep and the zap check
+  const dop = await dopplerHints(token).catch(() => null);
+  const [abyss, v4, curve, zap] = await Promise.all([
     findAbyssPools(token).catch(() => []),
-    findV4Pools(token).catch(() => []),
+    findV4Pools(token, dop).catch(() => []),
     findCurvePool(token).catch(() => []),
+    findZapPool(token, dop).catch(() => []),
   ]);
-  const out = [...abyss, ...v4, ...curve];
-  // deepest first, so the default selection is the most tradable one
-  out.sort((x, y) => (y.liquidity > x.liquidity ? 1 : y.liquidity < x.liquidity ? -1 : 0));
+  // the zap goes first when present: it is the only route that takes plain ETH
+  const out = [...zap, ...abyss, ...v4, ...curve];
+  // deepest first, so the default selection is the most tradable one — except
+  // the zap, which stays on top because it is the only ETH-denominated route
+  out.sort((x, y) => {
+    if ((x.venue === 'zap') !== (y.venue === 'zap')) return x.venue === 'zap' ? -1 : 1;
+    return y.liquidity > x.liquidity ? 1 : y.liquidity < x.liquidity ? -1 : 0;
+  });
   return out;
 }
 
@@ -542,6 +652,15 @@ async function renderPool() {
     `<dt>venue</dt><dd>${esc(p.label)}</dd>` +
     `<dt>quote</dt><dd>${esc(p.quoteSymbol)}${isNativePool() ? ' (traded as native ETH)' : ''} · ${p.quoteDecimals}dp</dd>`;
 
+  if (p.venue === 'zap') {
+    $('poolInfo').innerHTML = head +
+      `<dt>zap</dt><dd><a href="${EXPLORER}/address/${p.zap}" target="_blank" rel="noopener">${esc(p.zap)}</a></dd>` +
+      `<dt>numeraire</dt><dd>${esc(p.numeraireSymbol)} · <a href="${EXPLORER}/token/${p.numeraire}" target="_blank" rel="noopener">${esc(p.numeraire)}</a></dd>` +
+      `<dt>route</dt><dd>ETH &rarr; ${esc(p.numeraireSymbol)} &rarr; ${esc(ctx.symbol)}, in one call. The pool is quoted in ` +
+      `${esc(p.numeraireSymbol)}, which has no ETH pool of its own — this is the way in with plain ETH.</dd>`;
+    return;
+  }
+
   if (p.venue === 'curve') {
     const tax = await snipeTaxBps(p, account?.address ?? ZERO);
     const pct = (bps) => `${(Number(bps) / 100).toFixed(2)}%`;
@@ -580,6 +699,8 @@ async function renderPool() {
 // ---------------------------------------------------------------------------
 // quoting + swapping
 // ---------------------------------------------------------------------------
+const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 1200);
+
 /// buying spends the quote for the token; selling goes the other way
 const zeroForOne = () => (mode === 'buy' ? !pool().tokenIs0 : pool().tokenIs0);
 
@@ -594,8 +715,7 @@ function abyssArgs(amountIn, amountOutMin) {
   const z = zeroForOne();
   return [
     p.key, account.address, z, amountIn, amountOutMin,
-    z ? MIN_SQRT : MAX_SQRT,
-    BigInt(Math.floor(Date.now() / 1000) + 1200),
+    z ? MIN_SQRT : MAX_SQRT, deadline(),
   ];
 }
 
@@ -629,7 +749,7 @@ function v4Plan(amountIn, minOut) {
   const input = encodeAbiParameters(parseAbiParameters('bytes, bytes[]'), [V4_ACTIONS, params]);
   return {
     currencyIn,
-    args: [V4_SWAP, [input], BigInt(Math.floor(Date.now() / 1000) + 1200)],
+    args: [V4_SWAP, [input], deadline()],
     value: currencyIn === ZERO ? amountIn : 0n,
   };
 }
@@ -650,6 +770,16 @@ async function quote() {
   const amountIn = amountInRaw();
   if (amountIn === 0n) return null;
   const p = pool();
+
+  if (p.venue === 'zap') {
+    const { result } = await pub.simulateContract({
+      address: p.zap, abi: ZAP_ABI, functionName: mode === 'buy' ? 'buy' : 'sell',
+      args: mode === 'buy' ? [0n, deadline()] : [amountIn, 0n, deadline()],
+      value: mode === 'buy' ? amountIn : 0n,
+      account: account.address,
+    });
+    return result;
+  }
 
   if (p.venue === 'curve') {
     const tax = await snipeTaxBps(p, account.address);
@@ -761,6 +891,35 @@ async function doSwap() {
   $('swapBtn').disabled = true;
   try {
     const p = pool();
+
+    if (p.venue === 'zap') {
+      // buying sends ETH; selling hands the coin to the zap, so it needs an allowance
+      if (mode === 'sell') {
+        const allowed = await pub.readContract({
+          address: ctx.token, abi: ERC20, functionName: 'allowance', args: [account.address, p.zap],
+        });
+        if (allowed < amountIn) {
+          say(`approving ${inSymbol()}…`);
+          const ah = await wallet.writeContract({
+            address: ctx.token, abi: ERC20, functionName: 'approve', args: [p.zap, 2n ** 256n - 1n],
+          });
+          await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+        }
+      }
+
+      say('simulating…');
+      const out = await quote();
+      const minOut = minOutFor(out);
+
+      say('sending…');
+      const hash = await wallet.writeContract({
+        address: p.zap, abi: ZAP_ABI, functionName: mode === 'buy' ? 'buy' : 'sell',
+        args: mode === 'buy' ? [minOut, deadline()] : [amountIn, minOut, deadline()],
+        value: mode === 'buy' ? amountIn : 0n,
+      });
+      await settle(hash, out, st);
+      return;
+    }
 
     if (p.venue === 'curve') {
       // a native buy sends value; every other direction is pulled by the curve
