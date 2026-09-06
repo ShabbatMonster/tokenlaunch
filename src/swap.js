@@ -139,6 +139,40 @@ const LAUNCH_FACTORY_ABI = [
   { type: 'function', name: 'memeHook', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
 ];
 
+// The bonding curve itself, for tokens that have NOT graduated yet. Signatures
+// resolved from the deployed clone's bytecode (selector scan -> openchain) and
+// then confirmed against the live contract: buy() is
+// buy(quoteAmountIn, minTokensOut, recipient) and returns the tokens out, which
+// was verified by simulating all three plausible argument orders — the other
+// two revert. Both directions were simulated end to end before being wired up.
+const CURVE_ABI = [
+  { type: 'function', name: 'buy', stateMutability: 'payable', outputs: [{ type: 'uint256' }],
+    inputs: [{ name: 'quoteAmountIn', type: 'uint256' }, { name: 'minTokensOut', type: 'uint256' }, { name: 'recipient', type: 'address' }] },
+  { type: 'function', name: 'sell', stateMutability: 'nonpayable', outputs: [{ type: 'uint256' }],
+    inputs: [{ name: 'tokenAmountIn', type: 'uint256' }, { name: 'minQuoteOut', type: 'uint256' }, { name: 'recipient', type: 'address' }] },
+  { type: 'function', name: 'getReserves', inputs: [], outputs: [{ type: 'uint256' }, { type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'graduated', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+  { type: 'function', name: 'readyToGraduate', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+  { type: 'function', name: 'pairToken', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
+  { type: 'function', name: 'isNativeQuote', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
+  { type: 'function', name: 'feeBps', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'creatorTaxBps', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'snipeTaxStartBps', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'snipeTaxSeconds', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'currentSnipeTaxBps', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'graduationThreshold', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'realQuoteReserve', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'error', name: 'SlippageExceeded', inputs: [{ type: 'uint256' }, { type: 'uint256' }] },
+  { type: 'error', name: 'AlreadyGraduated', inputs: [] },
+  { type: 'error', name: 'InsufficientLiquidity', inputs: [] },
+  { type: 'error', name: 'InsufficientInputAmount', inputs: [] },
+  { type: 'error', name: 'InsufficientOutputAmount', inputs: [] },
+  { type: 'error', name: 'MinimumOutputRequired', inputs: [] },
+  { type: 'error', name: 'UnexpectedNativeValue', inputs: [] },
+  { type: 'error', name: 'ZeroAmount', inputs: [] },
+  { type: 'error', name: 'ZeroAddress', inputs: [] },
+];
+
 const V4_POOL_KEY = [
   { name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' },
   { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' },
@@ -191,15 +225,28 @@ let wallet = null;
 let ctx = null;      // { token, symbol, decimals, pools: [...] }
 let sel = 0;         // index into ctx.pools
 let mode = 'buy';
+let quoteNote = '';  // extra warning shown under the quote (e.g. live snipe tax)
 
 const fmtErr = (e) => e?.shortMessage || e?.message || String(e);
+/// A curve that is asked to pay out more quote than it actually holds reverts
+/// with a bare arithmetic panic rather than a named error, which reads as a bug
+/// when it is really just "this is more than the curve can buy back".
+const describeErr = (e) => {
+  const m = fmtErr(e);
+  if (pool()?.venue === 'curve' && /underflow|overflow/i.test(m)) {
+    const p = pool();
+    return `more than the curve can pay out — it only holds ${formatUnits(p.exitLiquidity, p.quoteDecimals)} ${p.quoteSymbol}. Sell a smaller amount.`;
+  }
+  return m;
+};
 const pool = () => ctx?.pools[sel];
 /// a pool whose quote side is spendable as native ETH, so no approval is needed
 /// (abyss wraps WETH for you; v4 uses address(0) as the native currency)
 const isNativePool = () => {
   const p = pool();
   if (!p) return false;
-  return p.venue === 'v4' ? p.quote === ZERO : p.quote === WETH;
+  if (p.venue === 'abyss') return p.quote === WETH;
+  return p.quote === ZERO; // v4 and curve both use address(0) for native ETH
 };
 
 // ---------------------------------------------------------------------------
@@ -357,12 +404,92 @@ async function findV4Pools(token) {
 }
 
 // ---------------------------------------------------------------------------
+// bonding-curve discovery
+//
+// The case the DEX terminals miss. A poz.fun / Pons v2 token spends the first
+// part of its life with NO pool at all — the only liquidity is the launch
+// curve itself, which holds the whole float and quotes against a virtual
+// reserve (phantomQuote = graduationThreshold * 2/5). Anything that discovers
+// markets by scanning DEX factories therefore sees nothing and calls the token
+// untradeable, right up until it graduates.
+//
+// It is perfectly tradeable: the curve has buy()/sell() and will fill you
+// immediately. So when the token names a curve that has not graduated, offer
+// the curve as a venue directly.
+//
+// Watch the snipe tax. These curves start with a punitive tax (99% observed)
+// that decays to zero over the first few seconds after launch, so a buy landing
+// in that window is nearly a total loss. It is read live, per-address, and
+// surfaced rather than silently priced in.
+// ---------------------------------------------------------------------------
+async function findCurvePool(token) {
+  const curve = await pub.readContract({ address: token, abi: LAUNCH_TOKEN_ABI, functionName: 'curve' }).catch(() => null);
+  if (!curve || getAddress(curve) === ZERO) return [];
+
+  const rd = (fn, args) => pub.readContract({ address: curve, abi: CURVE_ABI, functionName: fn, args }).catch(() => null);
+  const [graduated, reserves, pairToken] = await Promise.all([rd('graduated'), rd('getReserves'), rd('pairToken')]);
+  // once it has graduated the curve is empty and the v4 pool is the real venue
+  if (graduated !== false || !reserves) return [];
+
+  const [feeBps, creatorTaxBps, snipeStart, snipeSecs, threshold, realQuote] = await Promise.all([
+    rd('feeBps'), rd('creatorTaxBps'), rd('snipeTaxStartBps'), rd('snipeTaxSeconds'),
+    rd('graduationThreshold'), rd('realQuoteReserve'),
+  ]);
+  const quote = pairToken ? getAddress(pairToken) : ZERO;
+  const [quoteSymbol, quoteDecimals] = quote === ZERO
+    ? ['ETH', 18]
+    : await Promise.all([
+      pub.readContract({ address: quote, abi: ERC20, functionName: 'symbol' }).catch(() => '???'),
+      pub.readContract({ address: quote, abi: ERC20, functionName: 'decimals' }).catch(() => 18),
+    ]);
+
+  // What the curve can actually pay out on a sell is bounded by the quote it
+  // really holds, NOT by its (largely virtual) quoteReserve — the reserve is
+  // seeded with a phantom balance so the price starts sane. Selling past this
+  // reverts, so show it as the real exit liquidity.
+  const exitLiquidity = quote === ZERO
+    ? await pub.getBalance({ address: getAddress(curve) }).catch(() => 0n)
+    : await pub.readContract({ address: quote, abi: ERC20, functionName: 'balanceOf', args: [getAddress(curve)] }).catch(() => 0n);
+
+  return [{
+    venue: 'curve', label: 'bonding curve', curve: getAddress(curve), exitLiquidity,
+    quote, quoteSymbol, quoteDecimals,
+    quoteReserve: reserves[0], tokenReserve: reserves[1],
+    feeBps: feeBps ?? 0n, creatorTaxBps: creatorTaxBps ?? 0n,
+    snipeStartBps: snipeStart ?? 0n, snipeSeconds: snipeSecs ?? 0n,
+    threshold: threshold ?? 0n, raised: realQuote ?? 0n,
+    fee: Number((feeBps ?? 0n) + (creatorTaxBps ?? 0n)) * 100, // bps -> the 1e6 scale feeLabel expects
+    liquidity: reserves[0],
+  }];
+}
+
+/// live, per-address snipe tax — decays to zero a few seconds after launch
+async function snipeTaxBps(p, who) {
+  const v = await pub.readContract({
+    address: p.curve, abi: CURVE_ABI, functionName: 'currentSnipeTaxBps', args: [who],
+  }).catch(() => 0n);
+  return v ?? 0n;
+}
+
+/// closed-form curve output, used only when a simulation is not possible yet
+/// (selling before the curve has an allowance). Verified against the live
+/// contract: 0.01 ETH -> 5,798,829 by this formula vs 5,798,828 simulated.
+function curveEstimate(p, amountIn, taxBps) {
+  const eff = (amountIn * (10_000n - taxBps)) / 10_000n;
+  if (eff <= 0n) return 0n;
+  return mode === 'buy'
+    ? (p.tokenReserve * eff) / (p.quoteReserve + eff)
+    : (p.quoteReserve * eff) / (p.tokenReserve + eff);
+}
+
+// ---------------------------------------------------------------------------
 async function findPools(token) {
-  const [abyss, v4] = await Promise.all([
+  const [abyss, v4, curve] = await Promise.all([
     findAbyssPools(token).catch(() => []),
     findV4Pools(token).catch(() => []),
+    findCurvePool(token).catch(() => []),
   ]);
-  const out = [...abyss, ...v4];
+  const out = [...abyss, ...v4, ...curve];
   // deepest first, so the default selection is the most tradable one
   out.sort((x, y) => (y.liquidity > x.liquidity ? 1 : y.liquidity < x.liquidity ? -1 : 0));
   return out;
@@ -380,9 +507,9 @@ async function loadToken() {
 
   $('loadBtn').disabled = true;
   try {
-    st.textContent = 'looking up pools (Abyss + Uniswap v4)…';
+    st.textContent = 'looking up venues (bonding curve + Abyss + Uniswap v4)…';
     const pools = await findPools(token);
-    if (!pools.length) { st.innerHTML = '<span class="err">no Abyss or Uniswap v4 pool found for this token</span>'; return; }
+    if (!pools.length) { st.innerHTML = '<span class="err">no bonding curve, Abyss pool or Uniswap v4 pool found for this token</span>'; return; }
 
     const [symbol, decimals] = await Promise.all([
       pub.readContract({ address: token, abi: ERC20, functionName: 'symbol' }).catch(() => '???'),
@@ -414,6 +541,23 @@ async function renderPool() {
     `<dt>token</dt><dd>${esc(ctx.symbol)} · <a href="${EXPLORER}/token/${ctx.token}" target="_blank" rel="noopener">${esc(ctx.token)}</a></dd>` +
     `<dt>venue</dt><dd>${esc(p.label)}</dd>` +
     `<dt>quote</dt><dd>${esc(p.quoteSymbol)}${isNativePool() ? ' (traded as native ETH)' : ''} · ${p.quoteDecimals}dp</dd>`;
+
+  if (p.venue === 'curve') {
+    const tax = await snipeTaxBps(p, account?.address ?? ZERO);
+    const pct = (bps) => `${(Number(bps) / 100).toFixed(2)}%`;
+    const q = (v) => formatUnits(v, p.quoteDecimals);
+    $('poolInfo').innerHTML = head +
+      `<dt>curve</dt><dd><a href="${EXPLORER}/address/${p.curve}" target="_blank" rel="noopener">${esc(p.curve)}</a></dd>` +
+      `<dt>status</dt><dd>on the curve — no DEX pool yet, graduates at ${esc(q(p.threshold))} ${esc(p.quoteSymbol)}</dd>` +
+      `<dt>raised</dt><dd>${esc(q(p.raised))} / ${esc(q(p.threshold))} ${esc(p.quoteSymbol)}</dd>` +
+      `<dt>fees</dt><dd>${pct(p.feeBps)} protocol + ${pct(p.creatorTaxBps)} creator</dd>` +
+      (tax > 0n
+        ? `<dt>snipe tax</dt><dd class="err">${pct(tax)} RIGHT NOW — decays to 0 over ${p.snipeSeconds}s from launch. Wait it out.</dd>`
+        : `<dt>snipe tax</dt><dd>0% — window closed (starts at ${pct(p.snipeStartBps)}, ${p.snipeSeconds}s)</dd>`) +
+      `<dt>reserves</dt><dd>${esc(q(p.quoteReserve))} ${esc(p.quoteSymbol)} (mostly virtual) / ${esc((+formatUnits(p.tokenReserve, ctx.decimals)).toLocaleString())} ${esc(ctx.symbol)}</dd>` +
+      `<dt>exit liquidity</dt><dd>${esc(q(p.exitLiquidity))} ${esc(p.quoteSymbol)} — the most that can be sold back right now</dd>`;
+    return;
+  }
 
   if (p.venue === 'v4') {
     $('poolInfo').innerHTML = head +
@@ -507,6 +651,28 @@ async function quote() {
   if (amountIn === 0n) return null;
   const p = pool();
 
+  if (p.venue === 'curve') {
+    const tax = await snipeTaxBps(p, account.address);
+    quoteNote = tax > 0n
+      ? `snipe tax is ${(Number(tax) / 100).toFixed(2)}% right now — it decays to 0 over ${p.snipeSeconds}s from launch`
+      : '';
+    try {
+      const { result } = await pub.simulateContract({
+        address: p.curve, abi: CURVE_ABI, functionName: mode === 'buy' ? 'buy' : 'sell',
+        args: [amountIn, 0n, account.address],
+        value: (mode === 'buy' && isNativePool()) ? amountIn : 0n,
+        account: account.address,
+      });
+      return result;
+    } catch {
+      // selling before the curve has an allowance cannot be simulated; fall
+      // back to the closed form so a number still shows. doSwap() approves and
+      // then re-simulates for real before anything is sent.
+      quoteNote = [quoteNote, 'estimated from reserves (approve to get an exact quote)'].filter(Boolean).join(' · ');
+      return curveEstimate(p, amountIn, p.feeBps + p.creatorTaxBps + tax);
+    }
+  }
+
   if (p.venue === 'v4') {
     const { result } = await pub.simulateContract({
       address: V4_QUOTER, abi: V4_QUOTER_ABI, functionName: 'quoteExactInputSingle',
@@ -538,11 +704,13 @@ async function refreshQuote() {
   if (amountInRaw() === 0n) { q.textContent = ''; return; }
   q.textContent = 'quoting…';
   try {
+    quoteNote = '';
     const out = await quote();
     const slip = +($('slippage').value.trim() || '5');
-    q.innerHTML = `you get <b>${esc(showAmount(out))}</b> · min after ${slip}% slippage <b>${esc(showAmount(minOutFor(out)))}</b>`;
+    q.innerHTML = `you get <b>${esc(showAmount(out))}</b> · min after ${slip}% slippage <b>${esc(showAmount(minOutFor(out)))}</b>`
+      + (quoteNote ? `<br><span class="err">${esc(quoteNote)}</span>` : '');
   } catch (e) {
-    q.innerHTML = `<span class="err">${esc(fmtErr(e))}</span>`;
+    q.innerHTML = `<span class="err">${esc(describeErr(e))}</span>`;
   }
 }
 
@@ -594,6 +762,38 @@ async function doSwap() {
   try {
     const p = pool();
 
+    if (p.venue === 'curve') {
+      // a native buy sends value; every other direction is pulled by the curve
+      // via transferFrom, so it needs an allowance on what is being spent
+      const nativeBuy = mode === 'buy' && isNativePool();
+      if (!nativeBuy) {
+        const spend = mode === 'buy' ? p.quote : ctx.token;
+        const allowed = await pub.readContract({
+          address: spend, abi: ERC20, functionName: 'allowance', args: [account.address, p.curve],
+        });
+        if (allowed < amountIn) {
+          say(`approving ${inSymbol()}…`);
+          const ah = await wallet.writeContract({
+            address: spend, abi: ERC20, functionName: 'approve', args: [p.curve, 2n ** 256n - 1n],
+          });
+          await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+        }
+      }
+
+      say('simulating…');
+      const out = await quote();
+      const minOut = minOutFor(out);
+
+      say('sending…');
+      const hash = await wallet.writeContract({
+        address: p.curve, abi: CURVE_ABI, functionName: mode === 'buy' ? 'buy' : 'sell',
+        args: [amountIn, minOut, account.address],
+        value: nativeBuy ? amountIn : 0n,
+      });
+      await settle(hash, out, st);
+      return;
+    }
+
     if (p.venue === 'v4') {
       const { currencyIn } = v4Plan(amountIn, 0n);
       if (currencyIn !== ZERO) await ensurePermit2(currencyIn, amountIn, say);
@@ -644,7 +844,7 @@ async function doSwap() {
     });
     await settle(hash, out, st);
   } catch (e) {
-    st.innerHTML = `<span class="err">${esc(fmtErr(e))}</span>`;
+    st.innerHTML = `<span class="err">${esc(describeErr(e))}</span>`;
   } finally {
     $('swapBtn').disabled = false;
   }
