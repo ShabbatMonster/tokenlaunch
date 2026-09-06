@@ -307,6 +307,18 @@
     </div>
 
     <!-- Pons v2: pair token + dev buy -->
+    <div id="longRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST (STOCK)</label><select id="longQuoteSelect"></select></div>
+        <div style="flex:0 0 150px"><label>SUPPLY</label><input type="text" id="longSupply" value="1000000000" spellcheck="false"></div>
+      </div>
+      <input type="text" id="longQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="any ERC-20 numeraire address (0x...)">
+      <div class="row" style="margin-top:8px">
+        <div><label>TOKENS TO SELL ON THE CURVE</label><input type="text" id="longToSell" value="900000000" spellcheck="false"></div>
+      </div>
+      <div class="hint" id="longHint" style="font-size:11px;margin-top:6px">Doppler v4 multicurve on long.xyz's Airlock - paired against a tokenized stock instead of ETH. Graduates into a Uniswap v2 pair. Note: long.xyz's own Rehype fee-recycling hook is not currently whitelisted on their Airlock, so this uses the standard Doppler hook.</div>
+    </div>
+
     <div id="v4curveRow" class="hidden">
       <div class="row">
         <div><label>PAIR AGAINST (QUOTE)</label><select id="v4curveQuoteSelect"></select></div>

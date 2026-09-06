@@ -113,13 +113,25 @@
     <div class="status" id="swapStatus"></div>
   </div>
 
-  <p class="note">Swaps route through the same router the reference trade used
-  (<span id="routerAddr"></span>). Any pool on the Abyss factory works, not just WETH ones —
+  <p class="note">Two venues are searched for every token.
+  <b>Abyss</b> pools route through the same router the reference trade used
+  (<span id="routerAddr"></span>). Any pool on that factory works, not just WETH ones —
   USDG-quoted and token/token pools are traded directly via <code>exactInputSingle</code>,
   while WETH pools use the native-ETH entrypoints so you spend and receive plain ETH.
   The pool key (profile / flag / extra) is read from the factory creation event rather than
-  guessed, and every swap is simulated first to get the real output before your slippage is
-  applied as the minimum.</p>
+  guessed.</p>
+
+  <p class="note"><b>Uniswap v4</b> pools — where the bonding-curve pads (Pons v2, poz.fun)
+  land a token after it graduates — route through the Universal Router
+  (<span id="urAddr"></span>). v4 has no per-pool contract and this chain's RPC rate-limits
+  log scans, so the pool is found by rebuilding its PoolKey from the token itself
+  (<code>curve().pairToken()</code> for the quote, <code>launchFactory().memeHook()</code>
+  for the hook) and reading the PoolManager's storage directly — a pool that reads back a
+  non-zero price is proven to exist, not assumed. Selling into a v4 pool needs two one-time
+  Permit2 approvals, which the SELL button handles for you.</p>
+
+  <p class="note">Every swap on either venue is simulated first to get the real output
+  before your slippage is applied as the minimum.</p>
 </div>
 
 <script type="module" src="swap.js?v=1"></script>
