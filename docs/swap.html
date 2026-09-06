@@ -124,7 +124,19 @@
   than its mostly-virtual reserve. Selling past that reverts with a bare arithmetic panic, so
   it gets translated into plain language.</p>
 
-  <p class="note">Three venues are searched for every token.
+  <p class="note"><b>long.xyz / portfolio.market zap.</b> The opposite problem: the
+  pool exists and is deep, but it is not quoted in anything you hold. A portfolio coin is
+  paired against its own numeraire &mdash; LONGfolio trades against L8NG, an 8-token basket
+  vault that has no ETH pool anywhere &mdash; so routers that only know ETH-quoted pools find
+  no way in. There is one. The vault names a <code>minter()</code>, which is really their
+  Register: it wraps, mints the vault token and swaps the v4 pool in a single call, taking
+  plain ETH. That route is derived and then checked, never assumed &mdash; the Airlock names
+  the numeraire and the pool hook, the numeraire names the zap, and the zap is only used once
+  its <code>coin()</code> and <code>VAULT()</code> point back at the exact token and numeraire
+  you asked for. The underlying v4 pool is offered too, for anyone already holding the
+  numeraire.</p>
+
+  <p class="note">Four venues are searched for every token.
   <b>Abyss</b> pools route through the same router the reference trade used
   (<span id="routerAddr"></span>). Any pool on that factory works, not just WETH ones —
   USDG-quoted and token/token pools are traded directly via <code>exactInputSingle</code>,
