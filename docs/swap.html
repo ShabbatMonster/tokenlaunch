@@ -136,7 +136,18 @@
   you asked for. The underlying v4 pool is offered too, for anyone already holding the
   numeraire.</p>
 
-  <p class="note">Four venues are searched for every token.
+  <p class="note"><b>lightoor.fun.</b> A third shape of &ldquo;no market&rdquo;. These sit on a
+  bonding curve, but quoted in whatever the creator picked &mdash; often one of lightoor's own
+  leveraged tokens. LIGER is quoted in <b>xLIT5L</b> (&ldquo;LIT 5x Long&rdquo;), which has no
+  pool on any DEX and which you cannot mint or redeem yourself: the LT factory answers
+  <code>NotZap()</code> to every caller but their zap. So a token quoted in one looks completely
+  unreachable. Two routes are offered &mdash; the launchpad directly if you already hold the
+  quote token, and the zap, which settles the same curve in <b>USDG</b> and mints or redeems the
+  leveraged quote token inside the call. For an LT-quoted token the zap is the only way in or
+  out, so it is listed first. Quotes here are exact and need no approval:
+  <code>previewBuy</code>&thinsp;/&thinsp;<code>previewSell</code> are plain view functions.</p>
+
+  <p class="note">Five venues are searched for every token.
   <b>Abyss</b> pools route through the same router the reference trade used
   (<span id="routerAddr"></span>). Any pool on that factory works, not just WETH ones —
   USDG-quoted and token/token pools are traded directly via <code>exactInputSingle</code>,

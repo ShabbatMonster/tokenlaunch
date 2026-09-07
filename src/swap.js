@@ -6,9 +6,9 @@ import { privateKeyToAccount } from 'viem/accounts';
 
 // ---------------------------------------------------------------------------
 // Swap — trades any token on Robinhood chain, across every venue that exists
-// here, against whatever that venue is quoted in. Four are searched:
-// the bonding curve a launchpad token sits on before it graduates, a long.xyz
-// zap, Abyss, and Uniswap v4.
+// here, against whatever that venue is quoted in. Five are searched: the
+// bonding curve a poz.fun / Pons v2 token sits on before it graduates, a
+// lightoor.fun curve (and its USDG zap), a long.xyz zap, Abyss, and Uniswap v4.
 //
 //   venue "abyss" — a v3-style DEX. Modelled on the reference trade
 //     tx 0x7c6277f6…c7a9d -> router.exactInputSingleFromETH(key, …) with the
@@ -212,6 +212,59 @@ const VAULT_ABI = [
   { type: 'function', name: 'minter', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
 ];
 
+// lightoor.fun: a bonding-curve launchpad whose tokens are quoted in whatever
+// the creator picked — including its own 5x leveraged tokens, which have no
+// market anywhere else. Addresses come from the app's own config object.
+const LIGHTOOR_PAD = getAddress('0xf64a44b7cf15d5368defcef0b0693a862dacb099');
+const LIGHTOOR_ZAP = getAddress('0xfb5d9b9ae724efbff002b5897447c0d0750ad12c');
+const USDG = getAddress('0x5fc5360d0400a0fd4f2af552add042d716f1d168');
+
+const LIGHTOOR_CURVE = [
+  { name: 'creator', type: 'address' }, { name: 'quoteToken', type: 'address' },
+  { name: 'pool', type: 'address' }, { name: 'virtualQuote', type: 'uint128' },
+  { name: 'virtualToken', type: 'uint128' }, { name: 'realQuote', type: 'uint128' },
+  { name: 'tokenReserve', type: 'uint128' }, { name: 'graduationQuote', type: 'uint128' },
+  { name: 'createdAt', type: 'uint64' }, { name: 'graduated', type: 'bool' },
+];
+const LIGHTOOR_PAD_ABI = [
+  { type: 'function', name: 'getToken', stateMutability: 'view', inputs: [{ name: 'token', type: 'address' }],
+    outputs: [
+      { name: 'curve', type: 'tuple', components: LIGHTOOR_CURVE },
+      { name: 'meta', type: 'tuple', components: [
+        { name: 'image', type: 'string' }, { name: 'description', type: 'string' },
+        { name: 'twitter', type: 'string' }, { name: 'telegram', type: 'string' }, { name: 'website', type: 'string' }] },
+      { name: 'name', type: 'string' }, { name: 'symbol', type: 'string' }] },
+  { type: 'function', name: 'previewBuy', stateMutability: 'view',
+    inputs: [{ name: 'token', type: 'address' }, { name: 'quoteIn', type: 'uint256' }],
+    outputs: [{ name: 'tokensOut', type: 'uint256' }, { name: 'protocolFee', type: 'uint256' },
+              { name: 'creatorFee', type: 'uint256' }, { name: 'willGraduate', type: 'bool' }] },
+  { type: 'function', name: 'previewSell', stateMutability: 'view',
+    inputs: [{ name: 'token', type: 'address' }, { name: 'tokenIn', type: 'uint256' }],
+    outputs: [{ name: 'quoteOut', type: 'uint256' }, { name: 'protocolFee', type: 'uint256' }, { name: 'creatorFee', type: 'uint256' }] },
+  { type: 'function', name: 'buy', stateMutability: 'payable', outputs: [{ type: 'uint256' }],
+    inputs: [{ name: 'token', type: 'address' }, { name: 'quoteIn', type: 'uint256' }, { name: 'minTokensOut', type: 'uint256' }] },
+  { type: 'function', name: 'sell', stateMutability: 'nonpayable', outputs: [{ type: 'uint256' }],
+    inputs: [{ name: 'token', type: 'address' }, { name: 'tokenIn', type: 'uint256' }, { name: 'minQuoteOut', type: 'uint256' }] },
+  { type: 'function', name: 'protocolFeeBps', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'creatorFeeBps', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+];
+// the zap wraps the same curve but settles in USDG, minting/redeeming the
+// leveraged quote token for you. It is the only public caller the LT factory
+// accepts (everything else gets NotZap()), so for an LT-quoted token this is
+// the only way in or out that does not require already holding the LT.
+const LIGHTOOR_ZAP_ABI = [
+  { type: 'function', name: 'previewBuyUsdg', stateMutability: 'view',
+    inputs: [{ name: 'token', type: 'address' }, { name: 'usdgIn', type: 'uint256' }],
+    outputs: [{ name: 'tokensOut', type: 'uint256' }, { name: 'ltIn', type: 'uint256' }] },
+  { type: 'function', name: 'previewSellUsdg', stateMutability: 'view',
+    inputs: [{ name: 'token', type: 'address' }, { name: 'tokenIn', type: 'uint256' }],
+    outputs: [{ name: 'usdgOut', type: 'uint256' }, { name: 'ltOut', type: 'uint256' }] },
+  { type: 'function', name: 'buy', stateMutability: 'nonpayable', outputs: [{ type: 'uint256' }],
+    inputs: [{ name: 'token', type: 'address' }, { name: 'usdgIn', type: 'uint256' }, { name: 'minTokensOut', type: 'uint256' }] },
+  { type: 'function', name: 'sell', stateMutability: 'nonpayable', outputs: [{ type: 'uint256' }],
+    inputs: [{ name: 'token', type: 'address' }, { name: 'tokenIn', type: 'uint256' }, { name: 'minUsdgOut', type: 'uint256' }] },
+];
+
 const V4_POOL_KEY = [
   { name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' },
   { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' },
@@ -272,9 +325,12 @@ const fmtErr = (e) => e?.shortMessage || e?.message || String(e);
 /// when it is really just "this is more than the curve can buy back".
 const describeErr = (e) => {
   const m = fmtErr(e);
-  if (pool()?.venue === 'curve' && /underflow|overflow/i.test(m)) {
+  const v = pool()?.venue;
+  if ((v === 'curve' || v === 'lightoor' || v === 'lightoor-usdg') && /underflow|overflow|InsufficientQuote|exceeds/i.test(m)) {
     const p = pool();
-    return `more than the curve can pay out — it only holds ${formatUnits(p.exitLiquidity, p.quoteDecimals)} ${p.quoteSymbol}. Sell a smaller amount.`;
+    const sym = p.curveQuoteSymbol ?? p.quoteSymbol;
+    const dec = p.curveQuoteSymbol ? 18 : p.quoteDecimals;
+    return `more than the curve can pay out — it only holds ${formatUnits(p.exitLiquidity, dec)} ${sym}. Sell a smaller amount.`;
   }
   return m;
 };
@@ -447,6 +503,77 @@ async function findV4Pools(token, dop) {
 }
 
 // ---------------------------------------------------------------------------
+// lightoor.fun discovery
+//
+// A third shape of "no market". These tokens sit on a bonding curve like
+// poz.fun's, but the curve is quoted in whatever the creator chose — and that
+// is often one of lightoor's own leveraged tokens (LIGER is quoted in xLIT5L,
+// "LIT 5x Long"). Those LTs have no pool on any DEX, cannot be minted or
+// redeemed by you directly — the factory answers NotZap() to everyone except
+// the zap — and so a token quoted in one looks completely unreachable.
+//
+// Two routes are offered. The launchpad itself, if you already hold the quote
+// token; and the zap, which settles the same curve in USDG and mints or
+// redeems the leveraged quote token for you inside the call. For an LT-quoted
+// token the zap is the only way in or out, so it is listed first.
+//
+// Quotes are exact and need no allowance: previewBuy / previewSell are plain
+// view functions on the launchpad, so a number shows before you approve
+// anything.
+// ---------------------------------------------------------------------------
+async function findLightoor(token) {
+  const g = await pub.readContract({
+    address: LIGHTOOR_PAD, abi: LIGHTOOR_PAD_ABI, functionName: 'getToken', args: [token],
+  }).catch(() => null);
+  const c = g?.[0];
+  if (!c || getAddress(c.creator) === ZERO) return [];
+  // once it graduates the curve is done and the pool it names is the venue,
+  // which the v4 / Abyss sweeps already cover
+  if (c.graduated) return [];
+
+  const quote = getAddress(c.quoteToken);
+  const [quoteSymbol, quoteDecimals] = quote === ZERO
+    ? ['ETH', 18]
+    : await Promise.all([
+      pub.readContract({ address: quote, abi: ERC20, functionName: 'symbol' }).catch(() => '???'),
+      pub.readContract({ address: quote, abi: ERC20, functionName: 'decimals' }).catch(() => 18),
+    ]);
+  const [protocolFeeBps, creatorFeeBps] = await Promise.all([
+    pub.readContract({ address: LIGHTOOR_PAD, abi: LIGHTOOR_PAD_ABI, functionName: 'protocolFeeBps' }).catch(() => 0n),
+    pub.readContract({ address: LIGHTOOR_PAD, abi: LIGHTOOR_PAD_ABI, functionName: 'creatorFeeBps' }).catch(() => 0n),
+  ]);
+
+  const shared = {
+    label: 'lightoor.fun', curve: c, token,
+    feeBps: protocolFeeBps ?? 0n, creatorTaxBps: creatorFeeBps ?? 0n,
+    fee: Number((protocolFeeBps ?? 0n) + (creatorFeeBps ?? 0n)) * 100,
+    raised: c.realQuote, threshold: c.graduationQuote,
+    // a sell can only be paid out of the quote the curve really holds
+    exitLiquidity: c.realQuote,
+  };
+
+  const out = [];
+  // does the USDG zap accept this token? ask it rather than assume.
+  const zapOk = await pub.readContract({
+    address: LIGHTOOR_ZAP, abi: LIGHTOOR_ZAP_ABI, functionName: 'previewBuyUsdg',
+    args: [token, 1_000_000n],
+  }).catch(() => null);
+  if (zapOk) {
+    out.push({
+      ...shared, venue: 'lightoor-usdg', label: 'lightoor.fun (USDG)',
+      quote: USDG, quoteSymbol: 'USDG', quoteDecimals: 6,
+      curveQuoteSymbol: quoteSymbol, liquidity: c.realQuote,
+    });
+  }
+  out.push({
+    ...shared, venue: 'lightoor',
+    quote, quoteSymbol, quoteDecimals, curveQuoteSymbol: quoteSymbol,
+    liquidity: c.realQuote,
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Doppler / long.xyz discovery
 //
 // The other case terminals miss, for the opposite reason to a bonding curve:
@@ -588,18 +715,20 @@ function curveEstimate(p, amountIn, taxBps) {
 async function findPools(token) {
   // one Airlock lookup, shared by the v4 sweep and the zap check
   const dop = await dopplerHints(token).catch(() => null);
-  const [abyss, v4, curve, zap] = await Promise.all([
+  const [abyss, v4, curve, zap, lightoor] = await Promise.all([
     findAbyssPools(token).catch(() => []),
     findV4Pools(token, dop).catch(() => []),
     findCurvePool(token).catch(() => []),
     findZapPool(token, dop).catch(() => []),
+    findLightoor(token).catch(() => []),
   ]);
   // the zap goes first when present: it is the only route that takes plain ETH
-  const out = [...zap, ...abyss, ...v4, ...curve];
+  const out = [...zap, ...lightoor, ...abyss, ...v4, ...curve];
   // deepest first, so the default selection is the most tradable one — except
   // the zap, which stays on top because it is the only ETH-denominated route
+  const routed = (p) => p.venue === 'zap' || p.venue === 'lightoor-usdg';
   out.sort((x, y) => {
-    if ((x.venue === 'zap') !== (y.venue === 'zap')) return x.venue === 'zap' ? -1 : 1;
+    if (routed(x) !== routed(y)) return routed(x) ? -1 : 1;
     return y.liquidity > x.liquidity ? 1 : y.liquidity < x.liquidity ? -1 : 0;
   });
   return out;
@@ -651,6 +780,23 @@ async function renderPool() {
     `<dt>token</dt><dd>${esc(ctx.symbol)} · <a href="${EXPLORER}/token/${ctx.token}" target="_blank" rel="noopener">${esc(ctx.token)}</a></dd>` +
     `<dt>venue</dt><dd>${esc(p.label)}</dd>` +
     `<dt>quote</dt><dd>${esc(p.quoteSymbol)}${isNativePool() ? ' (traded as native ETH)' : ''} · ${p.quoteDecimals}dp</dd>`;
+
+  if (p.venue === 'lightoor' || p.venue === 'lightoor-usdg') {
+    const viaZap = p.venue === 'lightoor-usdg';
+    const q = (v) => formatUnits(v, p.quoteDecimals);
+    const cq = (v) => formatUnits(v, 18);
+    const pct = (bps) => `${(Number(bps) / 100).toFixed(2)}%`;
+    $('poolInfo').innerHTML = head +
+      `<dt>${viaZap ? 'zap' : 'launchpad'}</dt><dd><a href="${EXPLORER}/address/${viaZap ? LIGHTOOR_ZAP : LIGHTOOR_PAD}" target="_blank" rel="noopener">${esc(viaZap ? LIGHTOOR_ZAP : LIGHTOOR_PAD)}</a></dd>` +
+      `<dt>status</dt><dd>on the curve — no DEX pool yet, graduates at ${esc(cq(p.threshold))} ${esc(p.curveQuoteSymbol)}</dd>` +
+      `<dt>raised</dt><dd>${esc(cq(p.raised))} / ${esc(cq(p.threshold))} ${esc(p.curveQuoteSymbol)}</dd>` +
+      (viaZap
+        ? `<dt>route</dt><dd>USDG &rarr; ${esc(p.curveQuoteSymbol)} &rarr; ${esc(ctx.symbol)}, in one call — the zap mints and redeems the quote token for you</dd>`
+        : `<dt>route</dt><dd>direct, spending ${esc(p.quoteSymbol)} — you must already hold it</dd>`) +
+      `<dt>fees</dt><dd>${pct(p.feeBps)} protocol + ${pct(p.creatorTaxBps)} creator</dd>` +
+      `<dt>exit liquidity</dt><dd>${esc(cq(p.exitLiquidity))} ${esc(p.curveQuoteSymbol)} — the most the curve can pay back right now</dd>`;
+    return;
+  }
 
   if (p.venue === 'zap') {
     $('poolInfo').innerHTML = head +
@@ -770,6 +916,23 @@ async function quote() {
   const amountIn = amountInRaw();
   if (amountIn === 0n) return null;
   const p = pool();
+
+  // previewBuy / previewSell are views, so these quote correctly with no
+  // allowance and before the wallet holds anything
+  if (p.venue === 'lightoor') {
+    const r = await pub.readContract({
+      address: LIGHTOOR_PAD, abi: LIGHTOOR_PAD_ABI,
+      functionName: mode === 'buy' ? 'previewBuy' : 'previewSell', args: [ctx.token, amountIn],
+    });
+    return r[0];
+  }
+  if (p.venue === 'lightoor-usdg') {
+    const r = await pub.readContract({
+      address: LIGHTOOR_ZAP, abi: LIGHTOOR_ZAP_ABI,
+      functionName: mode === 'buy' ? 'previewBuyUsdg' : 'previewSellUsdg', args: [ctx.token, amountIn],
+    });
+    return r[0];
+  }
 
   if (p.venue === 'zap') {
     const { result } = await pub.simulateContract({
@@ -891,6 +1054,45 @@ async function doSwap() {
   $('swapBtn').disabled = true;
   try {
     const p = pool();
+
+    if (p.venue === 'lightoor' || p.venue === 'lightoor-usdg') {
+      const viaZap = p.venue === 'lightoor-usdg';
+      const target = viaZap ? LIGHTOOR_ZAP : LIGHTOOR_PAD;
+      const abi = viaZap ? LIGHTOOR_ZAP_ABI : LIGHTOOR_PAD_ABI;
+      // a native-quote buy sends value; everything else is pulled by the
+      // contract, so it needs an allowance on whatever is being spent
+      const nativeBuy = mode === 'buy' && !viaZap && isNativePool();
+      if (!nativeBuy) {
+        const spend = mode === 'buy' ? p.quote : ctx.token;
+        const allowed = await pub.readContract({
+          address: spend, abi: ERC20, functionName: 'allowance', args: [account.address, target],
+        });
+        if (allowed < amountIn) {
+          say(`approving ${inSymbol()}…`);
+          const ah = await wallet.writeContract({
+            address: spend, abi: ERC20, functionName: 'approve', args: [target, 2n ** 256n - 1n],
+          });
+          await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+        }
+      }
+
+      say('simulating…');
+      const out = await quote();
+      const minOut = minOutFor(out);
+      await pub.simulateContract({
+        address: target, abi, functionName: mode === 'buy' ? 'buy' : 'sell',
+        args: [ctx.token, amountIn, minOut], value: nativeBuy ? amountIn : 0n,
+        account: account.address,
+      });
+
+      say('sending…');
+      const hash = await wallet.writeContract({
+        address: target, abi, functionName: mode === 'buy' ? 'buy' : 'sell',
+        args: [ctx.token, amountIn, minOut], value: nativeBuy ? amountIn : 0n,
+      });
+      await settle(hash, out, st);
+      return;
+    }
 
     if (p.venue === 'zap') {
       // buying sends ETH; selling hands the coin to the zap, so it needs an allowance
