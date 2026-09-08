@@ -307,6 +307,41 @@
     </div>
 
     <!-- Pons v2: pair token + dev buy -->
+    <div id="lunchRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST</label><select id="lunchQuoteSelect"></select></div>
+        <div><label>DEV BUY (<span id="lunchDevSym">HOOD</span>)</label><input id="lunchDevBuy" placeholder="0" spellcheck="false"></div>
+      </div>
+      <div class="row">
+        <div><label>BUY TAX %</label><input id="lunchBuyTax" value="1" spellcheck="false"></div>
+        <div><label>SELL TAX %</label><input id="lunchSellTax" value="1" spellcheck="false"></div>
+        <div><label>TAX TO</label><input id="lunchTaxTo" placeholder="your wallet" spellcheck="false"></div>
+      </div>
+      <div class="row">
+        <div><label>HOLDER REWARDS</label><select id="lunchRewards">
+          <option value="single">single asset</option>
+          <option value="basket">basket</option>
+          <option value="none">none</option>
+        </select></div>
+        <div><label>REWARD SHARE % OF TAX</label><input id="lunchRewardPct" value="0" spellcheck="false"></div>
+      </div>
+      <div id="lunchBasketRow" class="hidden">
+        <label>BASKET — <span class="hint">symbol:weight%, comma separated (e.g. HOOD:50, USDG:50). weights must total 100.</span></label>
+        <input id="lunchBasket" placeholder="HOOD:100" spellcheck="false">
+      </div>
+
+      <!-- being able to get the pair token without leaving the form is the whole
+           point of launching fast: the stock pairs have no direct WETH route, so
+           this hops WETH -> USDG -> stock through lunch.fun's own router. -->
+      <label style="margin-top:12px">GET <span id="lunchBuySym">HOOD</span> FIRST</label>
+      <div class="row">
+        <div><input id="lunchBuyEth" placeholder="0.1" spellcheck="false"></div>
+        <div><button class="btn secondary" id="lunchBuyBtn" style="margin-top:0">BUY <span id="lunchBuySym2">HOOD</span> WITH ETH</button></div>
+      </div>
+      <div class="hint" id="lunchBal">balance: —</div>
+      <div class="status" id="lunchBuyStatus"></div>
+    </div>
+
     <div id="longRow" class="hidden">
       <div class="row">
         <div><label>PAIR AGAINST (STOCK)</label><select id="longQuoteSelect"></select></div>
