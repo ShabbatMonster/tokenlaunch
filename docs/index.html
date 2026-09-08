@@ -230,6 +230,12 @@
         <div style="flex:0 0 150px"><label>DEV BUY (<span id="raydiumDevSym">SOL</span>, opt.)</label><input type="text" id="raydiumDevBuy" value="0" spellcheck="false"></div>
       </div>
       <input type="text" id="raydiumQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="quote mint address (needs a LaunchLab config)">
+      <div class="row hidden" id="raydiumFeeRow" style="margin-top:8px">
+        <div><label style="margin-top:0">TOKEN-2022 TRANSFER FEE</label><select id="raydiumFeeBps">
+          <option value="100">1% (100 bps)</option>
+          <option value="300">3% (300 bps)</option>
+        </select></div>
+      </div>
       <div class="row" style="margin-top:8px">
         <div><button class="btn secondary" id="raydiumScanBtn" style="margin-top:0">SCAN ALL ON-CHAIN CONFIGS</button></div>
       </div>

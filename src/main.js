@@ -1161,6 +1161,9 @@ const PADS = [
     nativeSymbol: 'SOL',
     quotes: STONK_QUOTES,
     platformId: '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt', // StonkFun
+    // StonkFun mints Token-2022 with a transfer fee and its curve rule pins the
+    // tier: exactly 100 or 300 bps, max fee 1e15. Anything else is rejected.
+    token2022: true, transferFeeBps: 100, transferFeeChoices: [100, 300],
   },
   {
     // bonk.fun — the SAME LaunchLab program + configs as raydium-sol above (bonk.fun
@@ -2409,7 +2412,11 @@ async function launchSol(pad, inp) {
     const res = await launchRaydium({
       rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint,
       name: inp.name, symbol: inp.symbol, uri, buyAmountUi,
-      migrateType: 'cpmm', platformId: pad.platformId, onStatus: (m) => setStatus(m),
+      migrateType: 'cpmm', platformId: pad.platformId,
+      // pads whose platform pins a Token-2022 transfer fee (StonkFun) declare it
+      token2022: !!pad.token2022,
+      transferFeeBps: pad.token2022 ? +($('raydiumFeeBps')?.value || pad.transferFeeBps || 100) : undefined,
+      onStatus: (m) => setStatus(m),
     });
     rememberLaunch(pad, res.mint, inp.symbol);
     $('status').innerHTML =
@@ -3871,6 +3878,7 @@ function applyPadUI(pad) {
   if (pad.family === 'rialto') refreshRialtoQuotes(pad);
   if (meteora) updateSolQuoteUI(pad);
   if (raydium) updateRaydiumUI(pad);
+  $('raydiumFeeRow').classList.toggle('hidden', !(raydium && pad.token2022));
   if (clmm) updateClmmUI(pad);
   updateWalletChip(pad);
 }
