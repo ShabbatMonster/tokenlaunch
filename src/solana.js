@@ -486,6 +486,52 @@ export const RAYDIUM_QUOTES = {
 export const RAYDIUM_PLATFORM_ID = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
 export const BONK_PLATFORM_ID = 'FfYek5vEz23cMkWsdJwG2oa6EphsvXSHrGpdALN4g6W1';
 
+// stonkfun.xyz runs two platform ids against the same program and configs. Both
+// decode to a PlatformConfig named "StonkFun" with the same fee wallet; the
+// first is the busier of the two (10,665 pools vs 3,071) and is what a launch
+// paired against a community token used, so it is the default here.
+export const STONK_PLATFORM_ID = '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt';
+export const STONK_PLATFORM_ID_ALT = '4E876qZTE9FJMrBzgVtBrSrzz2TLivB5Y5QXPjB4gZL7';
+
+/// Every quote mint that LaunchLab will actually accept, read from the chain
+/// rather than from any launchpad's allowlist.
+///
+/// This matters because the websites gate what you may pair against: stonkfun
+/// lists 425 quotes while 474 configs exist on-chain, so ~50 perfectly valid
+/// pairings are simply not offered in their UI. A config is a PDA of
+/// (quote mint, index 0, curveType 0) and every one was created by Raydium's
+/// admin — protocolFeeOwner is rayvTLcC… on all 474 of them, and neither the
+/// program nor the SDK exposes a way for anyone else to make one. So new
+/// pairings cannot be minted; they can only be discovered, which is what this
+/// does. Anything that shows up here is launchable even if no frontend lists it.
+export async function listLaunchpadConfigs(rpcUrl) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const accounts = await connection.getProgramAccounts(LAUNCHPAD_PROGRAM, {
+    filters: [{ dataSize: LaunchpadConfig.span }],
+  });
+
+  const quotes = [];
+  for (const a of accounts) {
+    try {
+      const cfg = LaunchpadConfig.decode(a.account.data);
+      quotes.push({ mint: cfg.mintB.toBase58(), configId: a.pubkey.toBase58() });
+    } catch { /* not a config we understand */ }
+  }
+
+  // decimals live on the mint, not the config — SPL and Token-2022 both keep
+  // them at byte 44 of the mint account
+  const out = [];
+  for (let i = 0; i < quotes.length; i += 100) {
+    const chunk = quotes.slice(i, i + 100);
+    const infos = await connection.getMultipleAccountsInfo(chunk.map((q) => new PublicKey(q.mint)));
+    infos.forEach((info, k) => {
+      out.push({ ...chunk[k], decimals: info ? info.data[44] : null });
+    });
+  }
+  out.sort((x, y) => x.mint.localeCompare(y.mint));
+  return out;
+}
+
 // human amount -> smallest units, precise (no float drift)
 function toRawUnits(amountStr, decimals) {
   const s = String(amountStr || '0').trim();

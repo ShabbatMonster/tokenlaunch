@@ -230,7 +230,11 @@
         <div style="flex:0 0 150px"><label>DEV BUY (<span id="raydiumDevSym">SOL</span>, opt.)</label><input type="text" id="raydiumDevBuy" value="0" spellcheck="false"></div>
       </div>
       <input type="text" id="raydiumQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="quote mint address (needs a LaunchLab config)">
-      <div class="hint" id="raydiumHint" style="font-size:11px;margin-top:4px">bonding curve · no liquidity to seed · graduates to a Raydium AMM pool · quote needs a LaunchLab config</div>
+      <div class="row" style="margin-top:8px">
+        <div><button class="btn secondary" id="raydiumScanBtn" style="margin-top:0">SCAN ALL ON-CHAIN CONFIGS</button></div>
+      </div>
+      <div class="status" id="raydiumScanStatus" style="font-size:11px"></div>
+      <div class="hint" id="raydiumHint" style="font-size:11px;margin-top:4px">bonding curve · no liquidity to seed · graduates to a Raydium AMM pool · quote needs a LaunchLab config. SCAN pulls every config that exists on chain, including pairings no launchpad website lists.</div>
     </div>
 
     <!-- Custom single-sided Raydium CLMM curve -->

@@ -425,6 +425,76 @@ const SOL_CUSTOM_THRESHOLD = 1000000; // default migration threshold for custom 
 // shared by both the raydium-sol and bonk-sol pads below, since they run the
 // same LaunchLab program/configs and differ only in platformId. NVDAx / SPYx /
 // CRCLx are the stock-pegged xStocks quotes (stock pairing).
+// stonkfun.xyz pair tokens (their categorised quotes; the 361 community
+// "custom" ones are reachable via SCAN or by pasting a mint).
+const STONK_QUOTES = [
+  { symbol: 'SKR', mint: 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3', decimals: 6, kind: 'solana', name: "Seeker" },
+  { symbol: 'SOL', mint: 'So11111111111111111111111111111111111111112', decimals: 9, kind: 'solana', name: "Wrapped SOL" },
+  { symbol: 'EURC', mint: 'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', decimals: 6, kind: 'currency', name: "EURC" },
+  { symbol: 'JLUSDC', mint: '9BEcn9aPEmhSPbPQeFGjidRiEKki46fVQDyPpSQXPA2D', decimals: 6, kind: 'currency', name: "JLUSDC" },
+  { symbol: 'ONYC', mint: '5Y8NV33Vv7WbnLfq3zBcKSdYPrk7g2KoiQoe7M2tcxp5', decimals: 9, kind: 'currency', name: "ONYC" },
+  { symbol: 'USDC', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6, kind: 'currency', name: "USDC" },
+  { symbol: 'USDT', mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', decimals: 6, kind: 'currency', name: "USDT" },
+  { symbol: 'AMZNX', mint: 'Xs3eBt7uRfJX8QUs4suhyU8p2M6DoUDrJyWBa8LLZsg', decimals: 8, kind: 'xstock', name: "AMAZON" },
+  { symbol: 'APPLX', mint: 'XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp', decimals: 8, kind: 'xstock', name: "APPLE" },
+  { symbol: 'BRKX', mint: 'Xs6B6zawENwAbWVi7w92rjazLuAr5Az59qgWKcNb45x', decimals: 8, kind: 'xstock', name: "BRKX" },
+  { symbol: 'COINX', mint: 'Xs7ZdzSHLU9ftNJsii5fCeJhoRWSC32SQGzGQtePxNu', decimals: 8, kind: 'xstock', name: "COIN" },
+  { symbol: 'CRCLX', mint: 'XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1', decimals: 8, kind: 'xstock', name: "CIRCLE" },
+  { symbol: 'GLDX', mint: 'Xsv9hRk1z5ystj9MhnA7Lq4vjSsLwzL2nxrwmwtD3re', decimals: 8, kind: 'xstock', name: "GOLD" },
+  { symbol: 'GMEX', mint: 'Xsf9mBktVB9BSU5kf4nHxPq5hCBJ2j2ui3ecFGxPRGc', decimals: 8, kind: 'xstock', name: "GME" },
+  { symbol: 'GOOGLX', mint: 'XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN', decimals: 8, kind: 'xstock', name: "GOOGLE" },
+  { symbol: 'HOODX', mint: 'XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg', decimals: 8, kind: 'xstock', name: "HOOD" },
+  { symbol: 'INTCX', mint: 'XshPgPdXFRWB8tP1j82rebb2Q9rPgGX37RuqzohmArM', decimals: 8, kind: 'xstock', name: "INTC" },
+  { symbol: 'KOX', mint: 'XsaBXg8dU5cPM6ehmVctMkVqoiRG2ZjMo1cyBJ3AykQ', decimals: 8, kind: 'xstock', name: "COCA COLA" },
+  { symbol: 'MCDX', mint: 'XsqE9cRRpzxcGKDXj1BJ7Xmg4GRhZoyY1KpmGSxAWT2', decimals: 8, kind: 'xstock', name: "MCDX" },
+  { symbol: 'METAX', mint: 'Xsa62P5mvPszXL1krVUnU5ar38bBSVcWAB6fmPCo5Zu', decimals: 8, kind: 'xstock', name: "META" },
+  { symbol: 'MSFTX', mint: 'XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX', decimals: 8, kind: 'xstock', name: "MSFT" },
+  { symbol: 'MSTRX', mint: 'XsP7xzNPvEHS1m6qfanPUGjNmdnmsLKEoNAnHjdxxyZ', decimals: 8, kind: 'xstock', name: "MICROSTRATEGY" },
+  { symbol: 'NVDAX', mint: 'Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh', decimals: 8, kind: 'xstock', name: "NVIDIA" },
+  { symbol: 'PLTRX', mint: 'XsoBhf2ufR8fTyNSjqfU71DYGaE6Z3SUGAidpzriAA4', decimals: 8, kind: 'xstock', name: "PLTR" },
+  { symbol: 'QQQX', mint: 'Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ', decimals: 8, kind: 'xstock', name: "QQQ" },
+  { symbol: 'SPCXX', mint: 'Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8', decimals: 8, kind: 'xstock', name: "SPACEX" },
+  { symbol: 'SPYX', mint: 'XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W', decimals: 8, kind: 'xstock', name: "SP500" },
+  { symbol: 'STRCX', mint: 'Xs78JED6PFZxWc2wCEPspZW9kL3Se5J7L5TChKgsidH', decimals: 8, kind: 'xstock', name: "STRCX" },
+  { symbol: 'TSLAX', mint: 'XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB', decimals: 8, kind: 'xstock', name: "TESLA" },
+  { symbol: 'VIDAX', mint: 'XsfCC9VL4DamVGNgdJpfLXB3sBVa158Gbx8sh7NzmTk', decimals: 8, kind: 'xstock', name: "VIDAX" },
+  { symbol: 'ANDURIL', mint: 'PresTj4Yc2bAR197Er7wz4UUKSfqt6FryBEdAriBoQB', decimals: 9, kind: 'prestock', name: "ANDURIL" },
+  { symbol: 'ANTHROPIC', mint: 'Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw', decimals: 9, kind: 'prestock', name: "ANTHROPIC" },
+  { symbol: 'FIGUREAI', mint: 'PreZad18qfPtbxNpMtMuAuX2zVpvkEU8DnJx56faCWd', decimals: 9, kind: 'prestock', name: "FIGUREAI" },
+  { symbol: 'KALSHI', mint: 'PreLWGkkeqG1s4HEfFZSy9moCrJ7btsHuUtfcCeoRua', decimals: 9, kind: 'prestock', name: "KALSHI" },
+  { symbol: 'NEURALINK', mint: 'PrekqLJvJ3qVdXmBGDiexvwUTF4rLFDa6HWS4HJbw9S', decimals: 9, kind: 'prestock', name: "NEURALINK" },
+  { symbol: 'OPENAI', mint: 'PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF', decimals: 9, kind: 'prestock', name: "OPENAI" },
+  { symbol: 'POLYMARKET', mint: 'Pre8AREmFPtoJFT8mQSXQLh56cwJmM7CFDRuoGBZiUP', decimals: 9, kind: 'prestock', name: "POLYMARKET" },
+  { symbol: 'AMC', mint: 'AMC1qwR9KhiyrQBRPrxnfo4JfMeMZqEBvt5tgTytNNoc', decimals: 6, kind: 'backpack', name: "AMC" },
+  { symbol: 'ARB', mint: 'ARBzQTYDCW2KnVEjs1Mc81LekB1ibVFZKbSVmorkoT9d', decimals: 8, kind: 'backpack', name: "ARB" },
+  { symbol: 'DOGE', mint: 'DoGEV7LASBkQbibMc5k5vKnTZoMg423GpJ5QtJEGfm7R', decimals: 8, kind: 'backpack', name: "DOGE" },
+  { symbol: 'DRAM', mint: 'DRAMjSWR7HRfJKjRkvQWYL2bcaejaVhuxEcjf4pAY4Cw', decimals: 6, kind: 'backpack', name: "DRAM" },
+  { symbol: 'GPRO', mint: 'GPRR2u6NS5yBQHWGauoJ9HXgjrTH8dDsrBfTV5zAYvDH', decimals: 6, kind: 'backpack', name: "GPRO" },
+  { symbol: 'LIT', mint: 'EicWvteVi2fWepEzS3FYWsnuPoP6caZfjnKqNvydLjCH', decimals: 8, kind: 'backpack', name: "LIT" },
+  { symbol: 'LLY', mint: 'LLYuwZ33keFihgwoxXsBawy31AiRFLFSva32TYq5TvD', decimals: 6, kind: 'backpack', name: "LLY" },
+  { symbol: 'MRNA', mint: 'MRNAzXzhNcaEXJPibHEn8cd4vyekCDiivTyEwswLUCT', decimals: 6, kind: 'backpack', name: "MODERNA" },
+  { symbol: 'MRVL', mint: 'MRVLSjkR2ceUBukujaD3xCyHP1H3B2SzpsNTZF546jo', decimals: 6, kind: 'backpack', name: "MRVL" },
+  { symbol: 'MU', mint: 'MUxEsUKSMACyw5fZf68wxf5FLnZVhtU9CwH8uNNGay1', decimals: 6, kind: 'backpack', name: "Micron" },
+  { symbol: 'NBIS', mint: 'NBiSF3UaVUFtRzHwAfxyHsBCAZWGEKnMpewAE4oh7BG', decimals: 6, kind: 'backpack', name: "NBIS" },
+  { symbol: 'NIKE', mint: 'NKEda5nHhNGgjrE9nDdMvaEmkmJ96qqxzBVZEcKmjSg', decimals: 6, kind: 'backpack', name: "NIKE" },
+  { symbol: 'PEAQ', mint: 'PEAQjk7SRS6rXHVFFmpRr7zrC4g5ZuEebpwTxvaLr3b', decimals: 9, kind: 'backpack', name: "PEAQ" },
+  { symbol: 'PONS', mint: 'poNSfquKq512ApeYjVghwViSun4x1MhCqHVH2Paq4jN', decimals: 8, kind: 'backpack', name: "PONS" },
+  { symbol: 'PSG', mint: '5eyib4qghYGHNh7VvxSFGYLFJSanjq9hug9fR52kksnm', decimals: 9, kind: 'backpack', name: "PSG" },
+  { symbol: 'ROBOSTRATEGY', mint: 'BoTx8y9ynfdxf5ZjWtCoBVkff52qKA82ysaLU8ZM6d8T', decimals: 6, kind: 'backpack', name: "BOT" },
+  { symbol: 'SILVER', mint: 'SiLVFMgD3eD2rgK628NbTBq9MnuJF5FW2CRaVyTB35L', decimals: 6, kind: 'backpack', name: "SILVER" },
+  { symbol: 'SKHY', mint: 'SKHYhSjuRWHgikq8eRKbtBbpABgJSkd7ytQV14i9EQ3', decimals: 6, kind: 'backpack', name: "SKHYNIX" },
+  { symbol: 'SNDK', mint: 'SNDKbwMUQvZhnLnxLduradgLHG5KrPuKwpnrkkGRhfH', decimals: 6, kind: 'backpack', name: "SANDISK" },
+  { symbol: 'TAO', mint: 'taoC6xyv2v8tDLcev4uaGUgV4vdQsWJrGft2kcBRrBY', decimals: 9, kind: 'backpack', name: "Bittensor" },
+  { symbol: 'TTWO', mint: 'TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo', decimals: 6, kind: 'backpack', name: "TTWO" },
+  { symbol: 'KALSHI', mint: 'TKLSidmLVt3cqGaaodG8tyRzoANfQwoh67AccjmubeZ', decimals: 9, kind: 'tessera', name: "KALSHI" },
+  { symbol: 'OPENAI', mint: 'oPAiAikWTaFj9RYoRFD35ccfwhnMcB3ThgBZRHSkjTZ', decimals: 9, kind: 'tessera', name: "OPENAI" },
+  { symbol: 'XBTC', mint: '2zCo6bUowJMvr89ajxuWsPadAqJ2F9akCkxumNsSdgsL', decimals: 6, kind: 'leverage', name: "XBTC" },
+  { symbol: 'xSOL', mint: '4sWNB8zGWHkh6UnmwiEtzNxL4XrN7uK9tosbESbJFfVs', decimals: 6, kind: 'leverage', name: "xSOL" },
+  { symbol: 'HEEBOO', mint: 'HeeBovJNKd27tQ6xkeP1dfSyTr8LyLwhJz9wfFTbPLEX', decimals: 6, kind: 'collectible', name: "HEEBOO" },
+  { symbol: 'SV151', mint: 'SV151D5pjygAKA8aJJcKzm4wFnRX5G92Fye94jQJk7g', decimals: 6, kind: 'collectible', name: "SV151" },
+  { symbol: 'custom…', mint: 'custom', decimals: 0, kind: 'custom', name: "any mint with a LaunchLab config" },
+];
+
 const RAYDIUM_LAUNCHLAB_QUOTES = [
   { symbol: 'SOL',   mint: 'So11111111111111111111111111111111111111112' },
   { symbol: 'USD1',  mint: 'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB' },
@@ -1072,6 +1142,25 @@ const PADS = [
     site: (t) => `https://solscan.io/token/${t}`,
     nativeSymbol: 'SOL',
     quotes: RAYDIUM_LAUNCHLAB_QUOTES,
+  },
+  {
+    // stonkfun.xyz — another LaunchLab frontend, same program and same configs as
+    // raydium-sol / bonk-sol, launched with StonkFun's platformId. Verified on
+    // chain: that id decodes to a PlatformConfig named "StonkFun" pointing at
+    // https://www.stonkfun.xyz.
+    //
+    // The point of this pad is the pairing. LaunchLab needs a config per quote
+    // mint, all of them created by Raydium's admin, and each frontend then shows
+    // you a subset: stonkfun lists 425 while 474 exist on chain. So the quote
+    // list here is a shortcut, not a limit — paste any mint, or hit SCAN to pull
+    // every config that exists and pair against ones no website offers.
+    id: 'stonk-sol', label: 'StonkFun · LaunchLab', vm: 'sol', enabled: true, family: 'raydium',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://www.stonkfun.xyz/token/${t}`,
+    nativeSymbol: 'SOL',
+    quotes: STONK_QUOTES,
+    platformId: '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt', // StonkFun
   },
   {
     // bonk.fun — the SAME LaunchLab program + configs as raydium-sol above (bonk.fun
@@ -2286,10 +2375,11 @@ function solParamsFromUI(pad) {
   };
 }
 
-// resolve the Raydium quote mint from its dropdown (preset or custom)
+// resolve the Raydium quote mint from its dropdown (preset, scanned or custom)
 function raydiumQuoteMint(pad) {
   const sel = $('raydiumQuoteSelect').value;
-  const q = (pad.quotes || []).find((x) => x.symbol === sel) || (pad.quotes || [])[0];
+  const list = raydiumQuoteList(pad);
+  const q = list.find((x) => x.symbol === sel) || list[0];
   if (q.mint === 'custom') {
     const m = $('raydiumQuoteCustom').value.trim();
     if (!isSolAddress(m)) throw new Error('enter a valid custom quote mint address');
@@ -3801,16 +3891,79 @@ function updateClmmUI(pad) {
 }
 
 // Raydium: populate the quote dropdown, toggle the custom-mint field + dev-buy symbol
+// Quote mints discovered by SCAN, keyed by pad id. These are appended to the
+// dropdown so a config that no launchpad website lists is still one click away.
+const scannedQuotes = new Map();
+
+function raydiumQuoteList(pad) {
+  return [...(pad.quotes || []), ...(scannedQuotes.get(pad.id) || [])];
+}
+
 function updateRaydiumUI(pad) {
   const qs = $('raydiumQuoteSelect');
-  if (qs.dataset.padId !== pad.id) {
-    qs.innerHTML = pad.quotes.map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}</option>`).join('');
+  const list = raydiumQuoteList(pad);
+  const stamp = pad.id + ':' + list.length;
+  if (qs.dataset.padStamp !== stamp) {
+    const prev = qs.value;
+    const opt = (q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}`
+      + (q.name && q.mint !== 'custom' ? ' — ' + esc(q.name) : '') + '</option>';
+    // group by category when the pad supplies one (stonkfun does), otherwise flat
+    const kinds = [...new Set(list.map((q) => q.kind).filter(Boolean))];
+    if (kinds.length) {
+      let html = '';
+      for (const k of kinds) {
+        const inKind = list.filter((q) => q.kind === k);
+        html += k === 'custom' ? inKind.map(opt).join('')
+          : `<optgroup label="${esc(k.toUpperCase())}">${inKind.map(opt).join('')}</optgroup>`;
+      }
+      html += list.filter((q) => !q.kind).map(opt).join('');
+      qs.innerHTML = html;
+    } else {
+      qs.innerHTML = list.map(opt).join('');
+    }
+    if (prev && list.some((q) => q.symbol === prev)) qs.value = prev;
+    qs.dataset.padStamp = stamp;
     qs.dataset.padId = pad.id;
   }
-  const q = pad.quotes.find((x) => x.symbol === qs.value) || pad.quotes[0];
+  const q = list.find((x) => x.symbol === qs.value) || list[0];
   const isCustom = q.mint === 'custom';
   $('raydiumQuoteCustom').classList.toggle('hidden', !isCustom);
   $('raydiumDevSym').textContent = isCustom ? 'quote' : q.symbol;
+}
+
+/// Pull every LaunchLab config that exists on chain and fold the ones this pad
+/// does not already list into the dropdown.
+///
+/// LaunchLab will only pair against a quote mint that has a config, and every
+/// config was created by Raydium's admin — there is no instruction for anyone
+/// else to make one, so the set is fixed and can only be discovered. What each
+/// frontend shows you is a subset of it: stonkfun lists 425 of the 474 that
+/// exist. The rest are perfectly launchable, just not offered anywhere, which
+/// is exactly what this surfaces.
+async function raydiumScanConfigs(pad) {
+  const st = $('raydiumScanStatus');
+  const btn = $('raydiumScanBtn');
+  btn.disabled = true;
+  st.textContent = 'reading LaunchLab configs from the chain…';
+  try {
+    const { listLaunchpadConfigs } = await import('./solana.js');
+    const found = await listLaunchpadConfigs(pad.rpc);
+    const known = new Set((pad.quotes || []).map((q) => q.mint));
+    const extra = found
+      .filter((f) => !known.has(f.mint) && f.decimals != null)
+      .map((f) => ({
+        symbol: f.mint.slice(0, 4) + '…' + f.mint.slice(-4),
+        mint: f.mint, decimals: f.decimals, kind: 'unlisted', name: 'config ' + f.configId.slice(0, 8) + '…',
+      }));
+    scannedQuotes.set(pad.id, extra);
+    updateRaydiumUI(pad);
+    st.innerHTML = `<span class="ok">${found.length} configs on chain</span> · `
+      + `${extra.length} not in this pad's list, now selectable under UNLISTED`;
+  } catch (e) {
+    st.innerHTML = `<span class="err">${esc(e?.message || String(e))}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Solana quote dropdown -> custom-mint field + default migration threshold
@@ -4047,6 +4200,7 @@ function init() {
   });
   $('solQuoteSelect').addEventListener('change', () => updateSolQuoteUI(activePad));
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
+  $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
   $('clmmQuoteSelect').addEventListener('change', () => { if (activePad.family === 'clmm') updateClmmUI(activePad); });
   $('ponsQuoteSelect').addEventListener('change', () => { if (activePad.family === 'pons-v2') updatePonsUI(activePad); });
   $('v4curveQuoteSelect').addEventListener('change', () => { if (activePad.family === 'v4curve') updateV4CurveUI(activePad); });
