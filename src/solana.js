@@ -497,13 +497,19 @@ export const STONK_PLATFORM_ID_ALT = '4E876qZTE9FJMrBzgVtBrSrzz2TLivB5Y5QXPjB4gZ
 /// rather than from any launchpad's allowlist.
 ///
 /// This matters because the websites gate what you may pair against: stonkfun
-/// lists 425 quotes while 474 configs exist on-chain, so ~50 perfectly valid
+/// lists 425 quotes while 475 configs exist on-chain, so ~50 perfectly valid
 /// pairings are simply not offered in their UI. A config is a PDA of
-/// (quote mint, index 0, curveType 0) and every one was created by Raydium's
-/// admin — protocolFeeOwner is rayvTLcC… on all 474 of them, and neither the
-/// program nor the SDK exposes a way for anyone else to make one. So new
-/// pairings cannot be minted; they can only be discovered, which is what this
-/// does. Anything that shows up here is launchable even if no frontend lists it.
+/// (quote mint, index 0, curveType 0).
+///
+/// The program DOES have a create_config instruction, but it is not ours to
+/// call: its owner account is documented as "must match the predefined admin
+/// address or the create config authority", and simulating it proves the
+/// constraint is live — as Raydium's admin RayUznt… it succeeds, as StonkFun's
+/// own 200-SOL platform wallet it fails with InvalidOwner (6001). Not even the
+/// launchpads can add a quote. So on LaunchLab new pairings can only be
+/// discovered, not created, which is what this does. Anything listed here is
+/// launchable even if no frontend offers it; for a quote with no config at all,
+/// use the Meteora DBC pad, where the config is yours to create.
 export async function listLaunchpadConfigs(rpcUrl) {
   const connection = new Connection(rpcUrl, 'confirmed');
   const accounts = await connection.getProgramAccounts(LAUNCHPAD_PROGRAM, {
@@ -585,7 +591,10 @@ async function confirmSignaturesHttp(connection, sigs, { timeoutMs = 45000, inte
 }
 
 export async function launchRaydium(opts) {
-  const { rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId, onStatus } = opts;
+  const {
+    rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId,
+    token2022, transferFeeBps, maxTransferFee, onStatus,
+  } = opts;
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
   const owner = keypairFromSecret(secretKey);
@@ -611,8 +620,19 @@ export async function launchRaydium(opts) {
   const buyRaw = toRawUnits(buyAmountUi, mintBInfo.decimals);
   const doBuy = buyRaw.gtn(0);
 
+  // A platform curve rule pins supply and totalSellA, so when one exists the
+  // override has to apply even to SOL/USD1 — the SDK defaults it would otherwise
+  // use do not satisfy the rule. Derived here so it is known before the build.
+  const curveRuleId = platformId
+    ? PublicKey.findProgramAddressSync(
+      [Buffer.from('platform_curve_rule'), new PublicKey(platformId).toBuffer(), configId.toBuffer()],
+      programId,
+    )[0]
+    : null;
+  const curveRuleInfo = curveRuleId ? await connection.getAccountInfo(curveRuleId).catch(() => null) : null;
+
   let curveOverride = {};
-  if (!PLATFORM_DEFAULT_QUOTES.has(configInfo.mintB.toBase58())) {
+  if (curveRuleInfo || !PLATFORM_DEFAULT_QUOTES.has(configInfo.mintB.toBase58())) {
     let raiseB = curveRaiseTargetRaw(mintBInfo.decimals);
     if (configInfo.minFundRaisingB && raiseB.lt(configInfo.minFundRaisingB)) raiseB = configInfo.minFundRaisingB;
     curveOverride = { supply: CURVE_SUPPLY, totalSellA: CURVE_SELL_A, totalFundRaisingB: raiseB };
@@ -629,9 +649,9 @@ export async function launchRaydium(opts) {
   };
 
   say('building launch tx…');
-  let execute, extInfo;
+  let execute, extInfo, builder;
   try {
-    ({ execute, extInfo } = await raydium.launchpad.createLaunchpad({
+    ({ execute, extInfo, builder } = await raydium.launchpad.createLaunchpad({
       programId,
       platformId: platformId ? new PublicKey(platformId) : undefined,
       mintA: pair.publicKey,
@@ -644,6 +664,20 @@ export async function launchRaydium(opts) {
       // on-chain: both the letsbonk.fun/TRUMP and raydium.io/NVDAx example pools
       // migrated with migrateType=1/cpmm, not 0/amm).
       migrateType: migrateType || 'cpmm',
+      // Some platforms mint the launched token as Token-2022 with a transfer-fee
+      // extension, and their curve rule (below) *requires* it — the fee tier is
+      // one of the fields the rule pins. StonkFun is one: decoding a live launch
+      // of theirs shows initialize_with_token_2022 carrying
+      // Some(transferFeeBasePoints: 100, maxinumFee: 1e15), and their rule has two
+      // groups differing only in that tier (100 or 300 bps). Launching without it
+      // is rejected with CurveParamNotMatchPlatformRule.
+      ...(token2022 ? {
+        token2022: true,
+        transferFeeExtensionParams: {
+          transferFeeBasePoints: transferFeeBps ?? 100,
+          maxinumFee: maxTransferFee ? new BN(String(maxTransferFee)) : CURVE_SUPPLY,
+        },
+      } : {}),
       configId, configInfo,
       mintBDecimals: mintBInfo.decimals,
       txVersion: TxVersion.V0,
@@ -655,6 +689,48 @@ export async function launchRaydium(opts) {
     }));
   } catch (e) {
     throw asError(e, 'failed to build the launch tx (unknown error)');
+  }
+
+  // Some platforms attach a "curve rule" to a quote config — a per-(platform,
+  // config) account that constrains the curve params a launch may use. When one
+  // exists the program expects it as a REMAINING account on initialize_v2, and
+  // without it the launch dies with NotEnoughRemainingAccounts (0x1782 / 6018).
+  //
+  // The Raydium SDK never passes it: raydium.io and letsbonk.fun have no curve
+  // rules, so their own launches work with the 18 declared accounts and nothing
+  // more. StonkFun does have them, which is why a StonkFun launch fails on an
+  // unpatched SDK. Verified against their live launches — those pass 16 accounts
+  // to a 15-account instruction, and the extra one is exactly this PDA.
+  //
+  // So: derive it, and if it exists append it to the launch instruction and
+  // rebuild the transaction.
+  {
+    const curveRule = curveRuleId;
+    // Pass it whether or not it exists. The program reads this slot to decide
+    // if the platform restricts curve params, so an absent rule still has to be
+    // handed over as an empty account — StonkFun/DOUBLEZERO has no rule and 34
+    // live pools on it, yet omitting the slot still fails with 6018. Harmless
+    // for platforms that never use rules: raydium.io and letsbonk.fun both
+    // simulate fine with the extra account attached.
+    if (curveRule && builder) {
+      say(curveRuleInfo ? 'platform has a curve rule — attaching it…' : 'attaching the curve-rule slot…');
+      let patched = 0;
+      for (const ix of builder.instructions) {
+        if (!ix.programId.equals(programId)) continue;
+        ix.keys.push({ pubkey: curveRule, isSigner: false, isWritable: false });
+        patched++;
+      }
+      if (patched) {
+        try {
+          builder.addCustomComputeBudget({ units: 600000, microLamports: 100000 });
+        } catch { /* budget is a nicety; the launch fits in the default anyway */ }
+        try {
+          ({ execute } = await builder.buildV0());
+        } catch (e) {
+          throw asError(e, 'failed to rebuild the launch tx with the platform curve rule');
+        }
+      }
+    }
   }
 
   // sequentially:false skips the SDK's own confirmation wait (an internal
