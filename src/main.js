@@ -2396,6 +2396,99 @@ function solParamsFromUI(pad) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Armed pump.fun presets
+//
+// The point is speed on the day: arming uploads the image and metadata to IPFS
+// straight away and stores the resulting URI, so firing is nothing but the
+// on-chain transaction. A preset also remembers which quote it wants, and a
+// quote that is not whitelisted yet is kept rather than rejected — that is the
+// whole point of arming something before pump ships the pairing.
+// ---------------------------------------------------------------------------
+const PUMP_ARMED_KEY = 'pump.armed.v1';
+const loadArmed = () => { try { return JSON.parse(localStorage.getItem(PUMP_ARMED_KEY) || '[]'); } catch { return []; } };
+const saveArmed = (list) => localStorage.setItem(PUMP_ARMED_KEY, JSON.stringify(list));
+
+function renderArmed() {
+  const list = loadArmed();
+  const box = $('pumpArmedList');
+  if (!list.length) { box.innerHTML = '<span class="hint">nothing armed yet</span>'; return; }
+  box.innerHTML = list.map((a, i) => {
+    const pair = a.quoteMint ? esc(a.quoteLabel || a.quoteMint.slice(0, 6) + '\u2026') : 'SOL';
+    return '<div class="row" style="align-items:center;gap:8px;margin-top:6px">'
+      + '<div style="flex:1"><b>' + esc(a.symbol) + '</b> \u00b7 ' + esc(a.name)
+      + ' <span class="hint">\u2192 ' + pair + (a.devBuy && +a.devBuy > 0 ? ' \u00b7 dev ' + esc(a.devBuy) : '') + '</span></div>'
+      + '<button class="btn" data-fire="' + i + '" style="margin-top:0;flex:0 0 90px;padding:7px">FIRE</button>'
+      + '<button class="btn secondary" data-drop="' + i + '" style="margin-top:0;flex:0 0 40px;padding:7px">\u00d7</button>'
+      + '</div>';
+  }).join('');
+  box.querySelectorAll('[data-fire]').forEach((b) => { b.onclick = () => pumpFire(+b.dataset.fire); });
+  box.querySelectorAll('[data-drop]').forEach((b) => {
+    b.onclick = () => { const l = loadArmed(); l.splice(+b.dataset.drop, 1); saveArmed(l); renderArmed(); };
+  });
+}
+
+/// Arm the current form: upload now, so firing later is one transaction.
+async function pumpArm(pad) {
+  const out = $('pumpStatusOut');
+  try {
+    const name = $('name').value.trim();
+    const symbol = $('symbol').value.trim();
+    if (!name || !symbol) throw new Error('name and ticker are required');
+    if (!logoBlob) throw new Error('add an image first — it is uploaded now so firing is instant');
+    out.textContent = 'uploading image + metadata to IPFS\u2026';
+    const imgHash = (await uploadToIpfs(logoBlob)).replace('ipfs://', '');
+    const metaHash = await uploadJsonToIpfs({
+      name, symbol, description: $('desc').value.trim() || DEFAULT_DESC,
+      image: IPFS_GW(imgHash),
+      extensions: { twitter: $('twitter').value.trim(), website: $('website').value.trim() },
+    });
+    const sel = $('pumpQuote');
+    const list = loadArmed();
+    list.push({
+      name, symbol, uri: IPFS_GW(metaHash),
+      devBuy: $('pumpDevBuy').value.trim() || '0',
+      vanity: $('pumpVanity').value.trim(),
+      quoteMint: sel.value || '',
+      quoteLabel: sel.value ? (sel.options[sel.selectedIndex]?.text || '') : 'SOL',
+    });
+    saveArmed(list);
+    renderArmed();
+    out.innerHTML = '<span class="ok">ARMED</span> ' + esc(symbol) + ' \u2014 metadata is on IPFS, firing is one transaction';
+  } catch (e) {
+    out.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+  }
+}
+
+/// Fire an armed preset. Nothing is uploaded here — only the launch.
+async function pumpFire(index) {
+  const pad = PADS.find((x) => x.id === 'pump-sol');
+  const a = loadArmed()[index];
+  const out = $('pumpStatusOut');
+  if (!a) return;
+  if (!solKeyB58) { out.innerHTML = '<span class="err">no SOL key loaded</span>'; return; }
+  try {
+    setStatus('firing ' + a.symbol + '\u2026');
+    const { launchPump } = await import('./solana.js');
+    const res = await launchPump({
+      rpcUrl: pad.rpc, secretKey: solKeyB58,
+      name: a.name, symbol: a.symbol, uri: a.uri,
+      devBuySol: a.devBuy, vanitySuffix: a.vanity,
+      quoteMint: a.quoteMint || undefined,
+      onStatus: (m) => setStatus(m),
+    });
+    rememberLaunch(pad, res.mint, a.symbol);
+    $('status').innerHTML =
+      '<span style="color:var(--accent)">LAUNCHED \u2713</span> ' + res.mint + '<br>'
+      + '<a href="' + pad.site(res.mint) + '" target="_blank" rel="noopener">on pump.fun</a>'
+      + (res.sig ? ' \u00b7 <a href="' + pad.explorer + '/tx/' + res.sig + '" target="_blank" rel="noopener">launch tx</a>' : '');
+    refreshBalance();
+    renderTokenList();
+  } catch (e) {
+    setStatus(e?.message || String(e), true);
+  }
+}
+
 /// Read pump.fun's Global account and show what can actually be paired against
 /// right now.
 ///
@@ -2426,8 +2519,8 @@ async function pumpCheckPairs(pad) {
       '<span class="ok">create_v2 ' + (g.createV2Enabled ? 'enabled' : 'DISABLED') + '</span> \u00b7 '
       + 'fee ' + (Number(g.feeBasisPoints) / 100) + '% + creator ' + (Number(g.creatorFeeBasisPoints) / 100) + '%<br>'
       + 'whitelisted quotes: <b>' + esc(listed) + '</b><br>'
-      + '<span class="err">no deployed create instruction takes a quote mint yet \u2014 every create opens a native-SOL curve.</span> '
-      + 'Re-run this when pump ships stock pairs; a new quote lands here first.';
+      + 'A quote is passed to create_v2 as three extra accounts, so anything listed here is launchable now. '
+      + 'Re-run when pump ships stock pairs \u2014 a new quote lands in this account first.';
   } catch (e) {
     out.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
   } finally {
@@ -3919,6 +4012,7 @@ function applyPadUI(pad) {
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
+  if (pump) renderArmed();
   $('clmmRow').classList.toggle('hidden', !clmm);      // single-sided CLMM curve
   $('uniRow').classList.toggle('hidden', !uni);
   $('flapRow').classList.toggle('hidden', !flap);
@@ -4290,6 +4384,7 @@ function init() {
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
   $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });
+  $('pumpArmBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpArm(activePad); });
   $('clmmQuoteSelect').addEventListener('change', () => { if (activePad.family === 'clmm') updateClmmUI(activePad); });
   $('ponsQuoteSelect').addEventListener('change', () => { if (activePad.family === 'pons-v2') updatePonsUI(activePad); });
   $('v4curveQuoteSelect').addEventListener('change', () => { if (activePad.family === 'v4curve') updateV4CurveUI(activePad); });

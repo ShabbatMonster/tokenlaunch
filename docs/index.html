@@ -235,8 +235,14 @@
       </div>
       <div class="status" id="pumpStatusOut" style="font-size:11px"></div>
       <div class="hint" style="font-size:11px;margin-top:4px">create_v2 + buy_v2 in one tx (Token-2022, pump's lookup table).
-      Every deployed create path opens a native-SOL curve; CHECK PAIRS reads pump's Global account live, so a stock or USDC
-      quote appears here the moment they whitelist one.</div>
+      A non-SOL pair is created by passing the quote mint, the curve's quote account and the quote token program as three
+      extra accounts on create_v2. CHECK PAIRS reads pump's Global account live, so a stock quote is selectable the moment
+      they whitelist one.</div>
+      <label style="margin-top:12px">ARMED PRESETS <span class="hint">image + metadata uploaded on arm, so FIRE is one transaction</span></label>
+      <div class="row">
+        <div><button class="btn secondary" id="pumpArmBtn" style="margin-top:0">ARM THIS TOKEN</button></div>
+      </div>
+      <div id="pumpArmedList" style="font-size:12px;margin-top:6px"></div>
     </div>
 
     <div id="raydiumRow" class="hidden">

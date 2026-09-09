@@ -142,9 +142,12 @@ export function minePumpMint(suffix = 'pump', maxTries = 250000, onProgress) {
 /// Tokens out for a given SOL in, on the constant-product curve pump seeds every
 /// launch with. Fees are charged on top of the SOL you send, so they do not enter
 /// this term — they are covered by the max_sol_cost headroom instead.
-export function pumpTokensForSol(global, solLamports) {
+export function pumpTokensForSol(global, solLamports, quote = null) {
   const vTok = BigInt(global.initialVirtualTokenReserves);
-  const vSol = BigInt(global.initialVirtualSolReserves);
+  // a non-SOL curve is seeded from initial_virtual_quote_reserves instead
+  const vSol = quote && global.initialVirtualQuoteReserves
+    ? BigInt(global.initialVirtualQuoteReserves)
+    : BigInt(global.initialVirtualSolReserves);
   const inLamports = BigInt(solLamports);
   if (inLamports <= 0n) return 0n;
   const out = (vTok * inLamports) / (vSol + inLamports);
@@ -152,7 +155,13 @@ export function pumpTokensForSol(global, solLamports) {
   return out > realCap ? realCap : out;
 }
 
-function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, cashback = true }) {
+// A non-SOL pairing is created by passing THREE remaining accounts to create_v2:
+// the quote mint, the bonding curve's associated account for that quote, and the
+// quote's token program. The IDL declares only 16 accounts and says nothing about
+// them, which is why this looked impossible until a real USDC launch was decoded
+// (tx 29trp9sX…, create_v2 with 19 accounts). Pass nothing extra and you get a
+// native-SOL curve, exactly as before.
+function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, cashback = false, quote = null }) {
   const solVault = pda([Buffer.from('sol-vault')], PUMP_MAYHEM_PROGRAM);
   const mayhemState = pda([Buffer.from('mayhem-state'), mint.toBuffer()], PUMP_MAYHEM_PROGRAM);
   const bondingCurve = pda([Buffer.from('bonding-curve'), mint.toBuffer()]);
@@ -180,6 +189,11 @@ function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, 
       key(ataOf(solVault, mint, TOKEN_2022), false, true),
       key(PUMP_EVENT_AUTHORITY),
       key(PUMP_PROGRAM),
+      ...(quote ? [
+        key(quote.mint),
+        key(ataOf(bondingCurve, quote.mint, quote.tokenProgram), false, true),
+        key(quote.tokenProgram),
+      ] : []),
     ],
   });
 }
@@ -195,11 +209,13 @@ function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, 
 //
 // A native-SOL launch still uses WSOL as the quote here: the curve records its
 // quote as the all-zero pubkey, but the trade path settles in wrapped SOL.
-function buyIx({ mint, user, creator, feeRecipient, buybackFeeRecipient, amountTokens, maxSolCost }) {
+function buyIx({ mint, user, creator, feeRecipient, buybackFeeRecipient, amountTokens, maxSolCost, quote }) {
   const bondingCurve = pda([Buffer.from('bonding-curve'), mint.toBuffer()]);
   const creatorVault = pda([Buffer.from('creator-vault'), creator.toBuffer()]);
   const userVolume = pda([Buffer.from('user_volume_accumulator'), user.toBuffer()]);
-  const q = (owner) => ataOf(owner, WSOL, TOKEN_PROGRAM);
+  const qMint = quote ? quote.mint : WSOL;
+  const qProgram = quote ? quote.tokenProgram : TOKEN_PROGRAM;
+  const q = (owner) => ataOf(owner, qMint, qProgram);
   const data = Buffer.concat([IX.buy_v2, u64(amountTokens), u64(maxSolCost)]);
   return new TransactionInstruction({
     programId: PUMP_PROGRAM,
@@ -207,9 +223,9 @@ function buyIx({ mint, user, creator, feeRecipient, buybackFeeRecipient, amountT
     keys: [
       key(PUMP_GLOBAL),
       key(mint),
-      key(WSOL),
+      key(qMint),
       key(TOKEN_2022),
-      key(TOKEN_PROGRAM),
+      key(qProgram),
       key(ATA_PROGRAM),
       key(feeRecipient, false, true),
       key(q(feeRecipient), false, true),
@@ -259,7 +275,7 @@ export async function buildPumpLaunch(opts) {
   const {
     connection, payer, mint, name, symbol, uri,
     devBuySol = 0, slippageBps = 1000, priorityMicroLamports = 200000, computeUnits = 300000,
-    global,
+    global, quote = null,
   } = opts;
   const g = global ?? await pumpStatus(connection.rpcEndpoint);
   const ixs = [
@@ -267,11 +283,12 @@ export async function buildPumpLaunch(opts) {
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityMicroLamports }),
     createV2Ix({
       mint: mint.publicKey, user: payer.publicKey, name, symbol, uri,
-      creator: payer.publicKey, cashback: !!g.isCashbackEnabled,
+      creator: payer.publicKey, quote,
     }),
   ];
 
-  const lamports = BigInt(Math.floor(Number(devBuySol) * 1e9));
+  const qDecimals = quote ? quote.decimals : 9;
+  const lamports = BigInt(Math.floor(Number(devBuySol) * 10 ** qDecimals));
   if (lamports > 0n) {
     // pump charges its fee on top of the swap, so the cap has to allow for it
     const feeBps = BigInt(g.feeBasisPoints ?? 0n) + BigInt(g.creatorFeeBasisPoints ?? 0n);
@@ -279,7 +296,7 @@ export async function buildPumpLaunch(opts) {
     const maxSolCost = withFee + (withFee * BigInt(slippageBps)) / 10_000n;
     // ask for slightly fewer tokens than the spot quote so ordinary drift
     // between build and land cannot trip the slippage guard
-    const spot = pumpTokensForSol(g, lamports);
+    const spot = pumpTokensForSol(g, lamports, quote);
     const amountTokens = spot - (spot * BigInt(slippageBps)) / 10_000n;
     const zero = NATIVE_QUOTE.toBase58();
     const pick = (list, fallback) => {
@@ -290,10 +307,13 @@ export async function buildPumpLaunch(opts) {
     const feeRecipient = pick(g.feeRecipients, g.feeRecipient);
     const buybackFeeRecipient = pick(g.buybackFeeRecipients, feeRecipient);
     ixs.push(createAtaIdempotentIx(payer.publicKey, payer.publicKey, mint.publicKey, TOKEN_2022));
-    ixs.push(createAtaIdempotentIx(payer.publicKey, payer.publicKey, WSOL, TOKEN_PROGRAM));
+    ixs.push(createAtaIdempotentIx(
+      payer.publicKey, payer.publicKey,
+      quote ? quote.mint : WSOL, quote ? quote.tokenProgram : TOKEN_PROGRAM,
+    ));
     ixs.push(buyIx({
       mint: mint.publicKey, user: payer.publicKey, creator: payer.publicKey,
-      feeRecipient, buybackFeeRecipient, amountTokens, maxSolCost,
+      feeRecipient, buybackFeeRecipient, amountTokens, maxSolCost, quote,
     }));
   }
 
@@ -327,13 +347,22 @@ export async function launchPump(opts) {
   // quote_mint, and BondingCurve carries one), but no deployed create instruction
   // accepts a quote mint yet — create and create_v2 both open a native-SOL curve.
   // So refuse clearly rather than silently launching the wrong pair.
+  // A quote must be on pump's whitelist; the program rejects anything else, so
+  // fail here with the live list rather than burning a transaction to find out.
+  let quote = null;
   if (quoteMint && quoteMint !== NATIVE_QUOTE.toBase58()) {
-    const listed = g.whitelistedQuotes.some((q) => q.mint === quoteMint);
-    throw new Error(
-      listed
-        ? `pump.fun has whitelisted ${quoteMint} as a quote, but has not shipped a create instruction that accepts one — every deployed create path opens a native-SOL curve. Nothing to launch against it yet.`
-        : `${quoteMint} is not a whitelisted pump.fun quote. Currently whitelisted: ${g.whitelistedQuotes.map((q) => q.mint).join(', ') || 'none'}`,
-    );
+    const found = g.whitelistedQuotes.find((q) => q.mint === quoteMint);
+    if (!found) {
+      throw new Error(
+        `${quoteMint} is not a pump.fun whitelisted quote. Currently whitelisted: `
+        + `${g.whitelistedQuotes.map((q) => q.mint).join(', ') || 'none'}`,
+      );
+    }
+    quote = {
+      mint: new PublicKey(found.mint),
+      tokenProgram: new PublicKey(found.tokenProgram),
+      decimals: found.decimals,
+    };
   }
 
   const payer = Keypair.fromSecretKey(bs58.decode(secretKey));
@@ -342,7 +371,7 @@ export async function launchPump(opts) {
   if (!mint) throw new Error(`could not mine a …${vanitySuffix} address — try again or clear the suffix`);
 
   say('building launch tx…');
-  const tx = await buildPumpLaunch({ connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g });
+  const tx = await buildPumpLaunch({ connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote });
 
   say('simulating…');
   const sim = await connection.simulateTransaction(tx, { commitment: 'confirmed' });
