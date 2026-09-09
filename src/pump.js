@@ -37,6 +37,32 @@ export const PUMP_MAYHEM_PROGRAM = new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ou
 // public, permanently-active lookup table (165 of their static accounts), and so
 // does this. Read off their own launches rather than assumed.
 export const PUMP_LOOKUP_TABLE = new PublicKey('Hyif6eWb8x88RVrvjPfabsgRYnwkVnyByEXTVTXbUcyP');
+
+// The quote registry. pump redeployed on 2026-09-09 and moved the list of
+// pairable quotes out of Global (which still only names USDC) into this account,
+// which create_v2 now takes as a fourth remaining account. Entries are 40 bytes:
+// a 32-byte mint followed by that quote's initial virtual reserve.
+//
+// Read off a live stock launch rather than derived — it is not a PDA of any seed
+// worth guessing, and pumpQuoteRegistry() re-reads it every time so a newly added
+// stock appears without a code change.
+export const PUMP_QUOTE_REGISTRY = new PublicKey('6z6GDdfb2AjR9ZhJmAUQ5cipJCVxQvLJhB2H8mCwTFBP');
+const REGISTRY_FIRST_ENTRY = 228;
+const REGISTRY_ENTRY_LEN = 40;
+
+/// Every quote pump will currently pair against, with its virtual reserve.
+export async function pumpQuoteRegistry(connection) {
+  const info = await connection.getAccountInfo(PUMP_QUOTE_REGISTRY);
+  if (!info) return [];
+  const zero = NATIVE_QUOTE.toBase58();
+  const out = [];
+  for (let o = REGISTRY_FIRST_ENTRY; o + REGISTRY_ENTRY_LEN <= info.data.length; o += REGISTRY_ENTRY_LEN) {
+    const mint = new PublicKey(info.data.subarray(o, o + 32));
+    if (mint.toBase58() === zero) continue;
+    out.push({ mint: mint.toBase58(), virtualQuoteReserves: info.data.readBigUInt64LE(o + 32) });
+  }
+  return out;
+}
 const TOKEN_2022 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ATA_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
@@ -60,6 +86,8 @@ const PUMP_FEE_CONFIG = pda([Buffer.from('fee_config'), PUMP_PROGRAM.toBuffer()]
 const IX = {
   create_v2: Buffer.from('d6904cec5f8b31b4', 'hex'),
   buy_v2: Buffer.from('b817ee6167c5d33d', 'hex'),
+  // exact QUOTE in, min tokens out - what live stock launches use
+  buy_exact_quote_in_v2: Buffer.from('c2ab1c46684d5b2f', 'hex'),
 };
 
 const u64 = (v) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(v)); return b; };
@@ -128,7 +156,20 @@ export async function pumpStatus(rpcUrl) {
       tokenProgram: mi ? mi.owner.toBase58() : null,
     });
   }
-  return { ...g, whitelistedQuotes: quotes };
+  // Global's own array is legacy (USDC only); the registry is the live list
+  const registry = await pumpQuoteRegistry(connection).catch(() => []);
+  for (const r of registry) {
+    if (quotes.some((q) => q.mint === r.mint)) continue;
+    const mi = await connection.getAccountInfo(new PublicKey(r.mint)).catch(() => null);
+    quotes.push({
+      mint: r.mint,
+      decimals: mi ? mi.data[44] : null,
+      tokenProgram: mi ? mi.owner.toBase58() : null,
+      virtualQuoteReserves: r.virtualQuoteReserves,
+      fromRegistry: true,
+    });
+  }
+  return { ...g, whitelistedQuotes: quotes, registry };
 }
 
 /// Tokens out for a given SOL in, on the constant-product curve pump seeds every
@@ -137,8 +178,10 @@ export async function pumpStatus(rpcUrl) {
 export function pumpTokensForSol(global, solLamports, quote = null) {
   const vTok = BigInt(global.initialVirtualTokenReserves);
   // a non-SOL curve is seeded from initial_virtual_quote_reserves instead
-  const vSol = quote && global.initialVirtualQuoteReserves
-    ? BigInt(global.initialVirtualQuoteReserves)
+  // each registered quote carries its own virtual reserve; fall back to the
+  // global one, then to the SOL reserve
+  const vSol = quote
+    ? BigInt(quote.virtualQuoteReserves ?? global.initialVirtualQuoteReserves ?? global.initialVirtualSolReserves)
     : BigInt(global.initialVirtualSolReserves);
   const inLamports = BigInt(solLamports);
   if (inLamports <= 0n) return 0n;
@@ -163,9 +206,10 @@ function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, 
   const solVault = pda([Buffer.from('sol-vault')], PUMP_MAYHEM_PROGRAM);
   const mayhemState = pda([Buffer.from('mayhem-state'), mint.toBuffer()], PUMP_MAYHEM_PROGRAM);
   const bondingCurve = pda([Buffer.from('bonding-curve'), mint.toBuffer()]);
+  // live launches carry a trailing u64 after the two flags (observed zero)
   const data = Buffer.concat([
     IX.create_v2, str(name), str(symbol), str(uri), creator.toBuffer(),
-    Buffer.from([isMayhem ? 1 : 0]), Buffer.from([cashback ? 1 : 0]),
+    Buffer.from([isMayhem ? 1 : 0]), Buffer.from([cashback ? 1 : 0]), u64(0),
   ]);
   return new TransactionInstruction({
     programId: PUMP_PROGRAM,
@@ -191,6 +235,7 @@ function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, 
         key(quote.mint),
         key(ataOf(bondingCurve, quote.mint, quote.tokenProgram), false, true),
         key(quote.tokenProgram),
+        key(PUMP_QUOTE_REGISTRY),
       ] : []),
     ],
   });
@@ -214,7 +259,12 @@ function buyIx({ mint, user, creator, feeRecipient, buybackFeeRecipient, amountT
   const qMint = quote ? quote.mint : WSOL;
   const qProgram = quote ? quote.tokenProgram : TOKEN_PROGRAM;
   const q = (owner) => ataOf(owner, qMint, qProgram);
-  const data = Buffer.concat([IX.buy_v2, u64(amountTokens), u64(maxSolCost)]);
+  // For a paired launch, spend an exact amount of the quote instead of asking for
+  // an exact number of tokens — the same instruction the live stock launches use,
+  // and it removes the slippage guesswork from sizing a dev buy.
+  const data = quote
+    ? Buffer.concat([IX.buy_exact_quote_in_v2, u64(maxSolCost), u64(amountTokens)])
+    : Buffer.concat([IX.buy_v2, u64(amountTokens), u64(maxSolCost)]);
   return new TransactionInstruction({
     programId: PUMP_PROGRAM,
     data,
@@ -514,6 +564,9 @@ export async function resolveTransferHookAccounts(connection, hookProgram, mint)
 async function resolveQuote(connection, quoteMint) {
   if (!quoteMint || quoteMint === NATIVE_QUOTE.toBase58()) return null;
   const q = await inspectMint(connection, quoteMint);
+  const entry = (await pumpQuoteRegistry(connection).catch(() => []))
+    .find((r) => r.mint === q.mint.toBase58());
+  if (entry) q.virtualQuoteReserves = entry.virtualQuoteReserves;
   if (q.transferHookProgram) {
     const hook = await resolveTransferHookAccounts(connection, q.transferHookProgram, q.mint);
     q.hookAccounts = hook.accounts;

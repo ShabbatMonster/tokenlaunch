@@ -2596,12 +2596,20 @@ async function pumpCheckPairs(pad) {
     const g = await pumpStatus(pad.rpc);
     const sel = $('pumpQuote');
     const prev = sel.value;
-    const opts = g.whitelistedQuotes
-      .map((q) => '<option value="' + esc(q.mint) + '">' + esc(q.mint.slice(0, 6)) + '\u2026 (' + q.decimals + 'dp)</option>')
+    const buildOpts = (names) => g.whitelistedQuotes
+      .map((q) => '<option value="' + esc(q.mint) + '">'
+        + esc(names[q.mint] || (q.mint.slice(0, 6) + '\u2026')) + ' (' + q.decimals + 'dp)</option>')
       .join('');
-    sel.innerHTML = '<option value="">SOL (native)</option>' + opts;
+    const names = {
+      EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC',
+      XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W: 'SPYx',
+      XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1: 'CRCLx',
+      XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB: 'TSLAx',
+      SKHYhSjuRWHgikq8eRKbtBbpABgJSkd7ytQV14i9EQ3: 'SKHY',
+      Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh: 'NVDAx',
+    };
+    sel.innerHTML = '<option value="">SOL (native)</option>' + buildOpts(names);
     if (prev) sel.value = prev;
-    const names = { EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC' };
     const listed = g.whitelistedQuotes.map((q) => names[q.mint] || (q.mint.slice(0, 8) + '\u2026')).join(', ') || 'none';
     out.innerHTML =
       '<span class="ok">create_v2 ' + (g.createV2Enabled ? 'enabled' : 'DISABLED') + '</span> \u00b7 '
