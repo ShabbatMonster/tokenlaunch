@@ -246,6 +246,8 @@ function buyIx({ mint, user, creator, feeRecipient, buybackFeeRecipient, amountT
       key(SYS),
       key(PUMP_EVENT_AUTHORITY),
       key(PUMP_PROGRAM),
+      // an active transfer hook expects its extra accounts on every transfer
+      ...(quote?.hookAccounts ?? []),
     ],
   });
 }
@@ -285,12 +287,17 @@ export async function buildPumpLaunch(opts) {
     }),
   ];
 
-  const qDecimals = quote ? quote.decimals : 9;
-  const lamports = BigInt(Math.floor(Number(devBuySol) * 10 ** qDecimals));
+  const lamports = quoteUiToRaw(devBuySol, quote);
   if (lamports > 0n) {
     // pump charges its fee on top of the swap, so the cap has to allow for it
-    const feeBps = BigInt(g.feeBasisPoints ?? 0n) + BigInt(g.creatorFeeBasisPoints ?? 0n);
-    const withFee = lamports + (lamports * feeBps) / 10_000n;
+    // pump's own fee, plus anything a Token-2022 transfer fee withholds on the way
+    const feeBps = BigInt(g.feeBasisPoints ?? 0n) + BigInt(g.creatorFeeBasisPoints ?? 0n)
+      + BigInt(quote?.transferFeeBps ?? 0);
+    let withFee = lamports + (lamports * feeBps) / 10_000n;
+    if (quote?.maxTransferFee) {
+      const capped = lamports + BigInt(quote.maxTransferFee);
+      if (capped < withFee) withFee = capped;
+    }
     const maxSolCost = withFee + (withFee * BigInt(slippageBps)) / 10_000n;
     // ask for slightly fewer tokens than the spot quote so ordinary drift
     // between build and land cannot trip the slippage guard
@@ -331,6 +338,173 @@ export async function buildPumpLaunch(opts) {
   return tx;
 }
 
+// ---------------------------------------------------------------------------
+// Token-2022 quote support
+//
+// pump's quote path rejects Token-2022 today (InvalidQuoteTokenProgram), but the
+// tokenised equities everyone wants to pair against are all Token-2022, so this
+// is built and ready for the moment that flips. It is written against what those
+// mints actually carry, read off chain rather than assumed — NVDAx and NVDAon
+// were the reference.
+//
+// Four extensions change how a launch has to be built:
+//
+//   ScaledUiAmount    the UI amount is raw * multiplier / 10^decimals, NOT the
+//                     plain decimal shift. NVDAx sits at 1.0001 and NVDAon at
+//                     1.00093, and the multiplier moves on a schedule, so a dev
+//                     buy typed in UI units has to be divided by it or you spend
+//                     the wrong amount.
+//   TransferFeeConfig a fee is withheld on transfer, so the curve receives less
+//                     than you send and the cap needs headroom. Neither
+//                     reference mint has one; handled anyway.
+//   TransferHook      an active hook needs its ExtraAccountMetaList appended to
+//                     every transfer. Both reference mints declare the extension
+//                     with the System Program as the hook, which means none.
+//   DefaultAccountState  if new accounts default to Frozen, the curve's quote
+//                     account is born frozen and the launch cannot work at all.
+//
+// Pausable and PermanentDelegate do not change the transaction but do change
+// whether you want to launch against the thing, so they are surfaced too.
+// ---------------------------------------------------------------------------
+const EXT_TRANSFER_FEE = 1;
+const EXT_DEFAULT_ACCOUNT_STATE = 6;
+const EXT_PERMANENT_DELEGATE = 12;
+const EXT_TRANSFER_HOOK = 14;
+const EXT_SCALED_UI_AMOUNT = 25;
+const EXT_PAUSABLE = 26;
+const MINT_BASE_LEN = 82;
+const EXT_START = 166; // 82-byte base mint, padding to 165, then account-type byte
+
+/// Parse the extension TLVs a Token-2022 mint carries. SPL Token mints have none.
+export function parseMintExtensions(data) {
+  const out = {};
+  if (data.length <= EXT_START) return out;
+  let o = EXT_START;
+  while (o + 4 <= data.length) {
+    const type = data.readUInt16LE(o);
+    const len = data.readUInt16LE(o + 2);
+    if (type === 0 && len === 0) break;
+    if (o + 4 + len > data.length) break;
+    out[type] = data.subarray(o + 4, o + 4 + len);
+    o += 4 + len;
+  }
+  return out;
+}
+
+/// Everything about a quote mint that changes how the launch is built, plus the
+/// things that should stop you launching at all.
+export async function inspectMint(connection, mintAddress) {
+  const mint = new PublicKey(mintAddress);
+  const info = await connection.getAccountInfo(mint);
+  if (!info) throw new Error(`quote mint ${mintAddress} does not exist on chain`);
+  const program = info.owner;
+  const isSpl = program.equals(TOKEN_PROGRAM);
+  const isT22 = program.equals(TOKEN_2022);
+  if (!isSpl && !isT22) throw new Error(`${mintAddress} is not a token mint (owned by ${program.toBase58()})`);
+
+  const q = {
+    mint, tokenProgram: program, isToken2022: isT22,
+    decimals: info.data[MINT_BASE_LEN - 38], // byte 44
+    uiMultiplier: 1,
+    transferFeeBps: 0, maxTransferFee: 0n,
+    transferHookProgram: null,
+    defaultFrozen: false, paused: false, permanentDelegate: null,
+    blockers: [], warnings: [],
+  };
+  if (!isT22) return q;
+
+  const ext = parseMintExtensions(info.data);
+
+  // ScaledUiAmount: authority(32) multiplier(f64) effectiveTs(i64) newMultiplier(f64)
+  const scaled = ext[EXT_SCALED_UI_AMOUNT];
+  if (scaled && scaled.length >= 56) {
+    const current = scaled.readDoubleLE(32);
+    const effectiveTs = Number(scaled.readBigInt64LE(40));
+    const next = scaled.readDoubleLE(48);
+    const now = Math.floor(Date.now() / 1000);
+    q.uiMultiplier = (effectiveTs && now >= effectiveTs && next > 0) ? next : (current > 0 ? current : 1);
+    if (q.uiMultiplier !== 1) {
+      q.warnings.push(`scaled UI amount: 1 token = ${q.uiMultiplier} raw units of value — amounts are converted for you`);
+    }
+  }
+
+  // TransferFeeConfig: two authorities (64), withheld (8), then older/newer
+  // TransferFee records of {epoch u64, maximumFee u64, basisPoints u16}
+  const fee = ext[EXT_TRANSFER_FEE];
+  if (fee && fee.length >= 72 + 18) {
+    const newer = fee.subarray(fee.length - 18);
+    q.maxTransferFee = newer.readBigUInt64LE(8);
+    q.transferFeeBps = newer.readUInt16LE(16);
+    if (q.transferFeeBps > 0) {
+      q.warnings.push(`transfer fee ${q.transferFeeBps / 100}% is withheld on every move of this quote`);
+    }
+  }
+
+  const hook = ext[EXT_TRANSFER_HOOK];
+  if (hook && hook.length >= 64) {
+    const prog = new PublicKey(hook.subarray(32, 64));
+    // the System Program here means the extension exists but no hook is set
+    if (!prog.equals(SYS)) q.transferHookProgram = prog;
+  }
+
+  const state = ext[EXT_DEFAULT_ACCOUNT_STATE];
+  if (state && state.length >= 1 && state.readUInt8(0) === 2) {
+    q.defaultFrozen = true;
+    q.blockers.push('new token accounts for this mint are frozen by default, so the curve\'s quote account would be unusable');
+  }
+
+  const pausable = ext[EXT_PAUSABLE];
+  if (pausable && pausable.length >= 33 && pausable.readUInt8(32) === 1) {
+    q.paused = true;
+    q.blockers.push('this mint is currently PAUSED — no transfers can settle');
+  } else if (pausable) {
+    q.warnings.push('mint is pausable: the issuer can halt all transfers, including trading on your curve');
+  }
+
+  const delegate = ext[EXT_PERMANENT_DELEGATE];
+  if (delegate && delegate.length >= 32) {
+    q.permanentDelegate = new PublicKey(delegate.subarray(0, 32));
+    q.warnings.push(`permanent delegate ${q.permanentDelegate.toBase58().slice(0, 8)}… can move this quote out of any account at will`);
+  }
+
+  return q;
+}
+
+/// A transfer hook wants its ExtraAccountMetaList appended to every transfer.
+///
+/// Fixed addresses in that list can be passed straight through. Entries that are
+/// derived from the instruction's own data need the full transfer-hook interface
+/// resolution, and rather than guess at those this reports them so the launch can
+/// refuse honestly instead of failing on chain.
+export async function resolveTransferHookAccounts(connection, hookProgram, mint) {
+  const listPda = PublicKey.findProgramAddressSync(
+    [Buffer.from('extra-account-metas'), mint.toBuffer()], hookProgram,
+  )[0];
+  const info = await connection.getAccountInfo(listPda);
+  if (!info) return { accounts: [], unresolved: 0, listPda };
+
+  // ExtraAccountMetaList: 8 disc, u32 length, u32 count, then 35-byte metas of
+  // { discriminator u8, addressConfig [32], isSigner bool, isWritable bool }
+  const count = info.data.readUInt32LE(12);
+  const accounts = [{ pubkey: hookProgram, isSigner: false, isWritable: false },
+    { pubkey: listPda, isSigner: false, isWritable: false }];
+  let unresolved = 0;
+  for (let i = 0; i < count; i++) {
+    const at = 16 + i * 35;
+    if (at + 35 > info.data.length) break;
+    const kind = info.data.readUInt8(at);
+    const cfg = info.data.subarray(at + 1, at + 33);
+    const isSigner = info.data.readUInt8(at + 33) === 1;
+    const isWritable = info.data.readUInt8(at + 34) === 1;
+    if (kind === 0) {
+      accounts.push({ pubkey: new PublicKey(cfg), isSigner, isWritable });
+    } else {
+      unresolved++; // PDA derived from instruction data — not resolvable here
+    }
+  }
+  return { accounts, unresolved, listPda };
+}
+
 /// Resolve a quote mint into what the instructions need.
 ///
 /// Deliberately does NOT check pump's whitelist. Whether a pairing is allowed is
@@ -339,15 +513,28 @@ export async function buildPumpLaunch(opts) {
 /// pump enables it, which is the entire point of arming one.
 async function resolveQuote(connection, quoteMint) {
   if (!quoteMint || quoteMint === NATIVE_QUOTE.toBase58()) return null;
-  const mint = new PublicKey(quoteMint);
-  const info = await connection.getAccountInfo(mint);
-  if (!info) throw new Error(`quote mint ${quoteMint} does not exist on chain`);
-  const owner = info.owner.toBase58();
-  if (owner !== TOKEN_PROGRAM.toBase58() && owner !== TOKEN_2022.toBase58()) {
-    throw new Error(`${quoteMint} is not a token mint (owned by ${owner})`);
+  const q = await inspectMint(connection, quoteMint);
+  if (q.transferHookProgram) {
+    const hook = await resolveTransferHookAccounts(connection, q.transferHookProgram, q.mint);
+    q.hookAccounts = hook.accounts;
+    if (hook.unresolved > 0) {
+      q.blockers.push(
+        `transfer hook ${q.transferHookProgram.toBase58().slice(0, 8)}… needs ${hook.unresolved} `
+        + 'dynamically-derived account(s) that cannot be resolved here',
+      );
+    } else {
+      q.warnings.push(`transfer hook active: ${hook.accounts.length} extra account(s) attached to each trade`);
+    }
   }
-  // decimals sit at byte 44 of a mint account under both token programs
-  return { mint, tokenProgram: info.owner, decimals: info.data[44] };
+  return q;
+}
+
+/// UI amount -> raw units for a quote, honouring a scaled-UI multiplier.
+export function quoteUiToRaw(uiAmount, quote) {
+  const decimals = quote ? quote.decimals : 9;
+  const multiplier = quote?.uiMultiplier && quote.uiMultiplier > 0 ? quote.uiMultiplier : 1;
+  const scaled = Number(uiAmount) / multiplier;
+  return BigInt(Math.floor(scaled * 10 ** decimals));
 }
 
 /// Ask the chain whether this launch would work, without spending anything.
@@ -371,8 +558,17 @@ export async function pumpProbe(opts) {
       mint: Keypair.generate(),
       name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
     });
+    if (quote?.blockers?.length) {
+      return { ready: false, whitelisted, reason: quote.blockers.join('; '), blockers: quote.blockers };
+    }
     const sim = await connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
-    if (!sim.value.err) return { ready: true, reason: 'simulates clean', whitelisted, unitsConsumed: sim.value.unitsConsumed };
+    if (!sim.value.err) {
+      return {
+        ready: true, reason: 'simulates clean', whitelisted,
+        unitsConsumed: sim.value.unitsConsumed,
+        token2022: !!quote?.isToken2022, warnings: quote?.warnings ?? [],
+      };
+    }
 
     const logs = sim.value.logs || [];
     const anchor = logs.find((l) => l.includes('Error Code'));
@@ -383,6 +579,8 @@ export async function pumpProbe(opts) {
       reason: code
         || (whitelisted ? JSON.stringify(sim.value.err) : 'quote not whitelisted by pump yet'),
       err: sim.value.err,
+      token2022: !!quote?.isToken2022,
+      warnings: quote?.warnings ?? [],
     };
   } catch (e) {
     return { ready: false, reason: e?.message || String(e) };
@@ -402,6 +600,10 @@ export async function launchPump(opts) {
   const g = await pumpStatus(rpcUrl);
   if (!g.createV2Enabled) throw new Error('pump.fun has create_v2 disabled right now');
   const quote = await resolveQuote(connection, quoteMint);
+  if (quote?.blockers?.length) {
+    throw new Error(`cannot launch against ${quoteMint}: ${quote.blockers.join('; ')}`);
+  }
+  for (const w of quote?.warnings ?? []) say('note: ' + w);
 
   const payer = Keypair.fromSecretKey(bs58.decode(secretKey));
 

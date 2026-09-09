@@ -2460,8 +2460,7 @@ async function pumpArm(pad) {
     // pump has not enabled yet
     const sel = $('pumpQuote');
     const custom = $('pumpQuoteCustom').value.trim();
-    if (custom && !isSolAddress(custom)) throw new Error('that pair contract is not a valid mint address');
-    const quoteMint = custom || sel.value || '';
+    const quoteMint = pumpQuoteMint();
     const list = loadArmed();
     list.push({
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
@@ -2477,6 +2476,17 @@ async function pumpArm(pad) {
   } catch (e) {
     out.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
   }
+}
+
+/// Which contract to pair against: a pasted mint wins over the dropdown, so you
+/// can launch or arm against a quote pump has not listed yet.
+function pumpQuoteMint() {
+  const custom = $('pumpQuoteCustom').value.trim();
+  if (custom) {
+    if (!isSolAddress(custom)) throw new Error('that pair contract is not a valid mint address');
+    return custom;
+  }
+  return $('pumpQuote').value || '';
 }
 
 // A watcher polls by SIMULATING the launch, which is free — no gas, no signature,
@@ -2639,7 +2649,7 @@ async function launchSol(pad, inp) {
       rpcUrl: pad.rpc, secretKey: solKeyB58,
       name: inp.name, symbol: inp.symbol, uri, devBuySol,
       cashback: $('pumpCashback').checked,
-      quoteMint: $('pumpQuote').value || undefined,
+      quoteMint: pumpQuoteMint() || undefined,
       onStatus: (m) => setStatus(m),
     });
     rememberLaunch(pad, res.mint, inp.symbol);
