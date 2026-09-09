@@ -229,6 +229,8 @@
         <div><label>PAIR AGAINST</label><select id="pumpQuote"><option value="">SOL (native)</option></select></div>
         <div style="flex:0 0 150px"><label>DEV BUY (SOL, opt.)</label><input type="text" id="pumpDevBuy" value="0" spellcheck="false"></div>
       </div>
+      <input type="text" id="pumpQuoteCustom" spellcheck="false" style="margin-top:8px"
+             placeholder="or paste any mint to pair against — armed even if pump hasn't enabled it yet">
       <div class="row" style="margin-top:8px">
         <div><button class="btn secondary" id="pumpCheckBtn" style="margin-top:0">CHECK PAIRS ON-CHAIN</button></div>
       </div>
@@ -242,6 +244,9 @@
         <div><button class="btn secondary" id="pumpArmBtn" style="margin-top:0">ARM THIS TOKEN</button></div>
       </div>
       <div id="pumpArmedList" style="font-size:12px;margin-top:6px"></div>
+      <div class="hint" style="font-size:11px;margin-top:6px">WATCH polls by <b>simulating</b> the launch every 12s — free, no gas, no
+      signature — and fires for real the moment the chain says it would succeed. Arm against a contract pump has not enabled
+      yet and it will sit there returning <code>UnsupportedQuoteMint</code> until they do.</div>
     </div>
 
     <div id="raydiumRow" class="hidden">
