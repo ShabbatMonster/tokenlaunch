@@ -2419,7 +2419,8 @@ function renderArmed() {
     return '<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:6px">'
       + '<div class="row" style="align-items:center;gap:8px">'
       + '<div style="flex:1"><b>' + esc(a.symbol) + '</b> \u00b7 ' + esc(a.name)
-      + ' <span class="hint">\u2192 ' + pair + (a.devBuy && +a.devBuy > 0 ? ' \u00b7 dev ' + esc(a.devBuy) : '') + '</span></div>'
+      + ' <span class="hint">\u2192 ' + pair + (a.devBuy && +a.devBuy > 0 ? ' \u00b7 dev ' + esc(a.devBuy) : '')
+      + (a.cashback !== false ? ' \u00b7 cashback' : '') + '</span></div>'
       + '<button class="btn ' + (on ? 'sell' : 'secondary') + '" data-watch="' + i + '" style="margin-top:0;flex:0 0 100px;padding:7px">'
       + (on ? 'STOP' : 'WATCH') + '</button>'
       + '<button class="btn" data-fire="' + i + '" style="margin-top:0;flex:0 0 80px;padding:7px">FIRE</button>'
@@ -2466,6 +2467,7 @@ async function pumpArm(pad) {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
       name, symbol, uri: IPFS_GW(metaHash),
       devBuy: $('pumpDevBuy').value.trim() || '0',
+      cashback: $('pumpCashback').checked,
       quoteMint,
       quoteLabel: custom ? (custom.slice(0, 6) + '\u2026') : (sel.value ? (sel.options[sel.selectedIndex]?.text || '') : 'SOL'),
     });
@@ -2516,7 +2518,8 @@ function pumpToggleWatch(index) {
       const r = await pumpProbe({
         rpcUrl: pad.rpc, payerPubkey: solPubkeyFromSecret(solKeyB58),
         name: a.name, symbol: a.symbol, uri: a.uri,
-        devBuySol: a.devBuy, quoteMint: a.quoteMint || undefined,
+        devBuySol: a.devBuy, cashback: a.cashback !== false,
+        quoteMint: a.quoteMint || undefined,
       });
       const at = new Date().toLocaleTimeString();
       if (!r.ready) { pumpSetWatchStatus(a.id, `${at} \u00b7 not yet \u2014 ${r.reason}`); return; }
@@ -2548,7 +2551,7 @@ async function pumpFire(index) {
     const res = await launchPump({
       rpcUrl: pad.rpc, secretKey: solKeyB58,
       name: a.name, symbol: a.symbol, uri: a.uri,
-      devBuySol: a.devBuy,
+      devBuySol: a.devBuy, cashback: a.cashback !== false,
       quoteMint: a.quoteMint || undefined,
       onStatus: (m) => setStatus(m),
     });
@@ -2635,6 +2638,7 @@ async function launchSol(pad, inp) {
     const res = await launchPump({
       rpcUrl: pad.rpc, secretKey: solKeyB58,
       name: inp.name, symbol: inp.symbol, uri, devBuySol,
+      cashback: $('pumpCashback').checked,
       quoteMint: $('pumpQuote').value || undefined,
       onStatus: (m) => setStatus(m),
     });
