@@ -228,14 +228,13 @@
       <div class="row">
         <div><label>PAIR AGAINST</label><select id="pumpQuote"><option value="">SOL (native)</option></select></div>
         <div style="flex:0 0 150px"><label>DEV BUY (SOL, opt.)</label><input type="text" id="pumpDevBuy" value="0" spellcheck="false"></div>
-        <div style="flex:0 0 130px"><label>MINT SUFFIX (OPT.)</label><input type="text" id="pumpVanity" value="" placeholder="leave empty" spellcheck="false"></div>
       </div>
       <div class="row" style="margin-top:8px">
         <div><button class="btn secondary" id="pumpCheckBtn" style="margin-top:0">CHECK PAIRS ON-CHAIN</button></div>
       </div>
       <div class="status" id="pumpStatusOut" style="font-size:11px"></div>
       <div class="hint" style="font-size:11px;margin-top:4px">create_v2 + buy_v2 in one tx (Token-2022, pump's lookup table).
-      Leave MINT SUFFIX empty unless you want it: "pump" costs 58^4 = 11.3M keypairs (~45 min) and pump.fun grind it server-side, so it is skipped after 8s rather than holding up the launch. A non-SOL pair is created by passing the quote mint, the curve's quote account and the quote token program as three
+      A non-SOL pair is created by passing the quote mint, the curve's quote account and the quote token program as three
       extra accounts on create_v2. CHECK PAIRS reads pump's Global account live, so a stock quote is selectable the moment
       they whitelist one.</div>
       <label style="margin-top:12px">ARMED PRESETS <span class="hint">image + metadata uploaded on arm, so FIRE is one transaction</span></label>

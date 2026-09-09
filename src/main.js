@@ -2448,7 +2448,6 @@ async function pumpArm(pad) {
     list.push({
       name, symbol, uri: IPFS_GW(metaHash),
       devBuy: $('pumpDevBuy').value.trim() || '0',
-      vanity: $('pumpVanity').value.trim(),
       quoteMint: sel.value || '',
       quoteLabel: sel.value ? (sel.options[sel.selectedIndex]?.text || '') : 'SOL',
     });
@@ -2473,7 +2472,7 @@ async function pumpFire(index) {
     const res = await launchPump({
       rpcUrl: pad.rpc, secretKey: solKeyB58,
       name: a.name, symbol: a.symbol, uri: a.uri,
-      devBuySol: a.devBuy, vanitySuffix: a.vanity,
+      devBuySol: a.devBuy,
       quoteMint: a.quoteMint || undefined,
       onStatus: (m) => setStatus(m),
     });
@@ -2555,12 +2554,11 @@ async function launchSol(pad, inp) {
 
   if (pad.family === 'pump') {
     const devBuySol = $('pumpDevBuy').value.trim() || '0';
-    const vanitySuffix = $('pumpVanity').value.trim();
     setStatus('loading Solana module...');
     const { launchPump } = await import('./solana.js');
     const res = await launchPump({
       rpcUrl: pad.rpc, secretKey: solKeyB58,
-      name: inp.name, symbol: inp.symbol, uri, devBuySol, vanitySuffix,
+      name: inp.name, symbol: inp.symbol, uri, devBuySol,
       quoteMint: $('pumpQuote').value || undefined,
       onStatus: (m) => setStatus(m),
     });
