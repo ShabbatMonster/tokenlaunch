@@ -1144,6 +1144,24 @@ const PADS = [
     quotes: RAYDIUM_LAUNCHLAB_QUOTES,
   },
   {
+    // pump.fun. create_v2 (Token-2022) plus a buy_v2 dev buy in one transaction,
+    // compiled against pump's own address lookup table because the two
+    // instructions together are 43 accounts and will not otherwise fit.
+    //
+    // Pairing: every deployed create path opens a NATIVE-SOL curve. The program
+    // is already quote-aware everywhere else — buy_v2 / sell_v2 / migrate_v2 all
+    // take a quote_mint, BondingCurve stores one, and admin-only add_quote_mint
+    // whitelists them (USDC is whitelisted today) — but no create instruction
+    // accepts a quote yet. So the quote list here is read live from pump's Global
+    // account rather than hardcoded: the moment they ship a stock quote it shows
+    // up in CHECK PAIRS without a code change. See src/pump.js.
+    id: 'pump-sol', label: 'pump.fun', vm: 'sol', enabled: true, family: 'pump',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://pump.fun/coin/${t}`,
+    nativeSymbol: 'SOL',
+  },
+  {
     // stonkfun.xyz — another LaunchLab frontend, same program and same configs as
     // raydium-sol / bonk-sol, launched with StonkFun's platformId. Verified on
     // chain: that id decodes to a PlatformConfig named "StonkFun" pointing at
@@ -2378,6 +2396,45 @@ function solParamsFromUI(pad) {
   };
 }
 
+/// Read pump.fun's Global account and show what can actually be paired against
+/// right now.
+///
+/// The quote list is deliberately live rather than hardcoded. pump whitelists
+/// non-SOL quotes with an admin-only add_quote_mint instruction, so a stock pair
+/// would land in this account the moment they add it and show up here with no
+/// code change. What is still missing on their side is a create instruction that
+/// accepts a quote — every deployed create path opens a native-SOL curve — so
+/// this also says so plainly instead of offering a pairing that cannot be built.
+async function pumpCheckPairs(pad) {
+  const out = $('pumpStatusOut');
+  const btn = $('pumpCheckBtn');
+  btn.disabled = true;
+  out.textContent = 'reading pump.fun global config\u2026';
+  try {
+    const { pumpStatus } = await import('./solana.js');
+    const g = await pumpStatus(pad.rpc);
+    const sel = $('pumpQuote');
+    const prev = sel.value;
+    const opts = g.whitelistedQuotes
+      .map((q) => '<option value="' + esc(q.mint) + '">' + esc(q.mint.slice(0, 6)) + '\u2026 (' + q.decimals + 'dp)</option>')
+      .join('');
+    sel.innerHTML = '<option value="">SOL (native)</option>' + opts;
+    if (prev) sel.value = prev;
+    const names = { EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC' };
+    const listed = g.whitelistedQuotes.map((q) => names[q.mint] || (q.mint.slice(0, 8) + '\u2026')).join(', ') || 'none';
+    out.innerHTML =
+      '<span class="ok">create_v2 ' + (g.createV2Enabled ? 'enabled' : 'DISABLED') + '</span> \u00b7 '
+      + 'fee ' + (Number(g.feeBasisPoints) / 100) + '% + creator ' + (Number(g.creatorFeeBasisPoints) / 100) + '%<br>'
+      + 'whitelisted quotes: <b>' + esc(listed) + '</b><br>'
+      + '<span class="err">no deployed create instruction takes a quote mint yet \u2014 every create opens a native-SOL curve.</span> '
+      + 'Re-run this when pump ships stock pairs; a new quote lands here first.';
+  } catch (e) {
+    out.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // resolve the Raydium quote mint from its dropdown (preset, scanned or custom)
 function raydiumQuoteMint(pad) {
   const sel = $('raydiumQuoteSelect').value;
@@ -2402,6 +2459,27 @@ async function launchSol(pad, inp) {
     ...(inp.twitter || inp.website ? { extensions: { twitter: inp.twitter, website: inp.website } } : {}),
   });
   const uri = IPFS_GW(metaHash);
+
+  if (pad.family === 'pump') {
+    const devBuySol = $('pumpDevBuy').value.trim() || '0';
+    const vanitySuffix = $('pumpVanity').value.trim();
+    setStatus('loading Solana module...');
+    const { launchPump } = await import('./solana.js');
+    const res = await launchPump({
+      rpcUrl: pad.rpc, secretKey: solKeyB58,
+      name: inp.name, symbol: inp.symbol, uri, devBuySol, vanitySuffix,
+      quoteMint: $('pumpQuote').value || undefined,
+      onStatus: (m) => setStatus(m),
+    });
+    rememberLaunch(pad, res.mint, inp.symbol);
+    $('status').innerHTML =
+      `<span style="color:var(--accent)">LAUNCHED \u2713</span> ${res.mint}<br>` +
+      `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">on pump.fun</a>` +
+      (res.sig ? ` \u00b7 <a href="${pad.explorer}/tx/${res.sig}" target="_blank" rel="noopener">launch tx</a>` : '');
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
 
   // Raydium LaunchLab path
   if (pad.family === 'raydium') {
@@ -3826,6 +3904,7 @@ function applyPadUI(pad) {
   const sol = pad.vm === 'sol';
   const meteora = pad.family === 'meteora';
   const raydium = pad.family === 'raydium';
+  const pump = pad.family === 'pump';
   const clmm = pad.family === 'clmm';
   const uni = pad.family === 'uniswap';
   const dyor = pad.family === 'dyorswap';
@@ -3839,6 +3918,7 @@ function applyPadUI(pad) {
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
+  $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
   $('clmmRow').classList.toggle('hidden', !clmm);      // single-sided CLMM curve
   $('uniRow').classList.toggle('hidden', !uni);
   $('flapRow').classList.toggle('hidden', !flap);
@@ -4209,6 +4289,7 @@ function init() {
   $('solQuoteSelect').addEventListener('change', () => updateSolQuoteUI(activePad));
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
+  $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });
   $('clmmQuoteSelect').addEventListener('change', () => { if (activePad.family === 'clmm') updateClmmUI(activePad); });
   $('ponsQuoteSelect').addEventListener('change', () => { if (activePad.family === 'pons-v2') updatePonsUI(activePad); });
   $('v4curveQuoteSelect').addEventListener('change', () => { if (activePad.family === 'v4curve') updateV4CurveUI(activePad); });
