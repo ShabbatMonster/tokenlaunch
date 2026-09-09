@@ -325,6 +325,64 @@ export async function buildPumpLaunch(opts) {
   return tx;
 }
 
+/// Resolve a quote mint into what the instructions need.
+///
+/// Deliberately does NOT check pump's whitelist. Whether a pairing is allowed is
+/// the program's call, and asking it costs nothing (see pumpProbe) — refusing
+/// here would make it impossible to stage a launch against a contract before
+/// pump enables it, which is the entire point of arming one.
+async function resolveQuote(connection, quoteMint) {
+  if (!quoteMint || quoteMint === NATIVE_QUOTE.toBase58()) return null;
+  const mint = new PublicKey(quoteMint);
+  const info = await connection.getAccountInfo(mint);
+  if (!info) throw new Error(`quote mint ${quoteMint} does not exist on chain`);
+  const owner = info.owner.toBase58();
+  if (owner !== TOKEN_PROGRAM.toBase58() && owner !== TOKEN_2022.toBase58()) {
+    throw new Error(`${quoteMint} is not a token mint (owned by ${owner})`);
+  }
+  // decimals sit at byte 44 of a mint account under both token programs
+  return { mint, tokenProgram: info.owner, decimals: info.data[44] };
+}
+
+/// Ask the chain whether this launch would work, without spending anything.
+///
+/// A simulation is free and needs no signature, so this is how a pairing is
+/// polled: build the real transaction, simulate it, and read the answer. When it
+/// comes back ready the same inputs can be fired for real. Never throws for
+/// "not yet" — that is a normal answer, not an error.
+export async function pumpProbe(opts) {
+  const { rpcUrl, payerPubkey, name, symbol, uri, devBuySol = 0, slippageBps = 1000, quoteMint } = opts;
+  const connection = new Connection(rpcUrl, 'confirmed');
+  try {
+    const g = await pumpStatus(rpcUrl);
+    if (!g.createV2Enabled) return { ready: false, reason: 'pump.fun has create_v2 disabled' };
+    const quote = await resolveQuote(connection, quoteMint);
+    const whitelisted = !quote || g.whitelistedQuotes.some((q) => q.mint === quote.mint.toBase58());
+
+    const tx = await buildPumpLaunch({
+      connection,
+      payer: { publicKey: new PublicKey(payerPubkey) },
+      mint: Keypair.generate(),
+      name, symbol, uri, devBuySol, slippageBps, global: g, quote,
+    });
+    const sim = await connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
+    if (!sim.value.err) return { ready: true, reason: 'simulates clean', whitelisted, unitsConsumed: sim.value.unitsConsumed };
+
+    const logs = sim.value.logs || [];
+    const anchor = logs.find((l) => l.includes('Error Code'));
+    const code = anchor?.match(/Error Code: (\w+)/)?.[1];
+    return {
+      ready: false,
+      whitelisted,
+      reason: code
+        || (whitelisted ? JSON.stringify(sim.value.err) : 'quote not whitelisted by pump yet'),
+      err: sim.value.err,
+    };
+  } catch (e) {
+    return { ready: false, reason: e?.message || String(e) };
+  }
+}
+
 /// Launch on pump.fun. Returns { mint, sig }.
 export async function launchPump(opts) {
   const {
@@ -337,29 +395,7 @@ export async function launchPump(opts) {
   say('reading pump.fun config…');
   const g = await pumpStatus(rpcUrl);
   if (!g.createV2Enabled) throw new Error('pump.fun has create_v2 disabled right now');
-
-  // A non-SOL pairing needs a curve created against that quote. The program can
-  // already TRADE any whitelisted quote (buy_v2 / sell_v2 / migrate_v2 all take a
-  // quote_mint, and BondingCurve carries one), but no deployed create instruction
-  // accepts a quote mint yet — create and create_v2 both open a native-SOL curve.
-  // So refuse clearly rather than silently launching the wrong pair.
-  // A quote must be on pump's whitelist; the program rejects anything else, so
-  // fail here with the live list rather than burning a transaction to find out.
-  let quote = null;
-  if (quoteMint && quoteMint !== NATIVE_QUOTE.toBase58()) {
-    const found = g.whitelistedQuotes.find((q) => q.mint === quoteMint);
-    if (!found) {
-      throw new Error(
-        `${quoteMint} is not a pump.fun whitelisted quote. Currently whitelisted: `
-        + `${g.whitelistedQuotes.map((q) => q.mint).join(', ') || 'none'}`,
-      );
-    }
-    quote = {
-      mint: new PublicKey(found.mint),
-      tokenProgram: new PublicKey(found.tokenProgram),
-      decimals: found.decimals,
-    };
-  }
+  const quote = await resolveQuote(connection, quoteMint);
 
   const payer = Keypair.fromSecretKey(bs58.decode(secretKey));
 

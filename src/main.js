@@ -2415,16 +2415,28 @@ function renderArmed() {
   if (!list.length) { box.innerHTML = '<span class="hint">nothing armed yet</span>'; return; }
   box.innerHTML = list.map((a, i) => {
     const pair = a.quoteMint ? esc(a.quoteLabel || a.quoteMint.slice(0, 6) + '\u2026') : 'SOL';
-    return '<div class="row" style="align-items:center;gap:8px;margin-top:6px">'
+    const on = pumpWatchers.has(a.id);
+    return '<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:6px">'
+      + '<div class="row" style="align-items:center;gap:8px">'
       + '<div style="flex:1"><b>' + esc(a.symbol) + '</b> \u00b7 ' + esc(a.name)
       + ' <span class="hint">\u2192 ' + pair + (a.devBuy && +a.devBuy > 0 ? ' \u00b7 dev ' + esc(a.devBuy) : '') + '</span></div>'
-      + '<button class="btn" data-fire="' + i + '" style="margin-top:0;flex:0 0 90px;padding:7px">FIRE</button>'
+      + '<button class="btn ' + (on ? 'sell' : 'secondary') + '" data-watch="' + i + '" style="margin-top:0;flex:0 0 100px;padding:7px">'
+      + (on ? 'STOP' : 'WATCH') + '</button>'
+      + '<button class="btn" data-fire="' + i + '" style="margin-top:0;flex:0 0 80px;padding:7px">FIRE</button>'
       + '<button class="btn secondary" data-drop="' + i + '" style="margin-top:0;flex:0 0 40px;padding:7px">\u00d7</button>'
+      + '</div>'
+      + '<div class="hint" id="pumpWatch-' + esc(a.id) + '" style="font-size:11px">' + esc(pumpWatchStatus.get(a.id) || '') + '</div>'
       + '</div>';
   }).join('');
   box.querySelectorAll('[data-fire]').forEach((b) => { b.onclick = () => pumpFire(+b.dataset.fire); });
+  box.querySelectorAll('[data-watch]').forEach((b) => { b.onclick = () => pumpToggleWatch(+b.dataset.watch); });
   box.querySelectorAll('[data-drop]').forEach((b) => {
-    b.onclick = () => { const l = loadArmed(); l.splice(+b.dataset.drop, 1); saveArmed(l); renderArmed(); };
+    b.onclick = () => {
+      const l = loadArmed();
+      const [gone] = l.splice(+b.dataset.drop, 1);
+      if (gone) pumpStopWatch(gone.id);
+      saveArmed(l); renderArmed();
+    };
   });
 }
 
@@ -2443,13 +2455,19 @@ async function pumpArm(pad) {
       image: IPFS_GW(imgHash),
       extensions: { twitter: $('twitter').value.trim(), website: $('website').value.trim() },
     });
+    // a pasted contract wins over the dropdown, so you can arm against a pairing
+    // pump has not enabled yet
     const sel = $('pumpQuote');
+    const custom = $('pumpQuoteCustom').value.trim();
+    if (custom && !isSolAddress(custom)) throw new Error('that pair contract is not a valid mint address');
+    const quoteMint = custom || sel.value || '';
     const list = loadArmed();
     list.push({
+      id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
       name, symbol, uri: IPFS_GW(metaHash),
       devBuy: $('pumpDevBuy').value.trim() || '0',
-      quoteMint: sel.value || '',
-      quoteLabel: sel.value ? (sel.options[sel.selectedIndex]?.text || '') : 'SOL',
+      quoteMint,
+      quoteLabel: custom ? (custom.slice(0, 6) + '\u2026') : (sel.value ? (sel.options[sel.selectedIndex]?.text || '') : 'SOL'),
     });
     saveArmed(list);
     renderArmed();
@@ -2457,6 +2475,64 @@ async function pumpArm(pad) {
   } catch (e) {
     out.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
   }
+}
+
+// A watcher polls by SIMULATING the launch, which is free — no gas, no signature,
+// no transaction — and only sends once the chain says it would succeed. That is
+// what makes it safe to point one at a contract pump has not enabled yet: it just
+// keeps answering UnsupportedQuoteMint until the day they do.
+const pumpWatchers = new Map();     // preset id -> interval handle
+const pumpWatchStatus = new Map();  // preset id -> last line shown under it
+const PUMP_WATCH_MS = 12000;
+
+function pumpSetWatchStatus(id, msg) {
+  pumpWatchStatus.set(id, msg);
+  const el = document.getElementById('pumpWatch-' + id);
+  if (el) el.textContent = msg;
+}
+
+function pumpStopWatch(id) {
+  const h = pumpWatchers.get(id);
+  if (h) clearInterval(h);
+  pumpWatchers.delete(id);
+}
+
+function pumpToggleWatch(index) {
+  const a = loadArmed()[index];
+  if (!a) return;
+  if (pumpWatchers.has(a.id)) {
+    pumpStopWatch(a.id);
+    pumpSetWatchStatus(a.id, 'watch stopped');
+    renderArmed();
+    return;
+  }
+  if (!solKeyB58) { pumpSetWatchStatus(a.id, 'no SOL key loaded'); renderArmed(); return; }
+  const tick = async () => {
+    // the preset may have been fired or deleted since the last tick
+    if (!loadArmed().some((x) => x.id === a.id)) { pumpStopWatch(a.id); return; }
+    try {
+      const pad = PADS.find((x) => x.id === 'pump-sol');
+      const { pumpProbe } = await import('./solana.js');
+      const r = await pumpProbe({
+        rpcUrl: pad.rpc, payerPubkey: solPubkeyFromSecret(solKeyB58),
+        name: a.name, symbol: a.symbol, uri: a.uri,
+        devBuySol: a.devBuy, quoteMint: a.quoteMint || undefined,
+      });
+      const at = new Date().toLocaleTimeString();
+      if (!r.ready) { pumpSetWatchStatus(a.id, `${at} \u00b7 not yet \u2014 ${r.reason}`); return; }
+      // ready: stop first so a slow launch cannot be fired twice
+      pumpStopWatch(a.id);
+      pumpSetWatchStatus(a.id, `${at} \u00b7 READY \u2014 firing\u2026`);
+      renderArmed();
+      await pumpFire(loadArmed().findIndex((x) => x.id === a.id));
+    } catch (e) {
+      pumpSetWatchStatus(a.id, 'probe failed: ' + (e?.message || String(e)));
+    }
+  };
+  pumpWatchers.set(a.id, setInterval(tick, PUMP_WATCH_MS));
+  pumpSetWatchStatus(a.id, 'watching\u2026 simulating every ' + (PUMP_WATCH_MS / 1000) + 's');
+  renderArmed();
+  tick();
 }
 
 /// Fire an armed preset. Nothing is uploaded here — only the launch.
