@@ -324,7 +324,7 @@ function createAtaIdempotentIx(payer, owner, mint, tokenProgram) {
 export async function buildPumpLaunch(opts) {
   const {
     connection, payer, mint, name, symbol, uri,
-    devBuySol = 0, slippageBps = 1000, priorityMicroLamports = 200000, computeUnits = 300000,
+    devBuySol = 0, slippageBps = 1000, priorityMicroLamports = 200000, computeUnits = 600000,
     global, quote = null, cashback = true,
   } = opts;
   const g = global ?? await pumpStatus(connection.rpcEndpoint);
@@ -673,8 +673,21 @@ export async function launchPump(opts) {
   if (sim.value.err) {
     const logs = sim.value.logs || [];
     const anchor = logs.find((l) => l.includes('Error Code')) || logs.slice(-3).join(' | ');
-    throw new Error(`pump.fun launch would fail: ${JSON.stringify(sim.value.err)} ${anchor}`);
+    const hint = JSON.stringify(sim.value.err).includes('ProgramFailedToComplete')
+      ? ' — that is the compute budget running out, not a bad instruction'
+      : '';
+    throw new Error(`pump.fun launch would fail: ${JSON.stringify(sim.value.err)} ${anchor}${hint}`);
   }
+
+  // Size the compute budget from what the dry run actually used rather than a
+  // guess. A Token-2022 paired launch with a dev buy measured 285k units, and a
+  // fixed 300k limit left so little headroom that a slightly heavier one died
+  // with ProgramFailedToComplete — the truncated-log signature of exhausting the
+  // budget rather than of a bad instruction. 35% headroom, floor 600k, and the
+  // 1.4M per-transaction ceiling.
+  const measured = Number(sim.value.unitsConsumed || 0);
+  const computeUnits = Math.min(1_400_000, Math.max(600_000, Math.ceil(measured * 1.35)));
+  say(`simulation used ${measured.toLocaleString()} CU — sending with ${computeUnits.toLocaleString()}`);
   if (simulateOnly) return { mint: mint.publicKey.toBase58(), sig: null, simulated: true };
 
   // Rebuild against a blockhash fetched NOW, so none of the work above eats into
@@ -684,7 +697,7 @@ export async function launchPump(opts) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const tx = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-    lookupTable, blockhash,
+    lookupTable, blockhash, computeUnits,
   });
   const raw = tx.serialize();
 
