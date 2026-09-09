@@ -125,18 +125,38 @@ export async function pumpStatus(rpcUrl) {
   return { ...g, whitelistedQuotes: quotes };
 }
 
-/// Mine a mint keypair whose address ends in `suffix` (pump.fun's convention is
-/// "pump"). Purely cosmetic — the launch works with any keypair — so it yields
-/// to the event loop and gives up rather than freezing the tab.
-export function minePumpMint(suffix = 'pump', maxTries = 250000, onProgress) {
+/// Mine a mint keypair whose address ends in `suffix`.
+///
+/// OFF by default, and it should stay off. base58 gives 58 characters per
+/// position, so the "pump" suffix every pump.fun mint carries costs 58^4 =
+/// 11.3 MILLION keypairs on average — about 48 minutes in this runtime, and
+/// longer in a browser tab where it also blocks the UI. pump.fun's own mints get
+/// that suffix from a backend grinder, not from the launch flow. It is cosmetic:
+/// the token, the curve and the trade all behave identically without it.
+///
+/// A 1-2 character suffix is free (58 / 3.4k tries), 3 is about a minute. Four
+/// is not worth waiting for, so `budgetMs` stops rather than hanging, and the
+/// caller falls back to a plain keypair.
+export function minePumpMint(suffix = '', budgetMs = 8000, onProgress) {
   const want = String(suffix || '');
   if (!want) return Keypair.generate();
-  for (let i = 0; i < maxTries; i++) {
+  const started = Date.now();
+  let tries = 0;
+  while (Date.now() - started < budgetMs) {
     const kp = Keypair.generate();
+    tries++;
     if (kp.publicKey.toBase58().endsWith(want)) return kp;
-    if (onProgress && i && i % 20000 === 0) onProgress(i);
+    if (onProgress && tries % 5000 === 0) onProgress(tries);
   }
   return null;
+}
+
+/// Roughly how long a suffix will take here, so the UI can warn instead of hanging.
+export function vanityCostEstimate(suffix, keysPerSec = 4000) {
+  const n = String(suffix || '').length;
+  if (!n) return { tries: 0, seconds: 0 };
+  const tries = Math.pow(58, n);
+  return { tries, seconds: tries / keysPerSec };
 }
 
 /// Tokens out for a given SOL in, on the constant-product curve pump seeds every
@@ -317,11 +337,15 @@ export async function buildPumpLaunch(opts) {
     }));
   }
 
-  const { blockhash } = await connection.getLatestBlockhash('finalized');
-  const lut = await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
+  // 'confirmed', not 'finalized': a finalized hash is ~32 slots (13s+) old the
+  // moment you get it, which throws away a third of the ~60s validity window and
+  // is a large part of why launches were dying on "block height exceeded".
+  const blockhash = opts.blockhash
+    ?? (await connection.getLatestBlockhash('confirmed')).blockhash;
+  const lut = opts.lookupTable ?? await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
   const msg = new TransactionMessage({
     payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: ixs,
-  }).compileToV0Message(lut.value ? [lut.value] : []);
+  }).compileToV0Message(lut?.value ? [lut.value] : []);
   const tx = new VersionedTransaction(msg);
   // dry runs build with only a pubkey for the payer, and simulate with
   // sigVerify off — real launches pass a Keypair and get a signed tx
@@ -333,7 +357,7 @@ export async function buildPumpLaunch(opts) {
 export async function launchPump(opts) {
   const {
     rpcUrl, secretKey, name, symbol, uri, devBuySol = 0,
-    vanitySuffix = 'pump', slippageBps = 1000, quoteMint, simulateOnly = false, onStatus,
+    vanitySuffix = '', slippageBps = 1000, quoteMint, simulateOnly = false, onStatus,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
@@ -366,15 +390,28 @@ export async function launchPump(opts) {
   }
 
   const payer = Keypair.fromSecretKey(bs58.decode(secretKey));
-  say(vanitySuffix ? `mining a …${vanitySuffix} mint address…` : 'generating the mint…');
-  const mint = vanitySuffix ? minePumpMint(vanitySuffix, 400000, (n) => say(`mining …${vanitySuffix}: ${n.toLocaleString()} tries`)) : Keypair.generate();
-  if (!mint) throw new Error(`could not mine a …${vanitySuffix} address — try again or clear the suffix`);
 
-  say('building launch tx…');
-  const tx = await buildPumpLaunch({ connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote });
+  let mint;
+  if (vanitySuffix) {
+    const est = vanityCostEstimate(vanitySuffix);
+    say(`mining a \u2026${vanitySuffix} mint (~${Math.round(est.seconds)}s expected)\u2026`);
+    mint = minePumpMint(vanitySuffix, 8000, (n) => say(`mining \u2026${vanitySuffix}: ${n.toLocaleString()} tries`));
+    if (!mint) {
+      say(`\u2026${vanitySuffix} needs ~${Math.round(est.tries).toLocaleString()} keypairs \u2014 skipping it so the launch is not held up`);
+      mint = Keypair.generate();
+    }
+  } else {
+    mint = Keypair.generate();
+  }
 
-  say('simulating…');
-  const sim = await connection.simulateTransaction(tx, { commitment: 'confirmed' });
+  // fetch the lookup table once and reuse it for both the dry run and the send
+  const lookupTable = await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
+
+  say('simulating\u2026');
+  const dry = await buildPumpLaunch({
+    connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, lookupTable,
+  });
+  const sim = await connection.simulateTransaction(dry, { commitment: 'confirmed' });
   if (sim.value.err) {
     const logs = sim.value.logs || [];
     const anchor = logs.find((l) => l.includes('Error Code')) || logs.slice(-3).join(' | ');
@@ -382,11 +419,43 @@ export async function launchPump(opts) {
   }
   if (simulateOnly) return { mint: mint.publicKey.toBase58(), sig: null, simulated: true };
 
-  say('sending launch tx…');
-  const sig = await connection.sendTransaction(tx, { maxRetries: 3, skipPreflight: false });
-  say(`confirming ${sig.slice(0, 12)}…`);
-  const bh = await connection.getLatestBlockhash('finalized');
-  const res = await connection.confirmTransaction({ signature: sig, ...bh }, 'confirmed');
-  if (res.value.err) throw new Error(`launch landed but failed: ${JSON.stringify(res.value.err)}`);
-  return { mint: mint.publicKey.toBase58(), sig };
+  // Rebuild against a blockhash fetched NOW, so none of the work above eats into
+  // the validity window, then keep rebroadcasting until it lands or the hash
+  // expires. sendRawTransaction alone gives up long before the window closes.
+  say('sending launch tx\u2026');
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  const tx = await buildPumpLaunch({
+    connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote,
+    lookupTable, blockhash,
+  });
+  const raw = tx.serialize();
+
+  const sig = await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 });
+  const started = Date.now();
+  let lastRebroadcast = 0;
+  for (;;) {
+    const st = await connection.getSignatureStatuses([sig]);
+    const v = st.value[0];
+    if (v) {
+      if (v.err) throw new Error(`launch landed but failed: ${JSON.stringify(v.err)} (${sig})`);
+      if (v.confirmationStatus === 'confirmed' || v.confirmationStatus === 'finalized') {
+        return { mint: mint.publicKey.toBase58(), sig };
+      }
+    }
+    const height = await connection.getBlockHeight('confirmed');
+    if (height > lastValidBlockHeight) {
+      throw new Error(
+        `launch expired before it landed (blockhash no longer valid). Nothing was spent. `
+        + `Try again, and raise the priority fee if the network is busy. Signature was ${sig}`,
+      );
+    }
+    // Solana drops unconfirmed txs from the mempool quickly; resending the same
+    // signed bytes is safe and is how a launch survives a congested slot
+    if (Date.now() - lastRebroadcast > 2000) {
+      await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => {});
+      lastRebroadcast = Date.now();
+      say(`waiting for confirmation\u2026 ${Math.round((Date.now() - started) / 1000)}s`);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
 }
