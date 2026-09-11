@@ -88,6 +88,7 @@ const IX = {
   buy_v2: Buffer.from('b817ee6167c5d33d', 'hex'),
   // exact QUOTE in, min tokens out - what live stock launches use
   buy_exact_quote_in_v2: Buffer.from('c2ab1c46684d5b2f', 'hex'),
+  sell_v2: Buffer.from('5df6823ce7e940b2', 'hex'),
 };
 
 const u64 = (v) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(v)); return b; };
@@ -744,6 +745,211 @@ export async function launchPump(opts) {
       await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => {});
       lastRebroadcast = Date.now();
       say(`waiting for confirmation\u2026 ${Math.round((Date.now() - started) / 1000)}s`);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Trading a pump.fun token
+//
+// Works for any quote the curve was opened against — SOL or one of the stock
+// mints — because the v2 trade instructions carry the quote explicitly. Two
+// cases:
+//
+//   still on the curve   trade the bonding curve directly, which is exact and
+//                        depends on nothing but pump's own program
+//   graduated            the curve is drained and liquidity lives in PumpSwap;
+//                        routed through Jupiter instead, which indexes it
+//
+// buy_exact_quote_in_v2 takes an exact amount of the quote in, which is how a
+// buy should read. sell_v2 takes an exact token amount in.
+// ---------------------------------------------------------------------------
+
+/// Read a bonding curve. Returns null if the mint was never launched on pump.
+export async function pumpCurve(connection, mintAddress) {
+  const mint = new PublicKey(mintAddress);
+  const curve = pda([Buffer.from('bonding-curve'), mint.toBuffer()]);
+  const info = await connection.getAccountInfo(curve);
+  if (!info) return null;
+  const d = info.data;
+  return {
+    address: curve,
+    mint,
+    virtualTokenReserves: d.readBigUInt64LE(8),
+    virtualQuoteReserves: d.readBigUInt64LE(16),
+    realTokenReserves: d.readBigUInt64LE(24),
+    realQuoteReserves: d.readBigUInt64LE(32),
+    tokenTotalSupply: d.readBigUInt64LE(40),
+    complete: d.readUInt8(48) !== 0,
+    creator: new PublicKey(d.subarray(49, 81)),
+    isCashbackCoin: d.readUInt8(82) !== 0,
+    quoteMint: d.length >= 115 ? new PublicKey(d.subarray(83, 115)) : NATIVE_QUOTE,
+  };
+}
+
+/// Constant product against the curve's live reserves, fee taken off the input.
+/// Quoting locally rather than round-tripping an RPC keeps the UI responsive;
+/// every trade is simulated before it is sent regardless.
+export function pumpCurveQuote(curve, global, amountIn, side) {
+  const feeBps = BigInt(global.feeBasisPoints ?? 0n) + BigInt(global.creatorFeeBasisPoints ?? 0n);
+  const vTok = curve.virtualTokenReserves;
+  const vQuote = curve.virtualQuoteReserves;
+  if (vTok <= 0n || vQuote <= 0n) return 0n;
+  if (side === 'buy') {
+    const net = amountIn - (amountIn * feeBps) / 10_000n;
+    const out = (vTok * net) / (vQuote + net);
+    return out > curve.realTokenReserves ? curve.realTokenReserves : out;
+  }
+  const gross = (vQuote * amountIn) / (vTok + amountIn);
+  return gross - (gross * feeBps) / 10_000n;
+}
+
+function tradeKeys({ curve, quote, user, feeRecipient, buybackFeeRecipient, includeGlobalVolume }) {
+  const qMint = quote ? quote.mint : WSOL;
+  const qProgram = quote ? quote.tokenProgram : TOKEN_PROGRAM;
+  const q = (owner) => ataOf(owner, qMint, qProgram);
+  const userVolume = pda([Buffer.from('user_volume_accumulator'), user.toBuffer()]);
+  const creatorVault = pda([Buffer.from('creator-vault'), curve.creator.toBuffer()]);
+  const keys = [
+    key(PUMP_GLOBAL),
+    key(curve.mint),
+    key(qMint),
+    key(TOKEN_2022),
+    key(qProgram),
+    key(ATA_PROGRAM),
+    key(feeRecipient, false, true),
+    key(q(feeRecipient), false, true),
+    key(buybackFeeRecipient, false, true),
+    key(q(buybackFeeRecipient), false, true),
+    key(curve.address, false, true),
+    key(ataOf(curve.address, curve.mint, TOKEN_2022), false, true),
+    key(q(curve.address), false, true),
+    key(user, true, true),
+    key(ataOf(user, curve.mint, TOKEN_2022), false, true),
+    key(q(user), false, true),
+    key(creatorVault, false, true),
+    key(q(creatorVault), false, true),
+    key(pda([Buffer.from('sharing-config'), curve.mint.toBuffer()], PUMP_FEE_PROGRAM)),
+  ];
+  // buy carries the global volume accumulator; sell does not
+  if (includeGlobalVolume) keys.push(key(PUMP_GLOBAL_VOLUME, false, true));
+  keys.push(
+    key(userVolume, false, true),
+    key(q(userVolume), false, true),
+    key(PUMP_FEE_CONFIG),
+    key(PUMP_FEE_PROGRAM),
+    key(SYS),
+    key(PUMP_EVENT_AUTHORITY),
+    key(PUMP_PROGRAM),
+    ...(quote?.hookAccounts ?? []),
+  );
+  return keys;
+}
+
+/// Buy or sell a pump.fun token that is still on its bonding curve.
+///
+/// `amountUi` is the quote spent on a buy, or the tokens sold on a sell.
+export async function pumpTrade(opts) {
+  const {
+    rpcUrl, secretKey, mint: mintAddress, side, amountUi,
+    slippageBps = 500, onStatus,
+  } = opts;
+  const say = (m) => onStatus && onStatus(m);
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const payer = Keypair.fromSecretKey(bs58.decode(secretKey));
+
+  const curve = await pumpCurve(connection, mintAddress);
+  if (!curve) throw new Error('no pump.fun bonding curve for that mint');
+  if (curve.complete) {
+    throw new Error(
+      'this token has graduated off the bonding curve — its liquidity is in PumpSwap now. '
+      + 'Trade it on the swap page, which routes through Jupiter.',
+    );
+  }
+
+  const g = await pumpStatus(rpcUrl);
+  const isNative = curve.quoteMint.toBase58() === NATIVE_QUOTE.toBase58();
+  const quote = isNative ? null : await resolveQuote(connection, curve.quoteMint.toBase58());
+  if (quote?.blockers?.length) throw new Error(quote.blockers.join('; '));
+
+  const baseDecimals = 6;
+  const rawIn = side === 'buy'
+    ? (isNative ? BigInt(Math.floor(Number(amountUi) * 1e9)) : quoteUiToRaw(amountUi, quote))
+    : BigInt(Math.floor(Number(amountUi) * 10 ** baseDecimals));
+  if (rawIn <= 0n) throw new Error('amount must be greater than zero');
+
+  const expected = pumpCurveQuote(curve, g, rawIn, side);
+  const minOut = expected - (expected * BigInt(slippageBps)) / 10_000n;
+
+  const zero = NATIVE_QUOTE.toBase58();
+  const pick = (list, fallback) => {
+    const live = (list || []).filter((r) => r.toBase58() !== zero);
+    return live.length ? live[Math.floor(Math.random() * live.length)] : fallback;
+  };
+  const feeRecipient = pick(g.feeRecipients, g.feeRecipient);
+  const buybackFeeRecipient = pick(g.buybackFeeRecipients, feeRecipient);
+
+  const ixs = [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 400000 }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200000 }),
+    createAtaIdempotentIx(payer.publicKey, payer.publicKey, curve.mint, TOKEN_2022),
+    createAtaIdempotentIx(
+      payer.publicKey, payer.publicKey,
+      quote ? quote.mint : WSOL, quote ? quote.tokenProgram : TOKEN_PROGRAM,
+    ),
+    new TransactionInstruction({
+      programId: PUMP_PROGRAM,
+      data: side === 'buy'
+        ? Buffer.concat([IX.buy_exact_quote_in_v2, u64(rawIn), u64(minOut)])
+        : Buffer.concat([IX.sell_v2, u64(rawIn), u64(minOut)]),
+      keys: tradeKeys({
+        curve, quote, user: payer.publicKey, feeRecipient, buybackFeeRecipient,
+        includeGlobalVolume: side === 'buy',
+      }),
+    }),
+  ];
+
+  const lut = await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
+  const build = (blockhash) => {
+    const msg = new TransactionMessage({
+      payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: ixs,
+    }).compileToV0Message(lut?.value ? [lut.value] : []);
+    const tx = new VersionedTransaction(msg);
+    tx.sign([payer]);
+    return tx;
+  };
+
+  say('simulating…');
+  const probe = build((await connection.getLatestBlockhash('confirmed')).blockhash);
+  const sim = await connection.simulateTransaction(probe, { commitment: 'confirmed' });
+  if (sim.value.err) {
+    const logs = sim.value.logs || [];
+    const anchor = logs.find((l) => l.includes('Error Code')) || logs.slice(-3).join(' | ');
+    throw new Error(`${side} would fail: ${JSON.stringify(sim.value.err)} ${anchor}`);
+  }
+
+  say('sending…');
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  const raw = build(blockhash).serialize();
+  const sig = await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 });
+  let last = 0;
+  for (;;) {
+    const st = await connection.getSignatureStatuses([sig]);
+    const v = st.value[0];
+    if (v) {
+      if (v.err) throw new Error(`${side} landed but failed: ${JSON.stringify(v.err)}`);
+      if (v.confirmationStatus === 'confirmed' || v.confirmationStatus === 'finalized') {
+        return { sig, expectedOut: expected.toString(), quoteMint: curve.quoteMint.toBase58() };
+      }
+    }
+    if (await connection.getBlockHeight('confirmed') > lastValidBlockHeight) {
+      throw new Error(`${side} expired before landing — nothing was spent (${sig})`);
+    }
+    if (Date.now() - last > 2000) {
+      await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => {});
+      last = Date.now();
+      say('waiting for confirmation…');
     }
     await new Promise((r) => setTimeout(r, 500));
   }

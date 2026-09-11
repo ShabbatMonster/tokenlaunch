@@ -35,6 +35,7 @@ import {
 } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import {
   Raydium, TxVersion, LAUNCHPAD_PROGRAM, getPdaLaunchpadConfigId, LaunchpadConfig,
+  getPdaLaunchpadPoolId, LaunchpadPool,
   CLMM_PROGRAM_ID, TickUtil,
 } from '@raydium-io/raydium-sdk-v2';
 
@@ -554,6 +555,8 @@ export const RAYDIUM_QUOTES = {
 // pump.fun lives in its own file; re-exported here so main.js keeps one
 // lazy import for everything Solana.
 export { launchPump, pumpProbe, pumpStatus, pumpTokensForSol, pumpQuoteRegistry, inspectMint, quoteUiToRaw, PUMP_LOOKUP_TABLE, PUMP_QUOTE_REGISTRY } from './pump.js';
+export { pumpTrade, pumpCurve, pumpCurveQuote } from './pump.js';
+import { pumpTrade, pumpCurve } from './pump.js';
 
 export const RAYDIUM_PLATFORM_ID = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
 export const BONK_PLATFORM_ID = 'FfYek5vEz23cMkWsdJwG2oa6EphsvXSHrGpdALN4g6W1';
@@ -662,6 +665,16 @@ async function confirmSignaturesHttp(connection, sigs, { timeoutMs = 45000, inte
   if (pending.size) throw new Error(`no confirmation after ${Math.round(timeoutMs / 1000)}s for: ${[...pending].join(', ')} — it may still land, check Solscan`);
 }
 
+// Raydium's own confirm-wait can reject with a bare `undefined` — no Error, no
+// message, no logs — so every throw from the SDK is normalised here before it
+// reaches a caller. Shared by the launch and trade paths.
+function asErrorShared(e, fallback) {
+  if (e instanceof Error && e.message) return e;
+  const logs = e?.logs || e?.transactionLogs;
+  const msg = e?.message || e?.error?.message || (Array.isArray(logs) ? logs.join('\n') : '') || fallback;
+  return new Error(msg);
+}
+
 export async function launchRaydium(opts) {
   const {
     rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId,
@@ -713,7 +726,8 @@ export async function launchRaydium(opts) {
   // Raydium's own confirm-wait can reject with a bare `undefined` (no Error, no
   // message) on timeout or on-chain failure — normalize everything here so the
   // caller always gets a real, readable Error instead of silently losing it.
-  const asError = (e, fallback) => {
+  const asError = asErrorShared;
+  const _unusedAsError = (e, fallback) => {
     if (e instanceof Error && e.message) return e;
     const logs = e?.logs || e?.transactionLogs;
     const msg = e?.message || e?.error?.message || (Array.isArray(logs) ? logs.join('\n') : '') || fallback;
@@ -1024,4 +1038,205 @@ export async function solTokenMetadata(mint, rpcUrl) {
   };
   const name = readStr(), symbol = readStr(), uri = readStr();
   return { name, symbol, uri };
+}
+
+// ---------------------------------------------------------------------------
+// Trading a Raydium LaunchLab token (StonkFun, bonk.fun, raydium.io — one
+// program, one set of configs, so one code path).
+//
+// The pool records its own quote mint, so a stock-paired StonkFun launch trades
+// against that stock exactly as a SOL-paired one trades against SOL: the amount
+// you hand in is denominated in whatever the pool was opened with.
+//
+// Every trade is simulated before it is sent, and confirmation is polled over
+// HTTP rather than left to the SDK's websocket wait — that wait rejects with a
+// bare `undefined` on timeout, which is how a working trade ends up looking
+// like an unexplained failure.
+// ---------------------------------------------------------------------------
+
+/// Find a LaunchLab pool for `mint`, trying every quote that has a config.
+export async function findLaunchpadPool(connection, mintAddress) {
+  const mint = new PublicKey(mintAddress);
+  const configs = await listLaunchpadConfigs(connection.rpcEndpoint);
+  const pdas = configs.map((c) => ({
+    quote: c.mint,
+    decimals: c.decimals,
+    pda: getPdaLaunchpadPoolId(LAUNCHPAD_PROGRAM, mint, new PublicKey(c.mint)).publicKey,
+  }));
+  for (let i = 0; i < pdas.length; i += 100) {
+    const chunk = pdas.slice(i, i + 100);
+    const infos = await connection.getMultipleAccountsInfo(chunk.map((x) => x.pda));
+    for (let k = 0; k < infos.length; k++) {
+      if (!infos[k]) continue;
+      const pool = LaunchpadPool.decode(infos[k].data);
+      return {
+        poolId: chunk[k].pda,
+        quoteMint: chunk[k].quote,
+        quoteDecimals: chunk[k].decimals,
+        poolInfo: pool,
+        complete: pool.status !== 0,
+      };
+    }
+  }
+  return null;
+}
+
+/// Buy or sell a LaunchLab token. `amountUi` is the quote spent on a buy, or the
+/// tokens sold on a sell.
+export async function launchpadTrade(opts) {
+  const {
+    rpcUrl, secretKey, mint: mintAddress, side, amountUi,
+    slippageBps = 500, onStatus,
+  } = opts;
+  const say = (m) => onStatus && onStatus(m);
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const owner = keypairFromSecret(secretKey);
+
+  say('locating the pool…');
+  const found = await findLaunchpadPool(connection, mintAddress);
+  if (!found) throw new Error('no LaunchLab pool for that mint against any configured quote');
+  if (found.complete) {
+    throw new Error(
+      'this LaunchLab token has already migrated off its curve — trade it on the AMM it graduated to '
+      + '(the swap page routes there via Jupiter).',
+    );
+  }
+
+  const raydium = await Raydium.load({
+    connection, owner, cluster: 'mainnet',
+    disableFeatureCheck: true, disableLoadToken: true, blockhashCommitment: 'confirmed',
+  });
+
+  const mintA = new PublicKey(mintAddress);
+  const baseDecimals = found.poolInfo.mintDecimalsA ?? 6;
+  const amount = side === 'buy'
+    ? toRawUnits(amountUi, found.quoteDecimals)
+    : toRawUnits(amountUi, baseDecimals);
+  if (amount.lten(0)) throw new Error('amount must be greater than zero');
+
+  const common = {
+    programId: LAUNCHPAD_PROGRAM,
+    mintA,
+    mintB: new PublicKey(found.quoteMint),
+    poolInfo: found.poolInfo,
+    slippage: new BN(slippageBps),
+    txVersion: TxVersion.V0,
+    computeBudgetConfig: { units: 400000, microLamports: 200000 },
+  };
+
+  say('building trade…');
+  let built;
+  try {
+    built = side === 'buy'
+      ? await raydium.launchpad.buyToken({ ...common, buyAmount: amount })
+      : await raydium.launchpad.sellToken({ ...common, sellAmount: amount });
+  } catch (e) {
+    throw asError(e, `failed to build the ${side}`);
+  }
+
+  const tx = built.transaction ?? built.transactions?.[0];
+  if (tx) {
+    say('simulating…');
+    const sim = await connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
+    if (sim.value.err) {
+      const logs = sim.value.logs || [];
+      const anchor = logs.find((l) => l.includes('Error Code')) || logs.slice(-3).join(' | ');
+      throw new Error(`${side} would fail: ${JSON.stringify(sim.value.err)} ${anchor}`);
+    }
+  }
+
+  say(`sending ${side}…`);
+  let sent;
+  try {
+    sent = await built.execute({ sequentially: false });
+  } catch (e) {
+    throw asError(e, `${side} failed to send`);
+  }
+  const sigs = Array.isArray(sent?.txIds) ? sent.txIds : (sent?.txId ? [sent.txId] : []);
+  if (sigs.length) {
+    say('confirming…');
+    await confirmSignaturesHttp(connection, sigs);
+  }
+  return { sig: sigs[0] ?? null, quoteMint: found.quoteMint, poolId: found.poolId.toBase58() };
+}
+
+// ---------------------------------------------------------------------------
+// One entry point for trading any Solana token this launcher can create.
+//
+// Four venues, detected from the chain rather than from what the user says:
+//
+//   pump      a pump.fun bonding curve, any quote including the stock mints
+//   launchlab a Raydium LaunchLab curve — StonkFun, bonk.fun and raydium.io all
+//             run the same program, so one path covers them
+//   dbc       a Meteora dynamic bonding curve
+//   jupiter   anything that has graduated; its liquidity is in an AMM now, and
+//             Jupiter indexes those
+//
+// Detection runs the three curve lookups in parallel and takes whichever
+// answers. A graduated curve is still a match — it just routes to Jupiter.
+// ---------------------------------------------------------------------------
+export async function findSolanaVenue(rpcUrl, mintAddress) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const [pump, lab, dbc] = await Promise.all([
+    pumpCurve(connection, mintAddress).catch(() => null),
+    findLaunchpadPool(connection, mintAddress).catch(() => null),
+    (async () => {
+      try {
+        const client = new DynamicBondingCurveClient(connection, 'confirmed');
+        const info = await resolvePool(client, connection, mintAddress);
+        return info.isMigrated ? null : info;
+      } catch { return null; }
+    })(),
+  ]);
+
+  if (pump && !pump.complete) {
+    return { venue: 'pump', graduated: false, quoteMint: pump.quoteMint.toBase58(), curve: pump };
+  }
+  if (lab && !lab.complete) {
+    return { venue: 'launchlab', graduated: false, quoteMint: lab.quoteMint, pool: lab };
+  }
+  if (dbc) {
+    return { venue: 'dbc', graduated: false, quoteMint: dbc.quoteMint?.toBase58?.() ?? null, pool: dbc };
+  }
+  if (pump?.complete || lab?.complete) {
+    return {
+      venue: 'jupiter', graduated: true,
+      quoteMint: (pump?.complete ? pump.quoteMint.toBase58() : lab.quoteMint),
+      was: pump?.complete ? 'pump.fun' : 'LaunchLab',
+    };
+  }
+  return { venue: 'jupiter', graduated: null, quoteMint: null };
+}
+
+/// Trade a Solana token on whichever venue actually holds it.
+///
+/// `amountUi` is the quote spent on a buy, or the tokens sold on a sell — both
+/// in the venue's own quote, which for a stock-paired launch means the stock.
+export async function solanaTrade(opts) {
+  const { rpcUrl, secretKey, mint, side, amountUi, slippageBps = 500, onStatus } = opts;
+  const say = (m) => onStatus && onStatus(m);
+  say('finding the venue…');
+  const found = await findSolanaVenue(rpcUrl, mint);
+
+  if (found.venue === 'pump') {
+    say('pump.fun bonding curve');
+    return { ...found, ...await pumpTrade({ rpcUrl, secretKey, mint, side, amountUi, slippageBps, onStatus }) };
+  }
+  if (found.venue === 'launchlab') {
+    say('Raydium LaunchLab curve');
+    return { ...found, ...await launchpadTrade({ rpcUrl, secretKey, mint, side, amountUi, slippageBps, onStatus }) };
+  }
+  if (found.venue === 'dbc') {
+    say('Meteora dynamic bonding curve');
+    const res = side === 'buy'
+      ? await routerBuy({ rpcUrl, secretKey, tokenMint: mint, uiSol: amountUi, slippageBps, onStatus })
+      : await routerSell({ rpcUrl, secretKey, tokenMint: mint, uiTokens: amountUi, slippageBps, onStatus });
+    return { ...found, ...res };
+  }
+  throw new Error(
+    found.graduated
+      ? `this token graduated off its ${found.was} curve — its liquidity is in an AMM now. `
+        + 'Route it through Jupiter rather than the curve.'
+      : 'no pump.fun, LaunchLab or Meteora curve found for that mint',
+  );
 }

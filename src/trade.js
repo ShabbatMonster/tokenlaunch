@@ -142,15 +142,20 @@ async function go() {
   const say = (m) => { st.innerHTML = esc(m); };
   try {
     const mod = await loadRouter();
-    const opts = { rpcUrl: SOL_RPC, secretKey: solSecret, tokenMint: mint, slippageBps: slippageBps(), onStatus: say };
-    const res = side === 'buy'
-      ? await mod.routerBuy({ ...opts, uiSol: amt })
-      : await mod.routerSell({ ...opts, uiTokens: amt });
+    // one router, four venues — pump.fun and LaunchLab curves trade in their own
+    // quote (a stock, for a stock-paired launch), Meteora routes through Jupiter
+    const res = await mod.solanaTrade({
+      rpcUrl: SOL_RPC, secretKey: solSecret, mint, side, amountUi: amt,
+      slippageBps: slippageBps(), onStatus: say,
+    });
 
     const link = (sig, label) => `<a href="https://solscan.io/tx/${esc(sig)}" target="_blank" rel="noopener">${label}</a>`;
-    st.innerHTML = side === 'buy'
-      ? `<span class="ok">BOUGHT ✓</span> ≈ <b>${fmt(res.tokensOut, res.baseDecimals)}</b> tokens<br>${link(res.jupSig, 'leg 1 (Jupiter)')} · ${link(res.dbcSig, 'leg 2 (DBC)')}`
-      : `<span class="ok">SOLD ✓</span> ≈ <b>${fmt(res.solOut, 9)}</b> SOL<br>${link(res.dbcSig, 'leg 1 (DBC)')} · ${link(res.jupSig, 'leg 2 (Jupiter)')}`;
+    const venue = { pump: 'pump.fun curve', launchlab: 'LaunchLab curve', dbc: 'Meteora DBC' }[res.venue] || res.venue;
+    const legs = res.jupSig && res.dbcSig
+      ? `${link(res.jupSig, 'Jupiter leg')} · ${link(res.dbcSig, 'curve leg')}`
+      : (res.sig ? link(res.sig, 'tx on solscan') : '');
+    st.innerHTML = `<span class="ok">${side === 'buy' ? 'BOUGHT' : 'SOLD'} ✓</span> `
+      + `<span class="hint">via ${esc(venue)}</span><br>${legs}`;
     refreshSolBalance();
   } catch (e) {
     st.innerHTML = `<span class="err">${esc(e.message)}</span>`;
