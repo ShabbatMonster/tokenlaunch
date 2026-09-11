@@ -352,6 +352,74 @@ async function jupiterQuote(inputMint, outputMint, amount, slippageBps) {
   return q;
 }
 
+// ---------------------------------------------------------------------------
+// pump.fun's curve economics, ported to a DBC launch against any quote.
+//
+// pump seeds every launch with 30 virtual SOL against 1.073B virtual tokens,
+// sells 793.1M of a 1B supply on the curve, and migrates once ~85 real SOL is
+// in. Those numbers are self-consistent: 30 * 1.073B / (1.073B - 793.1M) - 30
+// = 85.005 SOL raised, leaving 20.69% of supply for the pool.
+//
+// DBC derives the curve from (total supply, % supply on migration, migration
+// threshold) rather than taking virtual reserves directly, so the same shape
+// comes out of pct = 20.69 with a threshold of 85 — checked against the SDK, the
+// resulting start price implies a virtual quote of exactly 30.000.
+//
+// For a non-SOL quote those two figures have to be priced. Jupiter gives the
+// live rate, so "30 SOL equivalent" means what it says on the day rather than a
+// number that rots in a config.
+export const PUMP_CURVE = {
+  startSolEquivalent: 30,
+  migrateSolEquivalent: 85,
+  pctSupplyOnMigration: 20.69,
+  totalSupply: 1_000_000_000,
+};
+
+/// How many whole `quoteMint` tokens are worth `solAmount` SOL right now.
+export async function solEquivalent(quoteMint, solAmount) {
+  if (quoteMint === SOL_MINT) return solAmount;
+  const lamports = Math.round(solAmount * 1e9);
+  const q = await jupiterQuote(SOL_MINT, quoteMint, lamports, 100);
+  const decimals = q.outputMintDecimals
+    ?? q.routePlan?.[q.routePlan.length - 1]?.swapInfo?.outputMintDecimals;
+  if (decimals == null) {
+    // fall back to reading the mint when Jupiter does not report decimals
+    throw new Error('could not determine the quote mint decimals from Jupiter');
+  }
+  return Number(q.outAmount) / 10 ** decimals;
+}
+
+/// pump.fun-shaped curve parameters for a given quote, priced live.
+export async function pumpEconomics(rpcUrl, quoteMint) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const { decimals } = await readQuoteMint(connection, new PublicKey(quoteMint));
+  let migrationThreshold;
+  let startEquivalent;
+  if (quoteMint === SOL_MINT) {
+    migrationThreshold = PUMP_CURVE.migrateSolEquivalent;
+    startEquivalent = PUMP_CURVE.startSolEquivalent;
+  } else {
+    const lamports = Math.round(PUMP_CURVE.migrateSolEquivalent * 1e9);
+    const q = await jupiterQuote(SOL_MINT, quoteMint, lamports, 100);
+    migrationThreshold = Number(q.outAmount) / 10 ** decimals;
+    startEquivalent = migrationThreshold * (PUMP_CURVE.startSolEquivalent / PUMP_CURVE.migrateSolEquivalent);
+  }
+  // keep a sane number of significant figures rather than a long float
+  const round = (v) => {
+    if (!(v > 0)) return v;
+    const mag = Math.floor(Math.log10(v));
+    const places = Math.max(0, 5 - mag);
+    return +v.toFixed(places);
+  };
+  return {
+    totalSupply: PUMP_CURVE.totalSupply,
+    pctSupplyOnMigration: PUMP_CURVE.pctSupplyOnMigration,
+    migrationThreshold: round(migrationThreshold),
+    startEquivalent: round(startEquivalent),
+    quoteDecimals: decimals,
+  };
+}
+
 async function jupiterSwap(connection, owner, quoteResponse, onStatus) {
   const res = await (await fetch(`${JUP}/swap`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

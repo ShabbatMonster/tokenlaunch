@@ -2370,6 +2370,33 @@ function solQuoteMint(pad) {
   return SOL_QUOTES[sel].mint;
 }
 
+/// Fill the curve fields with pump.fun's economics, priced against the selected
+/// quote: it opens at the 30-SOL equivalent and migrates at the 85-SOL one.
+///
+/// Those are not two independent knobs. DBC derives the curve from supply, the
+/// share kept for migration, and the threshold — so setting 20.69% and the
+/// 85-equivalent puts the start exactly at the 30-equivalent, which is how
+/// pump's own numbers relate. Priced live through Jupiter, so a stock or memecoin
+/// quote gets today's rate rather than a stale constant.
+async function applyPumpEconomics(pad) {
+  const hint = $('solQuoteHint');
+  try {
+    const quoteMint = solQuoteMint(pad);
+    hint.textContent = 'pricing pump.fun economics against this quote\u2026';
+    const { pumpEconomics } = await import('./solana.js');
+    const e = await pumpEconomics(pad.rpc, quoteMint);
+    $('solSupply').value = String(e.totalSupply);
+    $('solMigPct').value = String(e.pctSupplyOnMigration);
+    $('solMigThreshold').value = String(e.migrationThreshold);
+    const sym = SOL_QUOTES[pad.quoteSel]?.symbol || 'quote';
+    hint.innerHTML = `<span class="ok">pump.fun economics</span> \u00b7 opens at ~`
+      + `${e.startEquivalent.toLocaleString()} ${esc(sym)} (30 SOL equivalent), migrates at `
+      + `${e.migrationThreshold.toLocaleString()} ${esc(sym)} (85 SOL equivalent)`;
+  } catch (err) {
+    hint.innerHTML = `<span class="err">${esc(err?.message || String(err))}</span>`;
+  }
+}
+
 function solParamsFromUI(pad) {
   const num = (id, name) => {
     const v = +($(id).value.trim().replace(/,/g, ''));
@@ -2382,7 +2409,7 @@ function solParamsFromUI(pad) {
   let migrationThreshold = +migRaw;
   if (!migRaw) {
     const def = SOL_QUOTES[pad.quoteSel]?.defaultThreshold;
-    if (!def) throw new Error('set a migration threshold (in quote tokens)');
+    if (!def) throw new Error('set a migration threshold, or hit PUMP ECONOMICS to price it');
     migrationThreshold = def;
   }
   if (!(migrationThreshold > 0)) throw new Error('migration threshold must be positive');
@@ -4486,6 +4513,7 @@ function init() {
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
   $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });
   $('pumpArmBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpArm(activePad); });
+  $('solPumpEconBtn').addEventListener('click', () => { if (activePad.family === 'meteora') applyPumpEconomics(activePad); });
   $('clmmQuoteSelect').addEventListener('change', () => { if (activePad.family === 'clmm') updateClmmUI(activePad); });
   $('ponsQuoteSelect').addEventListener('change', () => { if (activePad.family === 'pons-v2') updatePonsUI(activePad); });
   $('v4curveQuoteSelect').addEventListener('change', () => { if (activePad.family === 'v4curve') updateV4CurveUI(activePad); });
