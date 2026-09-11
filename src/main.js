@@ -2420,7 +2420,8 @@ function renderArmed() {
       + '<div class="row" style="align-items:center;gap:8px">'
       + '<div style="flex:1"><b>' + esc(a.symbol) + '</b> \u00b7 ' + esc(a.name)
       + ' <span class="hint">\u2192 ' + pair + (a.devBuy && +a.devBuy > 0 ? ' \u00b7 dev ' + esc(a.devBuy) : '')
-      + (a.cashback !== false ? ' \u00b7 cashback' : '') + '</span></div>'
+      + (a.cashback !== false ? ' \u00b7 cashback' : '')
+      + (a.feesToHolders ? ' \u00b7 fees\u2192holders' : '') + '</span></div>'
       + '<button class="btn ' + (on ? 'sell' : 'secondary') + '" data-watch="' + i + '" style="margin-top:0;flex:0 0 100px;padding:7px">'
       + (on ? 'STOP' : 'WATCH') + '</button>'
       + '<button class="btn" data-fire="' + i + '" style="margin-top:0;flex:0 0 80px;padding:7px">FIRE</button>'
@@ -2467,6 +2468,7 @@ async function pumpArm(pad) {
       name, symbol, uri: IPFS_GW(metaHash),
       devBuy: $('pumpDevBuy').value.trim() || '0',
       cashback: $('pumpCashback').checked,
+      feesToHolders: $('pumpFeesToHolders').checked,
       quoteMint,
       quoteLabel: custom ? (custom.slice(0, 6) + '\u2026') : (sel.value ? (sel.options[sel.selectedIndex]?.text || '') : 'SOL'),
     });
@@ -2529,6 +2531,7 @@ function pumpToggleWatch(index) {
         rpcUrl: pad.rpc, payerPubkey: solPubkeyFromSecret(solKeyB58),
         name: a.name, symbol: a.symbol, uri: a.uri,
         devBuySol: a.devBuy, cashback: a.cashback !== false,
+        feesToHolders: !!a.feesToHolders,
         quoteMint: a.quoteMint || undefined,
       });
       const at = new Date().toLocaleTimeString();
@@ -2562,6 +2565,7 @@ async function pumpFire(index) {
       rpcUrl: pad.rpc, secretKey: solKeyB58,
       name: a.name, symbol: a.symbol, uri: a.uri,
       devBuySol: a.devBuy, cashback: a.cashback !== false,
+      feesToHolders: !!a.feesToHolders,
       quoteMint: a.quoteMint || undefined,
       onStatus: (m) => setStatus(m),
     });
@@ -2657,6 +2661,7 @@ async function launchSol(pad, inp) {
       rpcUrl: pad.rpc, secretKey: solKeyB58,
       name: inp.name, symbol: inp.symbol, uri, devBuySol,
       cashback: $('pumpCashback').checked,
+      feesToHolders: $('pumpFeesToHolders').checked,
       quoteMint: pumpQuoteMint() || undefined,
       onStatus: (m) => setStatus(m),
     });

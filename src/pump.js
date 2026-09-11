@@ -202,7 +202,19 @@ export function pumpTokensForSol(global, solLamports, quote = null) {
 // them, which is why this looked impossible until a real USDC launch was decoded
 // (tx 29trp9sX…, create_v2 with 19 accounts). Pass nothing extra and you get a
 // native-SOL curve, exactly as before.
-function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, cashback = true, quote = null }) {
+// Fees to holders instead of the creator is an ELEVENTH trailing byte on
+// create_v2, set to 1. Everything else about the two launches is identical —
+// same 20 accounts, byte-identical bonding curves afterwards — the only
+// difference on chain is that one extra byte:
+//
+//   fees to creator   00 00 [u64 0]        10 trailing bytes
+//   fees to holders   00 00 [u64 0] 01     11 trailing bytes
+//
+// It is not in the IDL, which has not been republished since May and predates
+// both this and the quote registry. Simulating both shapes shows the flagged one
+// costing ~1,500 more compute units, so the program reads it and acts on it
+// rather than ignoring a stray byte.
+function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, cashback = true, quote = null, feesToHolders = false }) {
   const solVault = pda([Buffer.from('sol-vault')], PUMP_MAYHEM_PROGRAM);
   const mayhemState = pda([Buffer.from('mayhem-state'), mint.toBuffer()], PUMP_MAYHEM_PROGRAM);
   const bondingCurve = pda([Buffer.from('bonding-curve'), mint.toBuffer()]);
@@ -210,6 +222,7 @@ function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, 
   const data = Buffer.concat([
     IX.create_v2, str(name), str(symbol), str(uri), creator.toBuffer(),
     Buffer.from([isMayhem ? 1 : 0]), Buffer.from([cashback ? 1 : 0]), u64(0),
+    ...(feesToHolders ? [Buffer.from([1])] : []),
   ]);
   return new TransactionInstruction({
     programId: PUMP_PROGRAM,
@@ -325,7 +338,7 @@ export async function buildPumpLaunch(opts) {
   const {
     connection, payer, mint, name, symbol, uri,
     devBuySol = 0, slippageBps = 1000, priorityMicroLamports = 200000, computeUnits = 600000,
-    global, quote = null, cashback = true,
+    global, quote = null, cashback = true, feesToHolders = false,
   } = opts;
   const g = global ?? await pumpStatus(connection.rpcEndpoint);
   const ixs = [
@@ -333,7 +346,7 @@ export async function buildPumpLaunch(opts) {
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityMicroLamports }),
     createV2Ix({
       mint: mint.publicKey, user: payer.publicKey, name, symbol, uri,
-      creator: payer.publicKey, quote, cashback,
+      creator: payer.publicKey, quote, cashback, feesToHolders,
     }),
   ];
 
@@ -597,7 +610,10 @@ export function quoteUiToRaw(uiAmount, quote) {
 /// comes back ready the same inputs can be fired for real. Never throws for
 /// "not yet" — that is a normal answer, not an error.
 export async function pumpProbe(opts) {
-  const { rpcUrl, payerPubkey, name, symbol, uri, devBuySol = 0, slippageBps = 1000, quoteMint, cashback = true } = opts;
+  const {
+    rpcUrl, payerPubkey, name, symbol, uri, devBuySol = 0, slippageBps = 1000,
+    quoteMint, cashback = true, feesToHolders = false,
+  } = opts;
   const connection = new Connection(rpcUrl, 'confirmed');
   try {
     const g = await pumpStatus(rpcUrl);
@@ -609,7 +625,7 @@ export async function pumpProbe(opts) {
       connection,
       payer: { publicKey: new PublicKey(payerPubkey) },
       mint: Keypair.generate(),
-      name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
+      name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback, feesToHolders,
     });
     if (quote?.blockers?.length) {
       return { ready: false, whitelisted, reason: quote.blockers.join('; '), blockers: quote.blockers };
@@ -644,7 +660,8 @@ export async function pumpProbe(opts) {
 export async function launchPump(opts) {
   const {
     rpcUrl, secretKey, name, symbol, uri, devBuySol = 0,
-    slippageBps = 1000, quoteMint, cashback = true, simulateOnly = false, onStatus,
+    slippageBps = 1000, quoteMint, cashback = true, feesToHolders = false,
+    simulateOnly = false, onStatus,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
@@ -667,7 +684,8 @@ export async function launchPump(opts) {
 
   say('simulating\u2026');
   const dry = await buildPumpLaunch({
-    connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback, lookupTable,
+    connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
+    feesToHolders, lookupTable,
   });
   const sim = await connection.simulateTransaction(dry, { commitment: 'confirmed' });
   if (sim.value.err) {
@@ -697,7 +715,7 @@ export async function launchPump(opts) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const tx = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-    lookupTable, blockhash, computeUnits,
+    feesToHolders, lookupTable, blockhash, computeUnits,
   });
   const raw = tx.serialize();
 
