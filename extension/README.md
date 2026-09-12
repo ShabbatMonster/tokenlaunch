@@ -39,7 +39,39 @@ j7's field until the launch is done, so clicking the button can't quietly
 restore the old size.
 
 Press **⇱** on the bar to move the button somewhere else, then click where it
-should sit.
+should sit. The bar itself you drag by its header — it remembers where you put
+it and stays on screen if the window changes size.
+
+## Which pad it thinks is selected
+
+This is the one that must not guess, because a wrong answer launches on the
+wrong chain. It used to fall through to the first pad in the DOM — Pump — when
+it could not tell, so a Robinhood-chain coin could have gone to pump.fun.
+
+Now it compares every pad chip's computed style against the others and takes the
+odd one out, after first honouring any explicit `aria-pressed` / `data-state` /
+`active` class. If nothing distinguishes them it says so and **refuses to
+launch** rather than picking one. Type the pad into the bar to override, and
+whatever you type sticks until the launch is done.
+
+## Why a launch used to take ten seconds
+
+Not the transaction — the setup before it. Three reads that have nothing to do
+with your coin (pump's global config, the quote, the address lookup table) plus
+pinning the metadata, all on the critical path after you clicked.
+
+- **the setup is pre-read** while you fill the panel in and handed to the
+  launch, so a warm launch starts at its simulation.
+- **the metadata is pinned early** too (the slowest single step). Turn this off
+  in options if you would rather nothing is uploaded until you fire.
+- **a throttled RPC is abandoned, not waited out.** This was the real cost: a
+  rate-limited Helius key answers `429` and web3.js retries *the same host* with
+  a 500ms, 1000ms, 2000ms backoff. The worker now probes and moves to the next
+  endpoint instead — 91ms to skip a dead host and pick a live one.
+
+Firing the three reads off together was the obvious fix and measured *worse* —
+158ms against 72ms on one key — because the provider throttles concurrent
+requests per key. They stay sequential.
 
 ## Where the key lives
 

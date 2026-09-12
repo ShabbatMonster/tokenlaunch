@@ -71,11 +71,17 @@
 
     <div class="check"><input type="checkbox" id="armed"><span>Armed — show the bar on j7tracker.io</span></div>
     <div class="check"><input type="checkbox" id="autoFire"><span>Fire automatically when j7 fails (otherwise it waits for a click)</span></div>
+    <div class="check"><input type="checkbox" id="prePin"><span>Pre-pin metadata and pre-read pump's config while you fill the panel in (much faster launches)</span></div>
     <div class="check"><input type="checkbox" id="cashback"><span>Cashback coins by default</span></div>
     <div class="check"><input type="checkbox" id="feesToHolders"><span>Fees to holders by default</span></div>
 
     <button class="btn" id="save">SAVE</button>
     <div class="status" id="saved"></div>
+    <p class="note">Pre-pinning uploads the name, ticker and image to pump.fun's IPFS pinner before
+    you launch, which is the single slowest step and the reason a launch used to take about ten
+    seconds. It publishes nothing discoverable &mdash; the metadata sits behind a content hash nobody
+    can guess &mdash; but it does leave the file there whether or not you go through with the launch.
+    Turn it off if you would rather nothing is uploaded until you fire.</p>
     <p class="note">Auto-fire spends money without asking. It is off by default on purpose: the panel
     reader is heuristic, and you should see what it mirrored at least once before letting it launch
     on its own.</p>

@@ -10,11 +10,11 @@
 // ---------------------------------------------------------------------------
 
 import {
-  launchPump, pumpStatus, launchRaydium, solAddressFromSecret,
+  launchPump, pumpStatus, pumpWarmup, launchRaydium, solAddressFromSecret,
   BONK_PLATFORM_ID, STONK_PLATFORM_ID, RAYDIUM_PLATFORM_ID,
 } from './solana.js';
 
-export { launchPump, pumpStatus, launchRaydium, solAddressFromSecret };
+export { launchPump, pumpStatus, pumpWarmup, launchRaydium, solAddressFromSecret };
 
 export const WSOL = 'So11111111111111111111111111111111111111112';
 
@@ -106,7 +106,7 @@ function need(v, what) {
 /// untrusted input from a page, so everything is validated here rather than
 /// assumed. Returns { mint, signature, venue }.
 export async function deployMirrored(opts) {
-  const { params, secretKey, rpcUrl, simulateOnly = false, onStatus } = opts;
+  const { params, secretKey, rpcUrl, simulateOnly = false, preloaded, onStatus } = opts;
   const say = (m) => onStatus && onStatus(m);
 
   const venueKey = String(params?.venue || '').toLowerCase();
@@ -136,7 +136,7 @@ export async function deployMirrored(opts) {
       devBuySol: devBuy, slippageBps, quoteMint,
       cashback: params.cashback !== false,
       feesToHolders: !!params.feesToHolders,
-      simulateOnly, onStatus: say,
+      simulateOnly, preloaded, onStatus: say,
     });
     return { venue: venue.label, mint: res?.mint ?? res?.mintAddress ?? null, signature: res?.signature ?? res?.hash ?? null, raw: res };
   }

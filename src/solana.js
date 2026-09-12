@@ -554,7 +554,7 @@ export const RAYDIUM_QUOTES = {
 // (Raydium's platformId, i.e. the raydium.io frontend).
 // pump.fun lives in its own file; re-exported here so main.js keeps one
 // lazy import for everything Solana.
-export { launchPump, pumpProbe, pumpStatus, pumpTokensForSol, pumpQuoteRegistry, inspectMint, quoteUiToRaw, PUMP_LOOKUP_TABLE, PUMP_QUOTE_REGISTRY } from './pump.js';
+export { launchPump, pumpWarmup, pumpProbe, pumpStatus, pumpTokensForSol, pumpQuoteRegistry, inspectMint, quoteUiToRaw, PUMP_LOOKUP_TABLE, PUMP_QUOTE_REGISTRY } from './pump.js';
 export { pumpTrade, pumpCurve, pumpCurveQuote } from './pump.js';
 import { pumpTrade, pumpCurve } from './pump.js';
 

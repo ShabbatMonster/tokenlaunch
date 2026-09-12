@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 
-const FLAGS = ['armed', 'autoFire', 'cashback', 'feesToHolders'];
+const FLAGS = ['armed', 'autoFire', 'prePin', 'cashback', 'feesToHolders'];
 const TEXTS = ['rpcUrl'];
 const NUMS = ['slippageBps', 'defaultDevBuySol'];
 

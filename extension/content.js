@@ -42,6 +42,13 @@ const state = {
   armedToFire: false,
   confirmTimer: null,
   amtDirty: false,
+  // a box you have typed into is yours until the next launch - the same rule as
+  // the amount box. Without this, the 2.5s re-read wipes a pad you typed by
+  // hand, which is now the normal way to fix an unreadable one.
+  dirty: { name: false, symbol: false, venue: false },
+  dragMoved: false,
+  prepFp: '',
+  prepTimer: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -144,38 +151,101 @@ function readField(key, labelRe, hintRe) {
   return (el.value ?? text(el) ?? '').trim();
 }
 
-/// Which pad is selected. A chosen button differs from its neighbours somehow -
-/// aria state, a class, or just a brighter border - so rather than guess j7's
-/// class names, compare each candidate against the others and take the odd one.
+/// Which pad is selected.
+///
+/// This one matters more than the rest: a wrong answer launches your coin on
+/// the wrong chain. It used to fall back to the first pad in the DOM when it
+/// could not tell, which is Pump - so a Robinhood-chain coin could go to
+/// pump.fun. Now an unclear answer is reported as unclear.
+///
+/// The pads are a grid of near-identical chips with one drawn differently, so
+/// rather than guess at j7's class names, every chip's computed style is
+/// compared against the others and the odd one out wins. That survives a
+/// restyle in a way a class name does not, and it is how you pick it out by eye.
+function padCandidates() {
+  const byEl = new Map();
+  for (const el of document.querySelectorAll('button,[role="button"],a,div,span')) {
+    if (isOurs(el) || !visible(el)) continue;
+    const name = PAD_NAMES.find((pad) => norm(text(el)) === pad);
+    if (!name) continue;
+    // the chip that carries the styling is the button, not the text node inside
+    const chip = el.closest('button,[role="button"],a') || el;
+    if (isOurs(chip)) continue;
+    const prev = byEl.get(chip);
+    if (!prev || prev.length > name.length) byEl.set(chip, name);
+  }
+  return [...byEl].map(([el, name]) => ({ el, name }));
+}
+
+function modeOf(values) {
+  const counts = new Map();
+  for (const v of values) counts.set(v, (counts.get(v) || 0) + 1);
+  let best = null;
+  for (const [v, n] of counts) if (!best || n > best.n) best = { v, n };
+  return best ? best.v : null;
+}
+
 function readVenue() {
   const taught = bySelector('venue');
   if (taught) {
     const t = norm(text(taught));
-    const hit = PAD_NAMES.find((p) => t.includes(p));
-    if (hit) return hit;
+    const hit = PAD_NAMES.find((pad) => t.includes(pad));
+    if (hit) { state.matched.venue = 'taught: ' + hit; return hit; }
   }
 
-  const buttons = [...document.querySelectorAll('button,[role="button"],a,div,span')]
-    .filter((el) => visible(el) && el.children.length <= 2)
-    .map((el) => ({ el, name: PAD_NAMES.find((p) => norm(text(el)) === p) }))
-    .filter((x) => x.name);
-  if (!buttons.length) return '';
+  const pads = padCandidates();
+  if (pads.length < 2) { state.matched.venue = 'no pad grid found'; return ''; }
 
-  const scored = buttons.map(({ el, name }) => {
-    const cs = getComputedStyle(el);
-    const cls = (el.className && typeof el.className === 'string') ? el.className : '';
-    let score = 0;
-    if (el.getAttribute('aria-pressed') === 'true' || el.getAttribute('aria-selected') === 'true') score += 10;
-    if (el.getAttribute('data-state') === 'active' || el.getAttribute('data-active') === 'true') score += 10;
-    if (/\b(active|selected|chosen|current|on)\b/i.test(cls)) score += 6;
-    // a selected chip is usually the one that bothered to draw a border colour
-    const border = cs.borderTopColor || '';
-    if (border && !/rgba?\(0, 0, 0, 0\)|transparent/.test(border)) score += 1;
-    if (cs.outlineStyle && cs.outlineStyle !== 'none') score += 1;
-    return { el, name, score };
+  // an explicit state beats any amount of style comparison
+  const flagged = pads.filter(({ el }) =>
+    el.getAttribute('aria-pressed') === 'true'
+    || el.getAttribute('aria-selected') === 'true'
+    || el.getAttribute('aria-checked') === 'true'
+    || el.getAttribute('data-state') === 'active'
+    || el.getAttribute('data-active') === 'true'
+    || el.getAttribute('data-selected') === 'true');
+  if (flagged.length === 1) {
+    state.matched.venue = flagged[0].name + ' (aria/data state)';
+    return flagged[0].name;
+  }
+
+  const classed = pads.filter(({ el }) => {
+    const cls = typeof el.className === 'string' ? el.className : '';
+    return /(^|[^a-z])(active|selected|chosen|current)([^a-z]|$)/i.test(cls);
   });
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0].score > 0 ? scored[0].name : '';
+  if (classed.length === 1) {
+    state.matched.venue = classed[0].name + ' (class)';
+    return classed[0].name;
+  }
+
+  // style outlier: whichever chip differs from what the others agree on
+  const PROPS = ['backgroundColor', 'borderTopColor', 'color', 'borderTopWidth', 'boxShadow'];
+  const styles = pads.map(({ el }) => {
+    const cs = getComputedStyle(el);
+    const out = {};
+    for (const prop of PROPS) out[prop] = String(cs[prop] || '');
+    return out;
+  });
+  const modes = {};
+  for (const prop of PROPS) modes[prop] = modeOf(styles.map((st) => st[prop]));
+
+  const scores = pads.map((pad, i) => {
+    let differs = 0;
+    for (const prop of PROPS) if (styles[i][prop] !== modes[prop]) differs += 1;
+    return { ...pad, differs };
+  }).sort((x, y) => y.differs - x.differs);
+
+  const top = scores[0];
+  const tie = scores.filter((x) => x.differs === top.differs).length > 1;
+  if (top.differs > 0 && !tie) {
+    state.matched.venue = top.name + ` (styled unlike the other ${pads.length - 1})`;
+    return top.name;
+  }
+
+  state.matched.venue = tie
+    ? `unclear - ${scores.filter((x) => x.differs === top.differs).map((x) => x.name).join(' and ')} look alike`
+    : `unclear - all ${pads.length} pads look identical`;
+  return '';
 }
 
 function readToggle(labelRe) {
@@ -280,9 +350,15 @@ function buildBar() {
   document.documentElement.appendChild(bar);
 
   for (const k of ['name', 'symbol', 'venue', 'devBuySol']) fields[k] = bar.querySelector('#j7fb-' + k);
+  for (const k of ['name', 'symbol', 'venue']) {
+    fields[k].addEventListener('input', () => { state.dirty[k] = fields[k].value.trim() !== ''; });
+  }
   statusEl = bar.querySelector('#j7fb-status');
   fireBtn = bar.querySelector('#j7fb-fire');
   bannerEl = bar.querySelector('#j7fb-banner');
+
+  applyBarPos();
+  makeDraggable(bar.querySelector('.j7fb-head'));
 
   bar.querySelector('#j7fb-refresh').onclick = () => refresh(true);
   bar.querySelector('#j7fb-hide').onclick = () => bar.classList.add('j7fb-min');
@@ -290,19 +366,98 @@ function buildBar() {
   bar.querySelector('#j7fb-place').onclick = startPlacing;
   bar.querySelector('.j7fb-head').onclick = (e) => {
     if (e.target.closest('.j7fb-mini')) return;
+    if (state.dragMoved) return;   // a drag that ended on the header is not a click
     bar.classList.toggle('j7fb-min');
   };
   fireBtn.onclick = () => fire(false);
 }
 
+/// Put the bar back where it was left. Stored as a corner offset rather than an
+/// absolute point so it stays put when the window is a different size than it
+/// was, and clamped on the way in so a saved position on a since-detached
+/// monitor cannot leave it off-screen.
+function applyBarPos() {
+  const pos = state.settings?.barPos;
+  if (!pos) return;
+  const w = bar.offsetWidth || 300;
+  const h = bar.offsetHeight || 200;
+  const left = Math.max(4, Math.min(pos.left, window.innerWidth - w - 4));
+  const top = Math.max(4, Math.min(pos.top, window.innerHeight - h - 4));
+  bar.style.left = left + 'px';
+  bar.style.top = top + 'px';
+  bar.style.right = 'auto';
+  bar.style.bottom = 'auto';
+}
+
+function makeDraggable(handle) {
+  let startX = 0, startY = 0, baseLeft = 0, baseTop = 0;
+  // remember where it was actually put rather than asking layout again on the
+  // way out - the value saved should be the one that was applied
+  let lastLeft = null, lastTop = null;
+
+  const onMove = (e) => {
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (!state.dragMoved && Math.abs(dx) + Math.abs(dy) < 3) return;  // still a click
+    state.dragMoved = true;
+    const w = bar.offsetWidth, h = bar.offsetHeight;
+    const left = Math.max(4, Math.min(baseLeft + dx, window.innerWidth - w - 4));
+    const top = Math.max(4, Math.min(baseTop + dy, window.innerHeight - h - 4));
+    bar.style.left = left + 'px';
+    bar.style.top = top + 'px';
+    bar.style.right = 'auto';
+    bar.style.bottom = 'auto';
+    lastLeft = left; lastTop = top;
+    e.preventDefault();
+  };
+
+  const onUp = async () => {
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('mouseup', onUp, true);
+    bar.classList.remove('j7fb-dragging');
+    if (!state.dragMoved || lastLeft === null) return;
+    const barPos = { left: Math.round(lastLeft), top: Math.round(lastTop) };
+    if (state.settings) state.settings.barPos = barPos;
+    await chrome.storage.local.set({ barPos });
+    // the click handler runs after mouseup; let it see that this was a drag
+    setTimeout(() => { state.dragMoved = false; }, 0);
+  };
+
+  handle.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.target.closest('.j7fb-mini')) return;
+    const r = bar.getBoundingClientRect();
+    startX = e.clientX; startY = e.clientY;
+    baseLeft = lastLeft ?? r.left;
+    baseTop = lastTop ?? r.top;
+    state.dragMoved = false;
+    bar.classList.add('j7fb-dragging');
+    document.addEventListener('mousemove', onMove, true);
+    document.addEventListener('mouseup', onUp, true);
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+}
+
 function paint(read) {
   if (!bar) return;
-  for (const k of ['name', 'symbol', 'venue']) if (document.activeElement !== fields[k]) fields[k].value = read[k] ?? '';
+  for (const k of ['name', 'symbol', 'venue']) {
+    if (state.dirty[k] || document.activeElement === fields[k]) continue;
+    fields[k].value = read[k] ?? '';
+  }
   if (document.activeElement !== fields.devBuySol) fields.devBuySol.value = read.devBuySol ?? 0;
   const box = bar.querySelector('#j7fb-img');
   box.innerHTML = read.imageDataUrl
     ? `<img src="${read.imageDataUrl}"><span>image mirrored</span>`
     : '<span class="j7fb-warn">no image found — j7 may not have loaded one yet</span>';
+  // say what each box is looking at, so a misread is diagnosable instead of
+  // just wrong
+  for (const k of ['name', 'symbol', 'venue']) {
+    if (fields[k]) fields[k].title = state.matched[k] || '';
+  }
+  if (fields.venue && !read.venue && state.matched.venue) {
+    fields.venue.placeholder = state.matched.venue.slice(0, 40);
+  }
+
   const dot = bar.querySelector('#j7fb-dot');
   const ready = read.name && read.symbol && read.venue;
   dot.className = 'j7fb-dot ' + (state.busy ? 'busy' : ready ? 'ok' : 'warn');
@@ -310,12 +465,32 @@ function paint(read) {
   paintInline();
 }
 
+/// Nudge the worker to read pump's config and pin the metadata ahead of time.
+///
+/// Debounced and fingerprinted so typing a name does not fire an upload per
+/// keystroke - only a panel that has settled into a new shape triggers one.
+function prepare(read) {
+  const fp = [read.name, read.symbol, read.venue, (read.imageDataUrl || '').length].join('|');
+  if (fp === state.prepFp) return;
+  state.prepFp = fp;
+  clearTimeout(state.prepTimer);
+  state.prepTimer = setTimeout(() => {
+    chrome.runtime.sendMessage({ type: 'j7fb:prepare', params: currentParams() }).catch(() => {});
+  }, 900);
+}
+
 async function refresh(showStatus) {
   const read = await readPanel();
   paint(read);
+  if (read.name && read.symbol) prepare(read);
   if (showStatus) {
     const missing = ['name', 'symbol', 'venue'].filter((k) => !read[k]);
-    setStatus(missing.length ? `could not read: ${missing.join(', ')} — type it here or use ◎ to teach it` : 'panel mirrored');
+    if (!missing.length) setStatus('panel mirrored');
+    else if (missing.length === 1 && missing[0] === 'venue') {
+      setStatus(`pad unreadable (${state.matched.venue}) — type it above, or ◎ to teach it`, 'err');
+    } else {
+      setStatus(`could not read: ${missing.join(', ')} — type it here or use ◎ to teach it`, 'err');
+    }
   }
   return read;
 }
@@ -359,6 +534,7 @@ async function fire(force) {
     const res = await chrome.runtime.sendMessage({ type: 'j7fb:deploy', params, force });
     if (res?.ok) {
       state.amtDirty = false;
+      state.dirty = { name: false, symbol: false, venue: false };
       setStatus(`launched on ${res.result.venue}: ${res.result.mint ?? 'see wallet'}`, 'ok');
       showBanner('Launched by the fallback — j7 did not need to succeed.');
     } else {
@@ -660,11 +836,13 @@ async function boot() {
   state.settings = await chrome.runtime.sendMessage({ type: 'j7fb:getSettings' }).catch(() => null);
   if (!state.settings?.armed) return; // disarmed: stay completely out of the page
   state.selectors = (await chrome.storage.local.get('selectors')).selectors || {};
+  state.settings.barPos = (await chrome.storage.local.get('barPos')).barPos || null;
 
   buildBar();
   mountInline();
   await refresh(true);
   startWatching();
+  window.addEventListener('resize', () => { if (bar) applyBarPos(); });
   // j7 is a single-page app, so the panel - and our button with it - appears and
   // disappears under us
   setInterval(() => {
