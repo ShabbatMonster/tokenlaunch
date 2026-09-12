@@ -46,6 +46,15 @@ $('save').onclick = async () => {
   load();
 };
 
+$('importKey').onclick = async () => {
+  $('saved').textContent = 'looking for the launcher…';
+  const res = await chrome.runtime.sendMessage({ type: 'j7fb:importKey' });
+  $('saved').innerHTML = res?.ok
+    ? `<span class="ok">imported</span> — ${res.address}`
+    : `<span class="err">${res?.error || 'import failed'}</span>`;
+  load();
+};
+
 $('clearKey').onclick = async () => {
   await chrome.storage.local.remove('secretKey');
   $('saved').innerHTML = '<span class="ok">key removed</span>';

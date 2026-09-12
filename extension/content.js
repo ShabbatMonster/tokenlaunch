@@ -17,6 +17,15 @@ const PAD_NAMES = [
   'pump', 'otc', 'usd1', 'bonk', 'stonk', 'ansem',
   'four.meme', 'o1', 'eth', 'flap', 'pons', 'pools',
 ];
+// what a dev buy is priced in, per pad - the number next to the button means
+// nothing without it
+const PAD_UNIT = {
+  pump: 'SOL', otc: 'SOL', usd1: 'SOL', bonk: 'SOL', stonk: 'SOL', ansem: 'SOL', o1: 'SOL',
+  eth: 'ETH', pons: 'ETH', pools: 'ETH',
+  flap: 'BNB', 'four.meme': 'BNB',
+};
+const unitFor = (venue) => PAD_UNIT[String(venue || '').toLowerCase()] || 'SOL';
+
 const FAIL_RE = /(timed?\s?out|timeout|failed|failure|error|rejected|declined|insufficient|try again|unable to|went wrong|blockhash|expired)/i;
 const OK_RE = /(success|launched|deployed|created|confirmed|signature|mint(ed)?\b)/i;
 
@@ -28,6 +37,10 @@ const state = {
   failed: false,
   busy: false,
   teaching: null,
+  placing: false,
+  armedToFire: false,
+  confirmTimer: null,
+  amtDirty: false,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -199,6 +212,7 @@ function buildBar() {
       <span class="j7fb-dot" id="j7fb-dot"></span>
       <span class="j7fb-grow"></span>
       <button class="j7fb-mini" id="j7fb-refresh" title="re-read the panel">↻</button>
+      <button class="j7fb-mini" id="j7fb-place" title="move the FALLBACK button">⇱</button>
       <button class="j7fb-mini" id="j7fb-teach" title="teach a field">◎</button>
       <button class="j7fb-mini" id="j7fb-hide" title="hide">✕</button>
     </div>
@@ -223,6 +237,7 @@ function buildBar() {
   bar.querySelector('#j7fb-refresh').onclick = () => refresh(true);
   bar.querySelector('#j7fb-hide').onclick = () => bar.classList.add('j7fb-min');
   bar.querySelector('#j7fb-teach').onclick = startTeaching;
+  bar.querySelector('#j7fb-place').onclick = startPlacing;
   bar.querySelector('.j7fb-head').onclick = (e) => {
     if (e.target.closest('.j7fb-mini')) return;
     bar.classList.toggle('j7fb-min');
@@ -242,6 +257,7 @@ function paint(read) {
   const ready = read.name && read.symbol && read.venue;
   dot.className = 'j7fb-dot ' + (state.busy ? 'busy' : ready ? 'ok' : 'warn');
   dot.title = ready ? 'panel mirrored' : 'still missing something';
+  paintInline();
 }
 
 async function refresh(showStatus) {
@@ -275,7 +291,7 @@ function currentParams() {
     name: fields.name?.value.trim() || read.name,
     symbol: fields.symbol?.value.trim() || read.symbol,
     venue: (fields.venue?.value.trim() || read.venue || '').toLowerCase(),
-    devBuySol: firstNumber(fields.devBuySol?.value) ?? read.devBuySol ?? 0,
+    devBuySol: firstNumber(inlineAmt?.value) ?? firstNumber(fields.devBuySol?.value) ?? read.devBuySol ?? 0,
   };
 }
 
@@ -292,6 +308,7 @@ async function fire(force) {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'j7fb:deploy', params, force });
     if (res?.ok) {
+      state.amtDirty = false;
       setStatus(`launched on ${res.result.venue}: ${res.result.mint ?? 'see wallet'}`, 'ok');
       showBanner('Launched by the fallback — j7 did not need to succeed.');
     } else {
@@ -304,6 +321,129 @@ async function fire(force) {
     state.busy = false;
     fireBtn.disabled = false;
   }
+}
+
+// --- the button inside j7's own panel ---------------------------------------
+//
+// The floating bar is fine for watching, but the point of a fallback is that it
+// is already sitting where your hand is when the deploy fails. So one button is
+// injected into j7's own toolbar, next to its Panel control.
+//
+// Anchoring is done the way everything else here is: a taught position wins, and
+// otherwise it is found by a landmark with a stable name rather than a class we
+// guessed at.
+
+let inlineBtn = null;
+let inlineAmt = null;
+let inlineUnit = null;
+
+function findAnchor() {
+  const taught = bySelector('anchor');
+  if (taught && visible(taught)) return { el: taught, where: 'after' };
+
+  // the drawn spot: the toolbar row that ends in j7's "Panel" button
+  const panel = [...document.querySelectorAll('button,[role="button"],a,div,span')]
+    .find((el) => visible(el) && norm(text(el)) === 'panel' && el.children.length <= 2);
+  if (panel) return { el: panel, where: 'before' };
+
+  const deploy = [...document.querySelectorAll('button,[role="button"]')]
+    .find((el) => visible(el) && /^deploy\b/.test(norm(text(el))));
+  if (deploy) return { el: deploy, where: 'before' };
+
+  return null;
+}
+
+function mountInline() {
+  if (inlineBtn && document.contains(inlineBtn)) return;
+  const spot = findAnchor();
+  if (!spot) return;
+
+  const wrap = document.createElement('span');
+  wrap.id = 'j7fb-inline-wrap';
+
+  inlineAmt = document.createElement('input');
+  inlineAmt.id = 'j7fb-inline-amt';
+  inlineAmt.type = 'text';
+  inlineAmt.spellcheck = false;
+  inlineAmt.title = 'dev buy for the fallback launch';
+  // j7 binds hotkeys on the document (Enter deploys), so nothing typed in here
+  // may reach it
+  for (const ev of ['keydown', 'keyup', 'keypress']) {
+    inlineAmt.addEventListener(ev, (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); onInlineClick(); }
+    }, true);
+  }
+  inlineAmt.addEventListener('input', () => {
+    // once you have typed an amount it is yours: stop mirroring j7's over it,
+    // or clicking the button (which moves focus) would quietly restore the old
+    // number and launch for the wrong size
+    state.amtDirty = inlineAmt.value.trim() !== '';
+    if (fields.devBuySol) fields.devBuySol.value = inlineAmt.value;
+  });
+  inlineAmt.addEventListener('click', (e) => e.stopPropagation(), true);
+
+  inlineUnit = document.createElement('span');
+  inlineUnit.id = 'j7fb-inline-unit';
+
+  inlineBtn = document.createElement('button');
+  inlineBtn.id = 'j7fb-inline';
+  inlineBtn.type = 'button';
+  inlineBtn.addEventListener('click', (e) => {
+    // j7 owns this toolbar; do not let the click reach whatever it has bound
+    e.preventDefault();
+    e.stopPropagation();
+    onInlineClick();
+  }, true);
+
+  wrap.append(inlineAmt, inlineUnit, inlineBtn);
+  if (spot.where === 'before') spot.el.parentElement?.insertBefore(wrap, spot.el);
+  else spot.el.parentElement?.insertBefore(wrap, spot.el.nextSibling);
+  paintInline();
+}
+
+/// Two stages, so a stray click in a dense toolbar cannot spend SOL - except
+/// when j7 has already failed, where the button pre-arms itself and the whole
+/// thing is the one click it should be.
+function onInlineClick() {
+  if (state.busy) return;
+  if (state.armedToFire) {
+    clearTimeout(state.confirmTimer);
+    state.armedToFire = false;
+    fire(false);
+    paintInline();
+    return;
+  }
+  state.armedToFire = true;
+  paintInline();
+  clearTimeout(state.confirmTimer);
+  state.confirmTimer = setTimeout(() => { state.armedToFire = false; paintInline(); }, 4000);
+}
+
+function paintInline() {
+  if (!inlineBtn) return;
+  const read = state.lastRead || {};
+  const ready = !!(read.name && read.symbol && read.venue);
+
+  if (inlineUnit) inlineUnit.textContent = unitFor(read.venue);
+  if (inlineAmt && !state.amtDirty && document.activeElement !== inlineAmt) {
+    inlineAmt.value = String(read.devBuySol ?? 0);
+  }
+  inlineBtn.classList.toggle('j7fb-i-alert', state.failed && !state.busy);
+  inlineBtn.classList.toggle('j7fb-i-arm', state.armedToFire);
+  inlineBtn.classList.toggle('j7fb-i-busy', state.busy);
+  inlineBtn.classList.toggle('j7fb-i-cold', !ready);
+
+  inlineBtn.textContent = state.busy ? 'DEPLOYING…'
+    : state.armedToFire ? 'FIRE?'
+    : state.failed ? 'FALLBACK !'
+    : 'FALLBACK';
+
+  inlineBtn.title = !ready
+    ? 'the panel is missing a name, symbol or pad - open the fallback bar to check'
+    : state.armedToFire ? 'click again to launch ' + read.symbol
+    : `launch ${read.symbol} on ${read.venue} for ${inlineAmt?.value || 0} ${unitFor(read.venue)}`
+      + (state.failed ? ' (j7 failed)' : '');
 }
 
 // --- watching j7 ------------------------------------------------------------
@@ -326,6 +466,9 @@ function armTakeover(why) {
 async function onFailure(reason) {
   await refresh(false);
   showBanner('j7 could not deploy: ' + reason);
+  state.armedToFire = true;
+  clearTimeout(state.confirmTimer);
+  paintInline();
   setStatus(state.settings?.autoFire ? 'taking over automatically…' : 'ready to take over — press the button');
   if (state.settings?.autoFire) fire(false);
 }
@@ -367,6 +510,37 @@ function startWatching() {
     }
   });
   obs.observe(document.body, { childList: true, subtree: true });
+}
+
+/// Put the FALLBACK button somewhere else: click whatever it should sit next to.
+function startPlacing() {
+  state.placing = true;
+  setStatus('click where the FALLBACK button should go (Esc to stop)');
+  document.body.classList.add('j7fb-teaching');
+  document.addEventListener('click', placeClick, true);
+  document.addEventListener('keydown', placeEsc, true);
+}
+
+function stopPlacing(msg) {
+  state.placing = false;
+  document.body.classList.remove('j7fb-teaching');
+  document.removeEventListener('click', placeClick, true);
+  document.removeEventListener('keydown', placeEsc, true);
+  setStatus(msg);
+}
+
+function placeEsc(e) { if (e.key === 'Escape') { e.preventDefault(); stopPlacing('left where it was'); } }
+
+async function placeClick(e) {
+  if (e.target.closest?.('#j7fb-bar') || e.target.closest?.('#j7fb-inline-wrap')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  state.selectors.anchor = cssPath(e.target);
+  await chrome.storage.local.set({ selectors: state.selectors });
+  document.getElementById('j7fb-inline-wrap')?.remove();
+  inlineBtn = null;
+  mountInline();
+  stopPlacing('button moved');
 }
 
 // --- teaching a field -------------------------------------------------------
@@ -438,10 +612,16 @@ async function boot() {
   state.selectors = (await chrome.storage.local.get('selectors')).selectors || {};
 
   buildBar();
+  mountInline();
   await refresh(true);
   startWatching();
-  // j7 is a single-page app, so the panel appears and disappears under us
-  setInterval(() => { if (!state.busy && state.teaching == null) refresh(false); }, 2500);
+  // j7 is a single-page app, so the panel - and our button with it - appears and
+  // disappears under us
+  setInterval(() => {
+    if (state.busy || state.teaching != null || state.placing) return;
+    mountInline();
+    refresh(false);
+  }, 2500);
 }
 
 boot();
