@@ -1,0 +1,69 @@
+{
+  "manifest_version": 3,
+  "name": "j7 deploy fallback",
+  "version": "1.0.0",
+  "description": "Mirrors the token you set up in j7tracker's deploy panel and finishes the launch yourself when j7 times out or errors.",
+  "permissions": [
+    "storage",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://j7tracker.io/*",
+    "https://*.j7tracker.io/*",
+    "https://pump.fun/*",
+    "https://api.thegraph.com/*",
+    "https://mainnet.helius-rpc.com/*",
+    "https://api.mainnet-beta.solana.com/*"
+  ],
+  "optional_host_permissions": [
+    "*://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://j7tracker.io/*",
+        "https://*.j7tracker.io/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "overlay.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "j7 deploy fallback",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "overlay.css"
+      ],
+      "matches": [
+        "https://j7tracker.io/*",
+        "https://*.j7tracker.io/*"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

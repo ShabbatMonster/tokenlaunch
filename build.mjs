@@ -87,4 +87,16 @@ await esbuild.build({
   plugins: [singleBufferProcess, NodeModulesPolyfillPlugin()],
 });
 
+// the browser-extension fallback for j7tracker's deploy panel. Same Solana
+// stack as docs/solana.js, bundled into the extension's service worker - which
+// is the only place the private key is ever read.
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/ext-launcher.js'],
+  outfile: 'extension/vendor/launcher.js',
+  inject: ['src/node-shim.js'],
+  define: { global: 'globalThis', 'process.env.NODE_ENV': '"production"' },
+  plugins: [singleBufferProcess, NodeModulesPolyfillPlugin()],
+});
+
 console.log('build complete');

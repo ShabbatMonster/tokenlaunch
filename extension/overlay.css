@@ -1,0 +1,72 @@
+/* The bar sits over j7 rather than inside it, so nothing here can be reached by
+   j7's own stylesheet - every value is stated, and the id is specific enough to
+   win without !important wars. */
+#j7fb-bar {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  width: 300px;
+  box-sizing: border-box;
+  background: #14171c;
+  color: #e6e9ee;
+  border: 1px solid #262b33;
+  border-radius: 12px;
+  padding: 10px 12px 12px;
+  font: 12px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+}
+#j7fb-bar * { box-sizing: border-box; }
+#j7fb-bar.j7fb-alert { border-color: #f87171; box-shadow: 0 0 0 2px rgba(248, 113, 113, .25), 0 10px 30px rgba(0, 0, 0, .6); }
+
+#j7fb-bar .j7fb-head { display: flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
+#j7fb-bar .j7fb-head b { font-size: 11px; letter-spacing: 2px; }
+#j7fb-bar .j7fb-grow { flex: 1; }
+#j7fb-bar .j7fb-mini {
+  background: #1a1e24; color: #8a93a1; border: 1px solid #262b33; border-radius: 6px;
+  width: 22px; height: 20px; line-height: 1; cursor: pointer; font: inherit; padding: 0;
+}
+#j7fb-bar .j7fb-mini:hover { color: #e6e9ee; }
+
+#j7fb-bar .j7fb-dot { width: 8px; height: 8px; border-radius: 50%; background: #8a93a1; flex: 0 0 auto; }
+#j7fb-bar .j7fb-dot.ok { background: #4ade80; }
+#j7fb-bar .j7fb-dot.warn { background: #fbbf24; }
+#j7fb-bar .j7fb-dot.busy { background: #60a5fa; animation: j7fb-pulse 1s infinite; }
+@keyframes j7fb-pulse { 50% { opacity: .3; } }
+
+#j7fb-bar.j7fb-min .j7fb-grid,
+#j7fb-bar.j7fb-min .j7fb-img,
+#j7fb-bar.j7fb-min .j7fb-fire,
+#j7fb-bar.j7fb-min .j7fb-status,
+#j7fb-bar.j7fb-min .j7fb-banner { display: none; }
+
+#j7fb-bar .j7fb-banner {
+  margin-top: 8px; padding: 7px 8px; border-radius: 7px;
+  background: rgba(248, 113, 113, .12); border: 1px solid rgba(248, 113, 113, .5);
+  color: #fca5a5; font-size: 11px; word-break: break-word;
+}
+
+#j7fb-bar .j7fb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 9px; }
+#j7fb-bar label { display: block; font-size: 9px; letter-spacing: 1px; color: #8a93a1; }
+#j7fb-bar input {
+  width: 100%; margin-top: 3px; background: #1a1e24; border: 1px solid #262b33;
+  border-radius: 6px; color: #e6e9ee; padding: 6px 7px; font: inherit; outline: none;
+}
+#j7fb-bar input:focus { border-color: #3b4453; }
+
+#j7fb-bar .j7fb-img { display: flex; align-items: center; gap: 8px; margin-top: 9px; min-height: 34px; font-size: 10px; color: #8a93a1; }
+#j7fb-bar .j7fb-img img { width: 34px; height: 34px; object-fit: cover; border-radius: 6px; border: 1px solid #262b33; }
+#j7fb-bar .j7fb-warn { color: #fbbf24; }
+
+#j7fb-bar .j7fb-fire {
+  width: 100%; margin-top: 10px; padding: 10px; border: none; border-radius: 8px;
+  background: #4ade80; color: #04160b; font: inherit; font-weight: 700; letter-spacing: 1px; cursor: pointer;
+}
+#j7fb-bar .j7fb-fire:disabled { opacity: .5; cursor: default; }
+
+#j7fb-bar .j7fb-status { margin-top: 8px; font-size: 11px; color: #8a93a1; word-break: break-word; }
+#j7fb-bar .j7fb-status.ok { color: #4ade80; }
+#j7fb-bar .j7fb-status.err { color: #f87171; }
+
+/* while teaching, make it obvious the next click is being captured */
+body.j7fb-teaching, body.j7fb-teaching * { cursor: crosshair !important; }
