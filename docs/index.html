@@ -392,9 +392,9 @@
       </div>
       <input type="text" id="longQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="any ERC-20 numeraire address (0x...)">
       <div class="row" style="margin-top:8px">
-        <div><label>TOKENS TO SELL ON THE CURVE</label><input type="text" id="longToSell" value="900000000" spellcheck="false"></div>
+        <div><label>FEES &amp; BOUGHT-BACK STOCK GO TO (BLANK = YOU)</label><input type="text" id="longBuyback" spellcheck="false" placeholder="0x... (defaults to your own address)"></div>
       </div>
-      <div class="hint" id="longHint" style="font-size:11px;margin-top:6px">Doppler v4 multicurve on long.xyz's Airlock - paired against a tokenized stock instead of ETH. Graduates into a Uniswap v2 pair. Note: long.xyz's own Rehype fee-recycling hook is not currently whitelisted on their Airlock, so this uses the standard Doppler hook.</div>
+      <div class="hint" id="longHint" style="font-size:11px;margin-top:6px">Doppler v4 multicurve on long.xyz's Airlock - paired against a tokenized stock instead of ETH. Shaped to match a live long.xyz coin: the whole supply goes on the curve, the pool runs behind the Rehype hook on a dynamic fee, and <b>100% of trading fees on both sides are spent buying the paired stock</b>. It does not graduate out - the liquidity stays in the v4 pool and keeps recycling. The first trade is taxed 80%, decaying to 1.12% over ten seconds.</div>
     </div>
 
     <div id="v4curveRow" class="hidden">

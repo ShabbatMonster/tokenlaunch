@@ -1907,9 +1907,12 @@ async function launch() {
     const numeraire = q.address === 'custom' ? $('longQuoteCustom').value.trim() : q.address;
     if (!/^0x[a-fA-F0-9]{40}$/.test(numeraire)) throw new Error('enter a valid numeraire (stock) address');
     const supplyTokens = $('longSupply').value.trim().replace(/,/g, '');
-    const tokensToSell = $('longToSell').value.trim().replace(/,/g, '');
     if (!(+supplyTokens > 0)) throw new Error('set a supply');
-    if (!(+tokensToSell > 0)) throw new Error('set how many tokens to sell on the curve');
+    // the whole supply goes on the curve, the way a real long.xyz coin does -
+    // holding part of it back leaves a premined block outside the pool
+    const buybackDestination = $('longBuyback').value.trim();
+    if (buybackDestination && !/^0x[a-fA-F0-9]{40}$/.test(buybackDestination))
+      throw new Error('the fee destination must be a valid address, or blank for your own');
 
     const keys = loadKeys();
     if (!keys?.evm) throw new Error('no EVM key loaded — paste your key in the key form');
@@ -1918,7 +1921,8 @@ async function launch() {
     const { launchLong } = await import('./long.js');
     const res = await launchLong({
       privateKey: keys.evm, name, symbol, tokenURI: logo,
-      numeraire, supplyTokens, tokensToSell,
+      numeraire, supplyTokens,
+      buybackDestination: buybackDestination || undefined,
       onStatus: (m) => setStatus(m),
     });
 
