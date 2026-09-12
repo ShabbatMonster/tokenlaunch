@@ -87,10 +87,28 @@
     <div class="status" id="scanStatus"></div>
     <button class="btn" id="claimBtn" disabled>NOTHING TO CLAIM</button>
     <div class="status" id="claimStatus"></div>
-    <p class="note">Scans every token on the factory and claims the ones that have accrued fees. The protocol share routes to the fee recipient automatically — claiming is permissionless, so the unlocked wallet only pays gas.</p>
+    <p class="note">Scans every token on the factory and claims the ones that have accrued fees. The protocol share routes to the fee recipient automatically &mdash; claiming is permissionless, so the unlocked wallet only pays gas.</p>
+  </div>
+
+  <div class="card" id="dopplerCard">
+    <label style="margin-top:0">LONG.XYZ / DOPPLER COIN</label>
+    <input type="text" id="dopAddr" spellcheck="false" autocomplete="off" placeholder="token address (0x...)"
+      style="width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 12px;font:inherit;outline:none">
+    <button class="btn" id="dopInspect" style="margin-top:10px">CHECK FEES</button>
+    <div class="status" id="dopStatus"></div>
+    <div id="dopReport"></div>
+    <button class="btn hidden" id="dopCollect">COLLECT FEES</button>
+    <div class="status" id="dopClaimStatus"></div>
+    <p class="note">A Doppler coin does not pay its creator the way a factory token does. Its hook takes the
+    fee and splits it by a matrix fixed at launch: a <b>buyback</b> share is spent buying one side of the pair
+    and pushed to the pool's <b>buyback destination</b> &mdash; on a long.xyz coin that is 100%, and the thing
+    bought is the paired stock &mdash; while a protocol cut accrues to the Airlock owner. Nobody claims the
+    buyback share; it is sent. What somebody has to do is call <code>collectFees</code> to move what the pool
+    has earned through that split, and that is permissionless, so the button below works on any coin: you pay
+    the gas, the money still goes where the matrix says.</p>
   </div>
 </div>
 
-<script type="module" src="fees.js?v=4"></script>
+<script type="module" src="fees.js?v=5"></script>
 </body>
 </html>
