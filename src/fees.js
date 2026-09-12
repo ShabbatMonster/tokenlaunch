@@ -3,6 +3,9 @@ import {
   formatEther, parseEventLogs, getAddress,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import {
+  dopplerFeeReport, collectDopplerFees, formatAmount, feePercent,
+} from './dopplerFees.js';
 
 // ---------------------------------------------------------------------------
 // fee sweeper — scans EVERY token launched on our factory and claims the ones
@@ -162,10 +165,108 @@ async function claimAll() {
 }
 
 // ---------------------------------------------------------------------------
+// long.xyz / Doppler coins
+//
+// Separate from the sweeper above because the money moves differently: there is
+// no per-creator balance sitting in a factory waiting to be pulled. The hook
+// splits each fee by a matrix set at launch and pushes the buyback share
+// straight out to the pool's buyback destination. So the useful action is not
+// "claim mine", it is "run the split" - which anyone may do.
+// ---------------------------------------------------------------------------
+let dopReport = null;
+
+function dopRow(k, v) {
+  return `<div style="display:flex;justify-content:space-between;gap:12px;padding:3px 0">
+    <span style="color:var(--dim)">${esc(k)}</span><span style="text-align:right">${v}</span></div>`;
+}
+
+async function dopplerInspect() {
+  const addr = $('dopAddr').value.trim();
+  const out = $('dopReport');
+  const st = $('dopStatus');
+  $('dopCollect').classList.add('hidden');
+  $('dopClaimStatus').textContent = '';
+  out.innerHTML = '';
+  dopReport = null;
+  if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) { st.innerHTML = '<span class="err">enter a token address</span>'; return; }
+
+  st.textContent = 'reading the pool…';
+  try {
+    const r = await dopplerFeeReport(addr, account?.address);
+    dopReport = r;
+    st.textContent = '';
+
+    if (!r.found) { out.innerHTML = `<p class="note" style="color:var(--dim)">${esc(r.reason)}</p>`; return; }
+
+    let html = dopRow('pair', `<b>${esc(r.assetMeta.symbol)}</b> / ${esc(r.numMeta.symbol)}`);
+    html += dopRow('pool fee', r.dynamicFee ? 'dynamic (hook sets it)' : `static ${feePercent(r.pool.lpFee)}%`);
+
+    if (r.hasHook) {
+      html += dopRow('fee right now', `<b>${feePercent(r.currentFee)}%</b>`);
+      html += dopRow('fee schedule',
+        `${feePercent(r.schedule.startFee)}% → ${feePercent(r.schedule.endFee)}% over ${r.schedule.durationSeconds}s`);
+      const toStock = Number(r.distribution.assetToNumeraireBuyback) / 1e16;
+      html += dopRow('fees spent buying ' + esc(r.numMeta.symbol), `${toStock}%`);
+      html += dopRow('buyback goes to', r.youAreBuybackDst
+        ? '<span class="ok">you</span>'
+        : `<a href="${EXPLORER}/address/${r.buybackDst}" target="_blank" rel="noopener">${r.buybackDst.slice(0, 6)}…${r.buybackDst.slice(-4)}</a>`);
+      if (r.collectable) {
+        html += dopRow('<b>collectable now</b>',
+          `<b>${formatAmount(r.collectable.asset, r.assetMeta)} ${esc(r.assetMeta.symbol)} + ${formatAmount(r.collectable.numeraire, r.numMeta)} ${esc(r.numMeta.symbol)}</b>`);
+      }
+      html += dopRow('waiting in the hook',
+        `${formatAmount(r.pending.asset, r.assetMeta)} ${esc(r.assetMeta.symbol)} + ${formatAmount(r.pending.numeraire, r.numMeta)} ${esc(r.numMeta.symbol)}`);
+      html += dopRow('Airlock owner’s cut',
+        `${formatAmount(r.ownerFees.asset, r.assetMeta)} ${esc(r.assetMeta.symbol)} + ${formatAmount(r.ownerFees.numeraire, r.numMeta)} ${esc(r.numMeta.symbol)}`);
+    }
+
+    out.innerHTML = `<div style="font-size:12px;margin-top:10px">${html}</div>`;
+
+    if (r.claimable) {
+      $('dopCollect').classList.remove('hidden');
+      $('dopCollect').disabled = false;
+      $('dopCollect').textContent = r.youAreBuybackDst ? 'COLLECT FEES (PAID TO YOU)' : 'RUN THE FEE SPLIT';
+    } else {
+      out.innerHTML += `<p class="note">${esc(r.reason)}</p>`;
+    }
+  } catch (e) {
+    st.innerHTML = `<span class="err">${esc(e.shortMessage || e.message)}</span>`;
+  }
+}
+
+async function dopplerCollect() {
+  if (!dopReport?.claimable) return;
+  const btn = $('dopCollect');
+  const out = $('dopClaimStatus');
+  btn.disabled = true;
+  try {
+    const keys = loadKeys();
+    if (!keys?.evm) throw new Error('no key loaded — import it in the launcher first');
+    const res = await collectDopplerFees({
+      privateKey: keys.evm, asset: dopReport.asset, onStatus: (m) => { out.textContent = m; },
+    });
+    const r = dopReport;
+    out.innerHTML =
+      `<span class="ok">COLLECTED ✓</span> ${formatAmount(res.collected.asset, r.assetMeta)} ${esc(r.assetMeta.symbol)}`
+      + ` + ${formatAmount(res.collected.numeraire, r.numMeta)} ${esc(r.numMeta.symbol)}<br>`
+      + `split sent to ${res.buybackDst.slice(0, 6)}…${res.buybackDst.slice(-4)}`
+      + (r.youAreBuybackDst ? ' <span class="ok">(you)</span>' : '') + '<br>'
+      + `<a href="${EXPLORER}/tx/${res.hash}" target="_blank" rel="noopener">tx on explorer</a>`;
+    dopplerInspect();
+  } catch (e) {
+    out.innerHTML = `<span class="err">${esc(e.shortMessage || e.message)}</span>`;
+    btn.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 function start() {
   $('appRoot').style.display = '';
+  $('dopInspect').onclick = dopplerInspect;
+  $('dopCollect').onclick = dopplerCollect;
+  $('dopAddr').addEventListener('keydown', (e) => { if (e.key === 'Enter') dopplerInspect(); });
   const keys = loadKeys();
   if (!keys?.evm) { $('noVault').classList.remove('hidden'); return; }
   $('claimBtn').onclick = claimAll;
