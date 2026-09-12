@@ -67,29 +67,33 @@ const REHYPE_FEES_ALL_TO_STOCK = {
   numeraireFeesToLpWad: 0n,
 };
 
-// The multicurve shape. Three things about it were established by simulating
-// against the live Airlock rather than by reading anything:
+// The multicurve shape. Everything about it was established by simulating
+// against the live Airlock, because each failure mode reverts without saying
+// what is wrong:
 //
 //  - the shares must sum to exactly 1e18. Short of that the SDK quietly appends
 //    a fallback curve running out to tick 887272, and the create reverts.
 //  - the set needs the deep tail band underneath the opening tick. A set that
 //    starts at the opening tick with nothing below it reverts every time.
-//  - the opening tick has a ceiling somewhere between 64000 and 84100 for a 1B
-//    supply; 64000 is the highest round value that simulates clean.
+//  - every tick must be a multiple of the tick spacing. This is the one that
+//    misled me: 84100 - the value Doppler's own defaults use, and about where
+//    FROGE opens - is not divisible by 8 and reverts, which looked at first
+//    like a ceiling on how high the pool could open. It is not. Aligned ticks
+//    simulate clean up to 104000; 120000 is where the real ceiling starts.
+//  - the far end is capped by uint128 liquidity safety, not by the tick range.
+//    A band holding 25% of a 1B supply cannot reach past about 348144.
 //
-// FROGE itself opens around tick 84100 and its liquidity ran out past 887200,
-// but its curves cannot be copied directly: it has already graduated, so those
-// positions are burned and its pool retains only three initialized ticks. This
-// is the widest shape the contract actually accepts. The old values here topped
-// out at 39088, which is why a coin launched with them ran out of curve after
-// roughly a 50x and priced strangely on the way there.
-const OPENING_TICK = 64000;
+// So this opens at 84096, the aligned tick next to FROGE's own opening, and
+// mirrors its overlapping bands as far out as the liquidity math allows. The
+// old values here opened at 5080 and topped out at 39088, which is why a coin
+// launched with them opened far too cheap and ran out of curve after ~50x.
+const OPENING_TICK = 84096;
 const FLOOR_TICK = -887264;
 const LONG_CURVE_BANDS = [
   { near: FLOOR_TICK, far: OPENING_TICK, numPositions: 1, shares: parseEther('0.35') },
-  { near: OPENING_TICK, far: 120000, numPositions: 11, shares: parseEther('0.25') },
-  { near: 90000, far: 200000, numPositions: 11, shares: parseEther('0.20') },
-  { near: 120000, far: 348144, numPositions: 11, shares: parseEther('0.20') },
+  { near: OPENING_TICK, far: 176200, numPositions: 11, shares: parseEther('0.25') },
+  { near: 116296, far: 222200, numPositions: 11, shares: parseEther('0.20') },
+  { near: 142200, far: 348144, numPositions: 11, shares: parseEther('0.20') },
 ];
 
 const TICK_SPACING = 8;
