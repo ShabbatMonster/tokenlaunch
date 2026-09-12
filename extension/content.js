@@ -33,6 +33,7 @@ const state = {
   settings: null,
   selectors: {},
   lastRead: null,
+  matched: {},
   armedTimer: null,
   failed: false,
   busy: false,
@@ -55,32 +56,70 @@ function visible(el) {
   return r.width > 0 && r.height > 0;
 }
 
-/// Find the input a label belongs to. j7 stacks a small uppercase label above
-/// each field, so the match is "the first field that starts after this label",
-/// which survives restyling in a way a class name would not.
-function inputForLabel(re) {
-  const all = [...document.querySelectorAll('label,span,div,p,h1,h2,h3,h4,h5,h6')];
-  const labels = all.filter((el) => {
-    const t = text(el);
-    return t.length < 40 && re.test(t) && el.children.length === 0 && visible(el);
-  });
-  for (const lab of labels) {
-    // an explicit association wins whenever j7 provides one
-    const forId = lab.getAttribute?.('for');
+// Our own bar and button live in the page too, and they contain a NAME and a
+// SYMBOL box of their own. Nothing used to exclude them, so a scan could match
+// our empty input and read the ticker back as blank.
+function isOurs(el) {
+  return !!(el && el.closest && (el.closest('#j7fb-bar') || el.closest('#j7fb-inline-wrap')));
+}
+
+const FIELD_SELECTOR = 'input:not([type=checkbox]):not([type=radio]):not([type=file]):not([type=hidden]),textarea';
+
+function candidateFields() {
+  return [...document.querySelectorAll(FIELD_SELECTOR)].filter((i) => visible(i) && !isOurs(i));
+}
+
+function labelsMatching(re) {
+  return [...document.querySelectorAll('label,span,div,p,b,strong,h1,h2,h3,h4,h5,h6')]
+    .filter((el) => {
+      if (isOurs(el) || el.children.length || !visible(el)) return false;
+      const t = text(el);
+      return t.length > 0 && t.length < 40 && re.test(t);
+    });
+}
+
+/// Find the box a caption belongs to.
+///
+/// j7 stacks a small uppercase caption above each box, so the honest way to pair
+/// them is the way your eye does: the nearest box that starts below the caption
+/// and lines up underneath it. Walking up the DOM and taking "the next input
+/// after this label" is not the same thing - a panel that puts two fields in one
+/// row (WEBSITE and TWITTER) nests them in ways that make the next input the
+/// wrong one, which is how the ticker ended up unreadable.
+function findFieldFor(labelRe, hintRe) {
+  const fields = candidateFields();
+  if (!fields.length) return null;
+
+  // a box that names itself is better evidence than any amount of geometry,
+  // but only when exactly one box claims the name
+  if (hintRe) {
+    const named = fields.filter((i) => hintRe.test([
+      i.getAttribute('placeholder') || '', i.getAttribute('name') || '',
+      i.getAttribute('aria-label') || '', i.id || '',
+    ].join(' ')));
+    if (named.length === 1) return named[0];
+  }
+
+  let best = null;
+  for (const lab of labelsMatching(labelRe)) {
+    const forId = lab.getAttribute('for');
     if (forId) {
       const byId = document.getElementById(forId);
-      if (byId) return byId;
+      if (byId && !isOurs(byId)) return byId;
     }
-    let scope = lab;
-    for (let up = 0; up < 4 && scope; up++) {
-      const field = [...scope.querySelectorAll('input,textarea')]
-        .find((i) => visible(i) && i.type !== 'checkbox' && i.type !== 'radio'
-          && (lab.compareDocumentPosition(i) & Node.DOCUMENT_POSITION_FOLLOWING));
-      if (field) return field;
-      scope = scope.parentElement;
+    const lr = lab.getBoundingClientRect();
+    for (const f of fields) {
+      const fr = f.getBoundingClientRect();
+      if (fr.top < lr.top - 2) continue;                       // above the caption
+      const overlap = Math.min(lr.right, fr.right) - Math.max(lr.left, fr.left);
+      if (overlap <= 0) continue;                              // a different column
+      const gap = fr.top - lr.bottom;
+      if (gap > 140) continue;                                 // too far to belong to it
+      const score = Math.min(overlap, 200) / 10 - Math.abs(gap);
+      if (!best || score > best.score) best = { el: f, score };
     }
   }
-  return null;
+  return best ? best.el : null;
 }
 
 function bySelector(key) {
@@ -89,8 +128,18 @@ function bySelector(key) {
   try { return document.querySelector(sel); } catch { return null; }
 }
 
-function readField(key, re) {
-  const el = bySelector(key) || inputForLabel(re);
+function describe(el) {
+  if (!el) return 'nothing matched';
+  const bits = [el.tagName.toLowerCase()];
+  if (el.id) bits.push('#' + el.id);
+  const ph = el.getAttribute && el.getAttribute('placeholder');
+  if (ph) bits.push('placeholder "' + ph.slice(0, 24) + '"');
+  return bits.join(' ');
+}
+
+function readField(key, labelRe, hintRe) {
+  const el = bySelector(key) || findFieldFor(labelRe, hintRe);
+  state.matched[key] = (state.selectors[key] ? 'taught: ' : '') + describe(el);
   if (!el) return '';
   return (el.value ?? text(el) ?? '').trim();
 }
@@ -126,7 +175,7 @@ function readVenue() {
     return { el, name, score };
   });
   scored.sort((a, b) => b.score - a.score);
-  return scored[0].score > 0 ? scored[0].name : (scored[0]?.name || '');
+  return scored[0].score > 0 ? scored[0].name : '';
 }
 
 function readToggle(labelRe) {
@@ -180,11 +229,12 @@ function firstNumber(s) {
 }
 
 async function readPanel() {
-  const name = readField('name', /^name\b/i);
-  const symbol = readField('symbol', /^symbol\b/i);
-  const website = readField('website', /^website/i);
-  const twitter = readField('twitter', /^twitter/i);
-  const devBuyRaw = readField('devBuy', /^(dev\s?buy|amount|buy)\b/i);
+  const name = readField('name', /^(name|token name)/i, /token ?name/i);
+  // "ticker" is what people call it even when the panel says SYMBOL
+  const symbol = readField('symbol', /^(symbol|ticker)/i, /symbol|ticker/i);
+  const website = readField('website', /^(website|site|url)/i, /website|url/i);
+  const twitter = readField('twitter', /^twitter/i, /twitter|x[.]com/i);
+  const devBuyRaw = readField('devBuy', /^(dev ?buy|amount|buy)/i, null);
 
   const read = {
     name, symbol, website, twitter,
