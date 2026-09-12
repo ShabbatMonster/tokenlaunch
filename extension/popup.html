@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 240px; margin: 0; padding: 14px; background: #0b0d10; color: #e6e9ee;
+         font: 12px/1.5 ui-monospace, Consolas, monospace; }
+  h1 { font-size: 11px; letter-spacing: 2px; margin: 0 0 10px; }
+  .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+  .kv span:first-child { color: #8a93a1; }
+  button { width: 100%; margin-top: 9px; padding: 9px; border: none; border-radius: 8px;
+           background: #1a1e24; color: #e6e9ee; border: 1px solid #262b33; font: inherit; cursor: pointer; }
+  button.go { background: #4ade80; color: #04160b; font-weight: 700; border: none; }
+  .ok { color: #4ade80; } .err { color: #f87171; }
+</style>
+</head>
+<body>
+  <h1>J7 DEPLOY FALLBACK</h1>
+  <div class="kv"><span>armed</span><span id="armed">…</span></div>
+  <div class="kv"><span>auto-fire</span><span id="auto">…</span></div>
+  <div class="kv"><span>wallet</span><span id="addr">…</span></div>
+  <div class="kv"><span>running</span><span id="busy">…</span></div>
+  <button class="go" id="fire">DEPLOY NOW (FORCE)</button>
+  <button id="refresh">RE-READ PANEL</button>
+  <button id="reset">CLEAR FIRED HISTORY</button>
+  <button id="opts">OPTIONS</button>
+<script src="popup.js"></script>
+</body>
+</html>

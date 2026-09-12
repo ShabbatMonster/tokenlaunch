@@ -1,0 +1,127 @@
+import { JSDOM } from 'jsdom';
+import fs from 'fs';
+import path from 'path';
+
+// Run with:  npm i --no-save jsdom && node extension/test/panel.test.mjs
+//
+// The panel reader is heuristic - it finds j7's fields by the label above them
+// rather than by a class name we guessed - so this is the test that keeps it
+// honest against a mock of the real layout, plus the three cases that decide
+// whether money moves: j7 errors, j7 says nothing at all, and j7 succeeds.
+
+// A mock of the j7 deploy panel as it appears in the screenshot: small uppercase
+// labels stacked above their inputs, a grid of pad buttons with one highlighted,
+// and a row of toggle chips.
+const html = `<!doctype html><body>
+<div id="panel">
+  <div class="hdr">Token Deploy</div>
+  <div class="f"><span>NAME</span><span class="cnt">0/32</span>
+    <input id="n" value="Not Safe For Work"></div>
+  <div class="f"><span>SYMBOL</span><input id="s" value="NSFW"></div>
+  <div class="row">
+    <div class="f"><span>WEBSITE (OPT.)</span><input id="w" placeholder="https://example.com"></div>
+    <div class="f"><span>TWITTER</span><input id="t" value="https://x.com/nsfw"></div>
+  </div>
+  <div class="imgbox"><span>Select Image</span><img id="preview" src="data:image/png;base64,iVBORw0KGgo="></div>
+  <div class="pads">
+    <button aria-pressed="true" class="pad active">Pump</button>
+    <button class="pad">OTC</button>
+    <button class="pad">USD1</button>
+    <button class="pad">BONK</button>
+    <button class="pad">Stonk</button>
+    <button class="pad">Ansem</button>
+    <button class="pad">four.meme</button>
+    <button class="pad">o1</button>
+    <button class="pad">ETH</button>
+    <button class="pad">Flap</button>
+    <button class="pad">Pons</button>
+    <button class="pad">Pools</button>
+  </div>
+  <div class="opts">
+    <div class="chip" aria-checked="true">Cashback</div>
+    <div class="chip" aria-checked="false">Pair · SOL</div>
+    <div class="chip" aria-checked="false">Fee Split</div>
+    <div class="chip" aria-checked="false">Bundle</div>
+  </div>
+  <div class="f"><span>DEV BUY</span><input id="db" value="5"></div>
+  <button id="deploy">Deploy (Enter)</button>
+</div></body>`;
+
+const dom = new JSDOM(html, { url: 'https://j7tracker.io/' });
+const { window } = dom;
+global.window = window; global.document = window.document;
+global.Node = window.Node; global.Element = window.Element;
+global.CSS = window.CSS || { escape: (s) => s };
+global.getComputedStyle = window.getComputedStyle.bind(window);
+global.MutationObserver = window.MutationObserver;
+global.FileReader = window.FileReader;
+global.setInterval = () => 0;
+
+// jsdom gives every element a zero box; treat everything as visible for the test
+Object.defineProperty(window.Element.prototype, 'getBoundingClientRect', {
+  value() { return { width: 100, height: 20, top: 0, left: 0, bottom: 20, right: 100 }; },
+});
+
+let captured = null;
+global.chrome = {
+  runtime: {
+    sendMessage: async (m) => {
+      if (m.type === 'j7fb:getSettings') return { armed: true, takeoverDelayMs: 20000, defaultDevBuySol: 0 };
+      if (m.type === 'j7fb:deploy') { captured = m.params; return { ok: true, result: { venue: 'Pump', mint: 'MockMint111' } }; }
+      return {};
+    },
+    onMessage: { addListener: () => {} },
+  },
+  storage: { local: { get: async () => ({}), set: async () => {} } },
+};
+
+const code = fs.readFileSync(path.join(import.meta.dirname, '..', 'content.js'), 'utf8');
+// expose the internals the harness needs to assert on
+window.eval(code + '\n; window.__t = { readPanel, readVenue, readToggle, currentParams, fire, state };');
+await new Promise((r) => setTimeout(r, 400));
+
+const read = await window.__t.readPanel();
+console.log('--- what the scraper mirrored from the mock panel ---');
+console.log('  name      ', JSON.stringify(read.name));
+console.log('  symbol    ', JSON.stringify(read.symbol));
+console.log('  website   ', JSON.stringify(read.website));
+console.log('  twitter   ', JSON.stringify(read.twitter));
+console.log('  venue     ', JSON.stringify(read.venue));
+console.log('  devBuySol ', read.devBuySol);
+console.log('  cashback  ', read.cashback);
+console.log('  image     ', read.imageDataUrl ? 'captured' : 'MISSING');
+
+const expect = { name: 'Not Safe For Work', symbol: 'NSFW', venue: 'pump', devBuySol: 5, cashback: true };
+let bad = 0;
+for (const [k, v] of Object.entries(expect)) {
+  if (String(read[k]) !== String(v)) { console.log(`  MISMATCH ${k}: got ${JSON.stringify(read[k])} want ${JSON.stringify(v)}`); bad++; }
+}
+console.log(bad ? `\n${bad} field(s) wrong` : '\nall asserted fields correct');
+
+// --- failure detection -----------------------------------------------------
+console.log('\n--- j7 fails, does the fallback notice? ---');
+Object.assign(window.__t.state.settings ??= {}, { armed: true, takeoverDelayMs: 250, autoFire: true, defaultDevBuySol: 0 });
+const click = () => document.getElementById('deploy').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const reset = () => { window.__t.state.failed = false; window.__t.state.busy = false; };
+
+captured = null;
+click();
+const toast = document.createElement('div');
+toast.textContent = 'Transaction timed out. Please try again.';
+document.body.appendChild(toast);
+await wait(500);
+console.log('  error toast ->', captured ? 'fired for ' + captured.symbol + ' on ' + captured.venue : 'DID NOT FIRE');
+
+captured = null; reset();
+click();
+await wait(700);
+console.log('  silent j7   ->', captured ? 'fired for ' + captured.symbol + ' on ' + captured.venue : 'DID NOT FIRE');
+
+captured = null; reset();
+click();
+const good = document.createElement('div');
+good.textContent = 'Success! Token launched, signature 5xAb';
+document.body.appendChild(good);
+await wait(500);
+console.log('  j7 succeeds ->', captured ? 'FIRED (WRONG)' : 'correctly stayed out of the way');
