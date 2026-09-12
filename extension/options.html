@@ -44,7 +44,13 @@
     <p class="note">Kept in this extension's local storage and read only by its background worker.
     It is never handed to the content script and never reaches j7tracker.io, so the page cannot
     read it even if the page turns hostile. Clearing it below removes it immediately.</p>
-    <button class="btn sec" id="clearKey">FORGET THE KEY</button>
+    <div class="row" style="gap:10px">
+      <button class="btn sec" id="importKey" style="margin-top:0">IMPORT FROM LAUNCHER</button>
+      <button class="btn sec" id="clearKey" style="margin-top:0">FORGET THE KEY</button>
+    </div>
+    <p class="note">Importing reads the Solana key the launcher already saved in this browser
+    (<code>keys.v1</code> on its own origin) so you don't paste it twice. It reuses an open
+    launcher tab if there is one, otherwise it opens one in the background and closes it again.</p>
   </div>
 
   <div class="card">

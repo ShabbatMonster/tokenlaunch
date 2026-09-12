@@ -5,7 +5,9 @@
   "description": "Mirrors the token you set up in j7tracker's deploy panel and finishes the launch yourself when j7 times out or errors.",
   "permissions": [
     "storage",
-    "notifications"
+    "notifications",
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "https://j7tracker.io/*",
@@ -13,7 +15,10 @@
     "https://pump.fun/*",
     "https://api.thegraph.com/*",
     "https://mainnet.helius-rpc.com/*",
-    "https://api.mainnet-beta.solana.com/*"
+    "https://api.mainnet-beta.solana.com/*",
+    "https://shabbatmonster.github.io/tokenlaunch/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "optional_host_permissions": [
     "*://*/*"

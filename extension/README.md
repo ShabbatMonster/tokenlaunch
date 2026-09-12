@@ -18,9 +18,28 @@ Then `chrome://extensions` → Developer mode → **Load unpacked** → pick `ex
 
 Open the extension's **Options** and:
 
-1. paste your Solana private key (base58),
+1. paste your Solana private key (base58), or press **IMPORT FROM LAUNCHER** to
+   reuse the one the launcher already has in this browser,
 2. tick **Armed**,
 3. leave **Fire automatically** off until you've watched it mirror a panel correctly at least once.
+
+## The button in j7's toolbar
+
+A **FALLBACK** button with its own buy-amount box is injected into j7's own
+toolbar, next to its Panel control, so it is already under your hand when a
+deploy dies. The unit follows the pad — SOL for Pump/BONK/Stonk, ETH for the
+Robinhood-chain pads, BNB for Flap and four.meme.
+
+It takes two clicks (the second says `FIRE?`) so a stray click in a dense
+toolbar can't spend money — **except** once j7 has actually failed, when it
+pre-arms itself and taking over is the single click it should be.
+
+Type an amount in its box and that number is what launches; it stops mirroring
+j7's field until the launch is done, so clicking the button can't quietly
+restore the old size.
+
+Press **⇱** on the bar to move the button somewhere else, then click where it
+should sit.
 
 ## Where the key lives
 

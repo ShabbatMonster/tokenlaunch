@@ -125,3 +125,52 @@ good.textContent = 'Success! Token launched, signature 5xAb';
 document.body.appendChild(good);
 await wait(500);
 console.log('  j7 succeeds ->', captured ? 'FIRED (WRONG)' : 'correctly stayed out of the way');
+
+// --- the button injected into j7's toolbar ---------------------------------
+console.log('\n--- inline FALLBACK button ---');
+const wrap = document.getElementById('j7fb-inline-wrap');
+const btn = document.getElementById('j7fb-inline');
+const amt = document.getElementById('j7fb-inline-amt');
+const unit = document.getElementById('j7fb-inline-unit');
+console.log('  mounted     ->', wrap ? 'yes' : 'NO');
+console.log('  sits next to->', wrap?.nextElementSibling?.textContent?.trim()
+  || wrap?.previousElementSibling?.textContent?.trim() || '(nothing)');
+console.log('  amount      ->', amt?.value, unit?.textContent);
+
+// a stray click must not spend money; the second click is the one that fires
+captured = null;
+window.__t.state.failed = false; window.__t.state.busy = false; window.__t.state.armedToFire = false;
+btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(50);
+console.log('  1st click   ->', captured ? 'FIRED (WRONG)' : `safe, now reads "${btn.textContent}"`);
+btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(300);
+console.log('  2nd click   ->', captured ? `fired ${captured.symbol} for ${captured.devBuySol}` : 'DID NOT FIRE');
+
+// the number typed inline is the amount that actually gets launched
+captured = null; reset(); window.__t.state.armedToFire = false;
+amt.value = '2.5';
+amt.dispatchEvent(new window.Event('input', { bubbles: true })); // as typing would
+btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(300);
+console.log('  typed 2.5   ->', captured ? `launched with devBuySol=${captured.devBuySol}` : 'DID NOT FIRE');
+
+// after j7 fails the button is pre-armed, so takeover is one click
+captured = null; reset(); window.__t.state.armedToFire = false;
+click();
+const t2 = document.createElement('div');
+t2.textContent = 'Error: blockhash expired';
+document.body.appendChild(t2);
+await wait(60);
+window.__t.state.busy = false;
+const armedAfterFail = btn.classList.contains('j7fb-i-arm') || btn.textContent === 'FIRE?';
+console.log('  after fail  ->', armedAfterFail ? 'pre-armed, one click to take over' : 'not pre-armed');
+
+// the unit follows the pad
+document.querySelector('.pad.active').setAttribute('aria-pressed', 'false');
+const ethPad = [...document.querySelectorAll('.pad')].find((b) => b.textContent === 'ETH');
+ethPad.setAttribute('aria-pressed', 'true');
+await window.__t.readPanel();
+window.eval('paintInline()');
+console.log('  ETH pad     ->', unit.textContent, '(expected ETH)');
