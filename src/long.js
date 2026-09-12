@@ -1,4 +1,7 @@
-import { createPublicClient, createWalletClient, http, defineChain, parseEther, getAddress } from 'viem';
+import {
+  createPublicClient, createWalletClient, http, defineChain, parseEther, getAddress,
+  encodeAbiParameters,
+} from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import {
   DopplerSDK, ADDRESSES,
@@ -39,13 +42,15 @@ const CHAIN = defineChain({
   rpcUrls: { default: { http: [RPC] } },
 });
 
-// The Rehype hook. FROGE's own state names 0x6f02324d...0F77, but that is the
-// per-pool hook instance the initializer produced for FROGE - naming it here
-// reverts with no data. The address to pass is the chain's Rehype hook module,
-// which the initializer clones per pool. An earlier note in this file claimed
-// the Rehype modules were NotWhitelisted on this Airlock; that is no longer
-// true, and a launch naming this one simulates clean.
-export const LONG_REHYPE_HOOK = ADDRESSES[4663].rehypeDopplerHook;
+// The Rehype hook every long.xyz coin runs behind. Both FROGE and PDOOM
+// (0x4c3A5652...) name this same address, so it is the shared hook, not a
+// per-pool instance - an earlier guess here that it was per-pool, and that the
+// SDK's rehypeDopplerHook should be used instead, was wrong and produced pools
+// that were not long.xyz coins.
+export const LONG_REHYPE_HOOK = '0x6f02324d20CC679d0E585290CAa6b16baCbC0F77';
+
+// the Airlock every long.xyz coin is created through
+const AIRLOCK = '0xeb7C034704eF8Dcd2D32324c1545f62fB4aD0862';
 
 // FROGE's live fee schedule: an 80% tax on the first trade decaying to 1.12%
 // over ten seconds. 800000 is the protocol's maximum start fee.
@@ -67,53 +72,113 @@ const REHYPE_FEES_ALL_TO_STOCK = {
   numeraireFeesToLpWad: 0n,
 };
 
-// The multicurve shape. Everything about it was established by simulating
-// against the live Airlock, because each failure mode reverts without saying
-// what is wrong:
+// The curve, copied from a long.xyz launch rather than worked out from first
+// principles - which is what went wrong before. PDOOM (p(doom), 0x4c3A5652...)
+// was launched through long.xyz's own router on 2026-09-12, and its Airlock
+// call carries exactly this:
 //
-//  - the shares must sum to exactly 1e18. Short of that the SDK quietly appends
-//    a fallback curve running out to tick 887272, and the create reverts.
-//  - the set needs the deep tail band underneath the opening tick. A set that
-//    starts at the opening tick with nothing below it reverts every time.
-//  - every tick must be a multiple of the tick spacing. This is the one that
-//    misled me: 84100 - the value Doppler's own defaults use, and about where
-//    FROGE opens - is not divisible by 8 and reverts, which looked at first
-//    like a ceiling on how high the pool could open. It is not. Aligned ticks
-//    simulate clean up to 104000; 120000 is where the real ceiling starts.
-//  - the far end is capped by uint128 liquidity safety, not by the tick range.
-//    A band holding 25% of a 1B supply cannot reach past about 348144.
+//   fee 2000, tickSpacing 8, farTick 887256
+//   curves: [-108088, 2344]  1 position  40%
+//           [  2344, 887264] 1 position  60%
 //
-// So this opens at 84096, the aligned tick next to FROGE's own opening, and
-// mirrors its overlapping bands as far out as the liquidity math allows. The
-// old values here opened at 5080 and topped out at 39088, which is why a coin
-// launched with them opened far too cheap and ran out of curve after ~50x.
-const OPENING_TICK = 84096;
-const FLOOR_TICK = -887264;
-const LONG_CURVE_BANDS = [
-  { near: FLOOR_TICK, far: OPENING_TICK, numPositions: 1, shares: parseEther('0.35') },
-  { near: OPENING_TICK, far: 176200, numPositions: 11, shares: parseEther('0.25') },
-  { near: 116296, far: 222200, numPositions: 11, shares: parseEther('0.20') },
-  { near: 142200, far: 348144, numPositions: 11, shares: parseEther('0.20') },
+// Two curves, ONE position each. That last part matters: this file previously
+// used eleven positions per band, which packs enough liquidity into each to
+// break the uint128 limit near the top of the range - which is why reaching
+// 887264 looked impossible and the curve got capped at 348144 instead. With a
+// single position per curve it reaches the full range comfortably.
+//
+// The fee is 2000, not 0. The pool still reads back as a dynamic-fee pool
+// because the hook owns the rate, but 2000 is the value long.xyz passes and the
+// lpFee FROGE's pool reports.
+const LONG_CURVES = [
+  { tickLower: -108088, tickUpper: 2344, numPositions: 1, shares: parseEther('0.40') },
+  { tickLower: 2344, tickUpper: 887264, numPositions: 1, shares: parseEther('0.60') },
 ];
+
+// Passed as written; the initializer flips the sign itself when the new token
+// sorts above the numeraire. PDOOM passes +887256 and reads back -887256.
+const LONG_FAR_TICK = 887256;
+const LONG_POOL_FEE = 2000;
 
 const TICK_SPACING = 8;
 const DEFAULT_SUPPLY = parseEther('1000000000');
 
-// The ticks are given in price space - distance above the opening price - and
-// the initializer converts them into the pool's own tick space itself, which is
-// why every pool launched this way reads back a negative current tick whichever
-// side of the numeraire the new token lands on. They are passed as written.
-//
-// farTick is deliberately not set here. Left alone the SDK derives it from the
-// curves, which is what the launches that simulate clean do; FROGE's stored
-// +887256 belongs to a curve set that no longer exists on chain.
+// The initializer's own argument blob. Encoded here rather than by the SDK
+// because the SDK and the deployed contracts disagree about one field.
+const POOL_INITIALIZER_DATA_ABI = [{ type: 'tuple', components: [
+  { name: 'fee', type: 'uint24' },
+  { name: 'tickSpacing', type: 'int24' },
+  { name: 'farTick', type: 'int24' },
+  { name: 'curves', type: 'tuple[]', components: [
+    { name: 'tickLower', type: 'int24' }, { name: 'tickUpper', type: 'int24' },
+    { name: 'numPositions', type: 'uint16' }, { name: 'shares', type: 'uint256' },
+  ] },
+  { name: 'beneficiaries', type: 'tuple[]', components: [
+    { name: 'beneficiary', type: 'address' }, { name: 'shares', type: 'uint96' },
+  ] },
+  { name: 'dopplerHook', type: 'address' },
+  { name: 'onInitializationDopplerHookCalldata', type: 'bytes' },
+  { name: 'graduationDopplerHookCalldata', type: 'bytes' },
+] }];
+
+// The live hook reads fifteen flat words. The SDK's encoder wraps them in a
+// tuple with a feeBeneficiaries array on the end, which adds a leading offset
+// word and two array words - three extra words that shift every offset after
+// them, so the hook reads the wrong fields. PDOOM's calldata is 480 bytes; the
+// SDK's is 576. Encoded by hand to match the chain.
+const REHYPE_CALLDATA_ABI = [
+  { type: 'address' }, { type: 'address' }, { type: 'uint24' }, { type: 'uint24' },
+  { type: 'uint32' }, { type: 'uint32' }, { type: 'uint8' },
+  { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' },
+  { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' },
+];
+
+function encodeRehypeCalldata(numeraire, buybackDst) {
+  const d = REHYPE_FEES_ALL_TO_STOCK;
+  return encodeAbiParameters(REHYPE_CALLDATA_ABI, [
+    numeraire, buybackDst,
+    REHYPE_START_FEE, REHYPE_END_FEE, REHYPE_DECAY_SECONDS,
+    0, 0,
+    d.assetFeesToAssetBuybackWad, d.assetFeesToNumeraireBuybackWad,
+    d.assetFeesToBeneficiaryWad, d.assetFeesToLpWad,
+    d.numeraireFeesToAssetBuybackWad, d.numeraireFeesToNumeraireBuybackWad,
+    d.numeraireFeesToBeneficiaryWad, d.numeraireFeesToLpWad,
+  ]);
+}
+
+function encodePoolInitializerData(numeraire, buybackDst, beneficiaries) {
+  return encodeAbiParameters(POOL_INITIALIZER_DATA_ABI, [{
+    fee: LONG_POOL_FEE,
+    tickSpacing: TICK_SPACING,
+    farTick: LONG_FAR_TICK,
+    curves: longCurves(),
+    beneficiaries,
+    dopplerHook: getAddress(LONG_REHYPE_HOOK),
+    onInitializationDopplerHookCalldata: encodeRehypeCalldata(numeraire, buybackDst),
+    graduationDopplerHookCalldata: '0x',
+  }]);
+}
+
+const AIRLOCK_CREATE_ABI = [{
+  type: 'function', name: 'create', stateMutability: 'nonpayable',
+  inputs: [{ name: 'params', type: 'tuple', components: [
+    { name: 'initialSupply', type: 'uint256' }, { name: 'numTokensToSell', type: 'uint256' },
+    { name: 'numeraire', type: 'address' }, { name: 'tokenFactory', type: 'address' },
+    { name: 'tokenFactoryData', type: 'bytes' }, { name: 'governanceFactory', type: 'address' },
+    { name: 'governanceFactoryData', type: 'bytes' }, { name: 'poolInitializer', type: 'address' },
+    { name: 'poolInitializerData', type: 'bytes' }, { name: 'liquidityMigrator', type: 'address' },
+    { name: 'liquidityMigratorData', type: 'bytes' }, { name: 'integrator', type: 'address' },
+    { name: 'salt', type: 'bytes32' },
+  ] }],
+  outputs: [
+    { name: 'asset', type: 'address' }, { name: 'pool', type: 'address' },
+    { name: 'governance', type: 'address' }, { name: 'timelock', type: 'address' },
+    { name: 'migrationPool', type: 'address' },
+  ],
+}];
+
 function longCurves() {
-  return LONG_CURVE_BANDS.map(({ near, far, numPositions, shares }) => ({
-    tickLower: near,
-    tickUpper: far,
-    numPositions,
-    shares,
-  }));
+  return LONG_CURVES.map((c) => ({ ...c }));
 }
 
 /// Launch a token on long.xyz's Airlock, paired against `numeraire`.
@@ -136,7 +201,7 @@ export async function launchLong(opts) {
   const numTokensToSell = initialSupply;
 
   const curves = longCurves();
-  say(`curve opens at tick ${OPENING_TICK} and runs out at ${LONG_CURVE_BANDS[LONG_CURVE_BANDS.length - 1].far}`);
+  say(`curve runs ${curves[0].tickLower} to ${curves[curves.length - 1].tickUpper}, far tick ${LONG_FAR_TICK}`);
 
   say('loading Doppler SDK...');
   const sdk = new DopplerSDK({ publicClient, walletClient, chainId: CHAIN_ID });
@@ -159,10 +224,7 @@ export async function launchLong(opts) {
   const params = sdk.buildMulticurveAuction()
     .tokenConfig({ name, symbol, tokenURI: tokenURI || '' })
     .saleConfig({ initialSupply, numTokensToSell, numeraire: quote })
-    // fee is left at 0 here on purpose: naming a Rehype hook makes the pool a
-    // dynamic-fee pool, and both the SDK and the initializer set the flag
-    // themselves. FROGE's pool key reads back fee = 0x800000.
-    .poolConfig({ fee: 0, tickSpacing: TICK_SPACING, curves, beneficiaries })
+    .poolConfig({ fee: LONG_POOL_FEE, tickSpacing: TICK_SPACING, curves, beneficiaries })
     .withDopplerHookInitializer(addrs.dopplerHookInitializer)
     .withRehypeDopplerHookInitializer({
       hookAddress: getAddress(LONG_REHYPE_HOOK),
@@ -174,6 +236,7 @@ export async function launchLong(opts) {
       // whoever this is controls the fee split afterwards and receives the
       // bought-back stock, so it defaults to you rather than to the launchpad.
       buybackDestination: getAddress(buybackDestination || account.address),
+      farTick: LONG_FAR_TICK,
     })
     // FROGE never graduates out: its liquidity stays in the v4 multicurve pool
     // and the Rehype hook keeps recycling fees into the stock. Migrating into a
@@ -186,26 +249,42 @@ export async function launchLong(opts) {
     .withIntegrator(account.address)
     .build();
 
-  // simulate before spending anything, and use the predicted token address
+  // The SDK is used for everything that is not the initializer blob - the token
+  // factory data, the governance data, and the mined salt - and then its
+  // poolInitializerData is replaced with one encoded here. Its own encoder
+  // disagrees with the deployed hook about the Rehype calldata layout, which is
+  // the difference between a long.xyz coin and whatever this file made before.
+  say('encoding the launch...');
+  const createParams = await sdk.factory.encodeCreateMulticurveParams(params);
+  const built = { ...(createParams.createParams ?? createParams) };
+  built.poolInitializerData = encodePoolInitializerData(
+    quote, getAddress(buybackDestination || account.address), beneficiaries,
+  );
+  built.integrator = account.address;
+
   say('simulating launch...');
-  const sim = await sdk.factory.simulateCreateMulticurve(params);
-  const predicted = sim?.tokenAddress ?? null;
+  const { result } = await publicClient.simulateContract({
+    address: getAddress(AIRLOCK), abi: AIRLOCK_CREATE_ABI,
+    functionName: 'create', args: [built], account,
+  });
+  const predicted = Array.isArray(result) ? result[0] : result?.asset ?? null;
+
   if (dryRun) {
     say(`simulation passed - would launch ${predicted}`);
-    return { token: predicted, hash: null, dryRun: true };
+    return { token: predicted, hash: null, dryRun: true, poolInitializerData: built.poolInitializerData };
   }
 
   say('sending launch tx...');
-  const res = await sdk.factory.createMulticurve(params);
-  const hash = typeof res === 'string' ? res : (res?.hash ?? res?.transactionHash ?? null);
+  const hash = await walletClient.writeContract({
+    address: getAddress(AIRLOCK), abi: AIRLOCK_CREATE_ABI,
+    functionName: 'create', args: [built], account,
+  });
 
-  if (hash) {
-    say('waiting for confirmation...');
-    const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1 });
-    if (receipt.status !== 'success') throw new Error('launch tx reverted: ' + hash);
-  }
+  say('waiting for confirmation...');
+  const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error('launch tx reverted: ' + hash);
 
-  return { token: res?.tokenAddress ?? predicted, hash };
+  return { token: predicted, hash };
 }
 
 // ---------------------------------------------------------------------------
@@ -262,9 +341,8 @@ export async function inspectLong(tokenAddress) {
   if (state.poolFee !== DYNAMIC_FEE) {
     problems.push(`pool fee is static (${state.poolFee}) - a long.xyz coin uses a dynamic fee`);
   }
-  const expectedReach = LONG_CURVE_BANDS[LONG_CURVE_BANDS.length - 1].far;
-  if (Math.abs(state.farTick) < expectedReach - TICK_SPACING) {
-    problems.push(`curve only reaches tick ${state.farTick} - it should reach about ${expectedReach}`);
+  if (Math.abs(state.farTick) !== LONG_FAR_TICK) {
+    problems.push(`far tick is ${state.farTick} - a long.xyz coin reads back plus or minus ${LONG_FAR_TICK}`);
   }
 
   return { ...state, looksLikeLong: problems.length === 0, problems };
