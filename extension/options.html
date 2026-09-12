@@ -72,8 +72,13 @@
     <div class="check"><input type="checkbox" id="armed"><span>Armed — show the bar on j7tracker.io</span></div>
     <div class="check"><input type="checkbox" id="autoFire"><span>Fire automatically when j7 fails (otherwise it waits for a click)</span></div>
     <div class="check"><input type="checkbox" id="prePin"><span>Pre-pin metadata and pre-read pump's config while you fill the panel in (much faster launches)</span></div>
-    <div class="check"><input type="checkbox" id="cashback"><span>Cashback coins by default</span></div>
-    <div class="check"><input type="checkbox" id="feesToHolders"><span>Fees to holders by default</span></div>
+    <div class="check"><input type="checkbox" id="feesToHolders"><span>Fees to holders (holder-rewards coin) by default</span></div>
+    <label>HOLDERS' SHARE OF EVERY TRADE (BPS)</label>
+    <input type="number" id="creatorFeeBps" min="0" max="300" step="5">
+    <p class="note">300 is 3%, which is pump.fun's on-chain ceiling
+    (<code>max_configurable_creator_fee_bps</code>) for a fee you set yourself. Leave it at 0 to take
+    pump's market-cap tier rate instead, which tops out at 0.95% &mdash; that is where the idea of a
+    1% maximum comes from. Cashback coins are gone: <code>create_v2</code> rejects them now.</p>
 
     <button class="btn" id="save">SAVE</button>
     <div class="status" id="saved"></div>

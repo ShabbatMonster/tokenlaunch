@@ -233,9 +233,18 @@
         <div style="flex:0 0 150px"><label>DEV BUY (SOL, opt.)</label><input type="text" id="pumpDevBuy" value="0" spellcheck="false"></div>
       </div>
       <label style="margin-top:10px"><input type="checkbox" id="pumpFeesToHolders" style="width:auto;margin-right:6px">
-        FEES TO HOLDERS <span class="hint">creator fees are routed to holders instead of you</span></label>
-      <label style="margin-top:10px"><input type="checkbox" id="pumpCashback" checked style="width:auto;margin-right:6px">
-        CASHBACK COIN <span class="hint">marks the curve so traders can claim a share of fees back — on by default</span></label>
+        FEES TO HOLDERS <span class="hint">every trade's creator fee is paid out to holders by pump.fun, not to you</span></label>
+      <div class="row" style="margin-top:8px">
+        <div style="flex:0 0 170px"><label>FEE RATE (%)</label>
+          <input type="text" id="pumpCreatorFeePct" value="3" spellcheck="false" placeholder="3"></div>
+        <div><label>&nbsp;</label>
+          <div class="hint" id="pumpFeeHint" style="line-height:1.5">Leave blank to take pump's market-cap tier rate,
+          which tops out at <b>0.95%</b>. Set it and the ceiling is the on-chain
+          <code>max_configurable_creator_fee_bps</code> instead &mdash; <b>3%</b> today.
+          <button class="btn secondary" id="pumpFeeCheckBtn" style="margin-top:6px;padding:5px 8px;font-size:11px">READ THE LIMIT ON-CHAIN</button></div></div>
+      </div>
+      <label style="margin-top:10px" title="pump.fun removed this"><input type="checkbox" id="pumpCashback" disabled style="width:auto;margin-right:6px">
+        CASHBACK COIN <span class="hint">removed by pump.fun &mdash; <code>create_v2</code> now fails when this is set. Holder rewards above is the replacement.</span></label>
       <label style="margin-top:10px">CUSTOM PAIR CONTRACT <span class="hint">overrides the dropdown · works for launching and arming, listed or not</span></label>
       <input type="text" id="pumpQuoteCustom" spellcheck="false"
              placeholder="paste any mint address to pair against">

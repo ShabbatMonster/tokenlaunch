@@ -134,8 +134,10 @@ export async function deployMirrored(opts) {
     const res = await launchPump({
       rpcUrl, secretKey, name, symbol, uri,
       devBuySol: devBuy, slippageBps, quoteMint,
-      cashback: params.cashback !== false,
+      // cashback was removed by pump.fun; create_v2 rejects it
+      cashback: false,
       feesToHolders: !!params.feesToHolders,
+      creatorFeeBps: Number(params.creatorFeeBps || 0) || 0,
       simulateOnly, preloaded, onStatus: say,
     });
     return { venue: venue.label, mint: res?.mint ?? res?.mintAddress ?? null, signature: res?.signature ?? res?.hash ?? null, raw: res };
