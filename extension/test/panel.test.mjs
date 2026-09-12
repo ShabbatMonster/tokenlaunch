@@ -15,12 +15,15 @@ import path from 'path';
 const html = `<!doctype html><body>
 <div id="panel">
   <div class="hdr">Token Deploy</div>
-  <div class="f"><span>NAME</span><span class="cnt">0/32</span>
-    <input id="n" value="Not Safe For Work"></div>
-  <div class="f"><span>SYMBOL</span><input id="s" value="NSFW"></div>
+  <div class="f"><span data-rect="10,40,60,52">NAME</span><span class="cnt">0/32</span>
+    <input id="n" data-rect="10,56,690,88" value="Not Safe For Work"></div>
+  <div class="f"><span data-rect="10,110,70,122">SYMBOL</span><span class="cnt">0/13</span>
+    <input id="s" data-rect="10,126,690,158" value="NSFW"></div>
   <div class="row">
-    <div class="f"><span>WEBSITE (OPT.)</span><input id="w" placeholder="https://example.com"></div>
-    <div class="f"><span>TWITTER</span><input id="t" value="https://x.com/nsfw"></div>
+    <div class="f"><span data-rect="10,180,90,192">WEBSITE (OPT.)</span>
+      <input id="w" data-rect="10,196,340,228" placeholder="https://example.com"></div>
+    <div class="f"><span data-rect="360,180,430,192">TWITTER</span>
+      <input id="t" data-rect="360,196,690,228" value="https://x.com/nsfw"></div>
   </div>
   <div class="imgbox"><span>Select Image</span><img id="preview" src="data:image/png;base64,iVBORw0KGgo="></div>
   <div class="pads">
@@ -43,8 +46,9 @@ const html = `<!doctype html><body>
     <div class="chip" aria-checked="false">Fee Split</div>
     <div class="chip" aria-checked="false">Bundle</div>
   </div>
-  <div class="f"><span>DEV BUY</span><input id="db" value="5"></div>
-  <button id="deploy">Deploy (Enter)</button>
+  <div class="f"><span data-rect="10,470,70,482">DEV BUY</span>
+    <input id="db" data-rect="10,486,200,518" value="5"></div>
+  <button id="deploy" data-rect="240,540,520,572">Deploy (Enter)</button>
 </div></body>`;
 
 const dom = new JSDOM(html, { url: 'https://j7tracker.io/' });
@@ -59,7 +63,14 @@ global.setInterval = () => 0;
 
 // jsdom gives every element a zero box; treat everything as visible for the test
 Object.defineProperty(window.Element.prototype, 'getBoundingClientRect', {
-  value() { return { width: 100, height: 20, top: 0, left: 0, bottom: 20, right: 100 }; },
+  value() {
+    const r = this.getAttribute && this.getAttribute('data-rect');
+    if (r) {
+      const [left, top, right, bottom] = r.split(',').map(Number);
+      return { left, top, right, bottom, width: right - left, height: bottom - top };
+    }
+    return { width: 100, height: 20, top: 0, left: 0, bottom: 20, right: 100 };
+  },
 });
 
 let captured = null;
