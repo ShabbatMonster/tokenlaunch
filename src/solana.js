@@ -120,6 +120,76 @@ function addPriority(tx) {
 }
 
 // read the quote mint's token program + decimals in one call
+// ---------------------------------------------------------------------------
+// Token badges.
+//
+// Meteora's DBC only accepts a Token-2022 quote mint that Meteora has badged,
+// and the badge has to be handed to create_config as an account. It is not in
+// the instruction's declared account list - not in the SDK's bundled IDL, and
+// not in the IDL the deployed program publishes on-chain either, both of which
+// are behind the live program. So the SDK builds an 8-account create_config and
+// the program rejects it with InvalidTokenBadge (6080, 0x17c0).
+//
+// A real successful create_config against a Token-2022 quote has NINE accounts,
+// the badge last, after `program`:
+//
+//   0 config  1 fee_claimer  2 leftover_receiver  3 quote_mint  4 payer
+//   5 system_program  6 event_authority  7 program  8 token_badge
+//
+// (read off 5kxJcEvYpWVcLZZ8iyprXFkp…, an xStock-quoted config). So the badge is
+// appended as a trailing remaining account.
+// ---------------------------------------------------------------------------
+
+export const DBC_PROGRAM = new PublicKey('dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN');
+const CREATE_CONFIG_DISC = Buffer.from('c9cff3724b6f2fbd', 'hex');
+
+/// Where Meteora keeps the badge that marks a mint usable as a DBC quote.
+export function meteoraTokenBadge(mint) {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from('token_badge'), new PublicKey(mint).toBuffer()], DBC_PROGRAM,
+  )[0];
+}
+
+/// Is this mint allowed as a DBC quote? Classic SPL mints need no badge.
+export async function meteoraQuoteAllowed(rpcUrl, mint) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const { program, decimals } = await readQuoteMint(connection, new PublicKey(mint));
+  const isToken2022 = program.equals(TOKEN_2022_PROGRAM_ID);
+  if (!isToken2022) return { allowed: true, isToken2022, decimals, badge: null, reason: null };
+  const badge = meteoraTokenBadge(mint);
+  const info = await connection.getAccountInfo(badge);
+  return {
+    allowed: !!info, isToken2022, decimals, badge: badge.toBase58(),
+    reason: info ? null
+      : 'Meteora has not badged this Token-2022 mint, so its DBC will not accept it as a quote. '
+        + 'Only Meteora can create a badge (create_token_badge is admin-gated), so this needs asking them.',
+  };
+}
+
+/// Append the badge to a create_config the SDK just built.
+async function attachTokenBadge(connection, tx, quote, quoteProgram, say) {
+  if (!quoteProgram.equals(TOKEN_2022_PROGRAM_ID)) return null;
+  const badge = meteoraTokenBadge(quote);
+  const info = await connection.getAccountInfo(badge);
+  if (!info) {
+    throw new Error(
+      `Meteora has not badged ${quote.toBase58()} as a DBC quote token. Its create_config checks for a `
+      + `token badge at ${badge.toBase58()} and there is none, which is the InvalidTokenBadge error. `
+      + 'Creating one is admin-gated, so either ask Meteora to badge it or pick a quote they already have.',
+    );
+  }
+  const target = tx.instructions.find(
+    (ix) => ix.programId.equals(DBC_PROGRAM) && Buffer.from(ix.data).subarray(0, 8).equals(CREATE_CONFIG_DISC),
+  );
+  if (!target) throw new Error('could not find create_config in the transaction to attach the token badge to');
+  // already there if a future SDK starts doing this itself
+  if (!target.keys.some((k) => k.pubkey.equals(badge))) {
+    target.keys.push({ pubkey: badge, isSigner: false, isWritable: false });
+  }
+  if (say) say(`attached Meteora's token badge for the quote (${badge.toBase58().slice(0, 8)}…)`);
+  return badge;
+}
+
 async function readQuoteMint(connection, quote) {
   const info = await connection.getParsedAccountInfo(quote, 'confirmed');
   const v = info.value;
@@ -163,7 +233,7 @@ async function waitForAccount(connection, pubkey, tries = 30) {
 // main entry: create the config, then the pool. Reports progress via onStatus.
 // Returns { mint, config, pool, configSig, poolSig }.
 export async function launchMeteora(opts) {
-  const { rpcUrl, secretKey, quoteMint, name, symbol, uri, params, onStatus } = opts;
+  const { rpcUrl, secretKey, quoteMint, name, symbol, uri, params, dryRun = false, onStatus } = opts;
   const say = (m) => onStatus && onStatus(m);
 
   const connection = new Connection(rpcUrl, 'confirmed');
@@ -186,7 +256,31 @@ export async function launchMeteora(opts) {
     quoteMint: quote,
     ...curveConfig,
   });
+  // Token-2022 quotes need Meteora's badge passed in; the SDK does not add it
+  const badge = await attachTokenBadge(connection, createConfigTx, quote, quoteProgram, say);
   addPriority(createConfigTx);
+
+  if (dryRun) {
+    // simulate the config creation only - enough to prove the quote is accepted
+    // and the account list is the shape the program wants, without spending
+    const target = createConfigTx.instructions.find(
+      (ix) => ix.programId.equals(DBC_PROGRAM) && Buffer.from(ix.data).subarray(0, 8).equals(CREATE_CONFIG_DISC),
+    );
+    createConfigTx.feePayer = payer.publicKey;
+    createConfigTx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+    createConfigTx.sign(payer, config);
+    const sim = await connection.simulateTransaction(createConfigTx);
+    return {
+      dryRun: true,
+      quoteProgram: quoteProgram.toBase58(),
+      tokenBadge: badge ? badge.toBase58() : null,
+      createConfigAccounts: target.keys.map((k) => k.pubkey.toBase58()),
+      simulationError: sim.value.err ? JSON.stringify(sim.value.err) : null,
+      logs: sim.value.logs || [],
+    };
+  }
+
+
   const configSig = await sendAndConfirmTransaction(connection, createConfigTx, [payer, config], { commitment: 'confirmed' });
   say(`config created (${configSig.slice(0, 8)}…); minting token + opening curve…`);
 
