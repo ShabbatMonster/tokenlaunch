@@ -658,6 +658,21 @@ export async function pumpProbe(opts) {
 }
 
 /// Launch on pump.fun. Returns { mint, sig }.
+/// Read everything a launch needs that does not depend on the coin itself.
+///
+/// Safe to call speculatively and repeatedly - it only reads. Hand the result
+/// back to launchPump as `preloaded` and a launch starts at its simulation
+/// rather than at four round trips of setup.
+export async function pumpWarmup({ rpcUrl, quoteMint }) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  // one at a time for the same reason launchPump does it that way - a burst on
+  // one key gets throttled, and nothing here is in a hurry
+  const global = await pumpStatus(rpcUrl);
+  const quote = await resolveQuote(connection, quoteMint);
+  const lookupTable = await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
+  return { global, quote, lookupTable, quoteMint: quoteMint ?? null, at: Date.now() };
+}
+
 export async function launchPump(opts) {
   const {
     rpcUrl, secretKey, name, symbol, uri, devBuySol = 0,
@@ -667,23 +682,36 @@ export async function launchPump(opts) {
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
 
-  say('reading pump.fun config…');
-  const g = await pumpStatus(rpcUrl);
+  // Everything needed before a launch can even be simulated - pump's global
+  // config, the quote, the address lookup table - is fetched here, and this
+  // used to be the slowest part of a launch.
+  //
+  // Firing them off together looked like the obvious fix and measured WORSE:
+  // 158ms against 72ms on one Helius key, 82 against 75 on the other. The
+  // provider throttles concurrent requests per key, and a burst that trips its
+  // limit buys a 500-1000ms backoff per retry - which is where a launch on a
+  // busy key really loses its seconds. So they stay one at a time.
+  //
+  // The actual fix is not doing them here at all. None depend on the coin, so a
+  // caller can read them ahead of time - the extension does it while you are
+  // still filling the panel in - and pass them in, leaving this block a no-op.
+  const pre = opts.preloaded || {};
+  say(pre.global ? 'using the pump.fun config already read…' : 'reading pump.fun config…');
+  const g = pre.global ?? await pumpStatus(rpcUrl);
+  // null is a legitimate quote (a plain SOL pair), so presence decides here
+  const quote = 'quote' in pre ? pre.quote : await resolveQuote(connection, quoteMint);
+  const lookupTable = pre.lookupTable ?? await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
+
   if (!g.createV2Enabled) throw new Error('pump.fun has create_v2 disabled right now');
-  const quote = await resolveQuote(connection, quoteMint);
   if (quote?.blockers?.length) {
     throw new Error(`cannot launch against ${quoteMint}: ${quote.blockers.join('; ')}`);
   }
   for (const w of quote?.warnings ?? []) say('note: ' + w);
 
   const payer = Keypair.fromSecretKey(bs58.decode(secretKey));
-
   const mint = Keypair.generate();
 
-  // fetch the lookup table once and reuse it for both the dry run and the send
-  const lookupTable = await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
-
-  say('simulating\u2026');
+  say('simulating…');
   const dry = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
     feesToHolders, lookupTable,

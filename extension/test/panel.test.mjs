@@ -64,6 +64,10 @@ global.setInterval = () => 0;
 // jsdom gives every element a zero box; treat everything as visible for the test
 Object.defineProperty(window.Element.prototype, 'getBoundingClientRect', {
   value() {
+    if (this.id === 'j7fb-bar' && this.style && this.style.left) {
+      const left = parseFloat(this.style.left), top = parseFloat(this.style.top);
+      return { left, top, right: left + 300, bottom: top + 220, width: 300, height: 220 };
+    }
     const r = this.getAttribute && this.getAttribute('data-rect');
     if (r) {
       const [left, top, right, bottom] = r.split(',').map(Number);
@@ -74,6 +78,7 @@ Object.defineProperty(window.Element.prototype, 'getBoundingClientRect', {
 });
 
 let captured = null;
+const savedStorage = {};
 global.chrome = {
   runtime: {
     sendMessage: async (m) => {
@@ -83,12 +88,12 @@ global.chrome = {
     },
     onMessage: { addListener: () => {} },
   },
-  storage: { local: { get: async () => ({}), set: async () => {} } },
+  storage: { local: { get: async () => ({}), set: async (v) => { Object.assign(savedStorage, v); } } },
 };
 
 const code = fs.readFileSync(path.join(import.meta.dirname, '..', 'content.js'), 'utf8');
 // expose the internals the harness needs to assert on
-window.eval(code + '\n; window.__t = { readPanel, readVenue, readToggle, currentParams, fire, state };');
+window.eval(code + '\n; window.__t = { readPanel, readVenue, readToggle, currentParams, fire, state, padCandidates, refresh, applyBarPos };');
 await new Promise((r) => setTimeout(r, 400));
 
 const read = await window.__t.readPanel();
@@ -185,3 +190,75 @@ ethPad.setAttribute('aria-pressed', 'true');
 await window.__t.readPanel();
 window.eval('paintInline()');
 console.log('  ETH pad     ->', unit.textContent, '(expected ETH)');
+
+// --- which pad is selected -------------------------------------------------
+// The one that must never guess: a wrong answer launches on the wrong chain.
+console.log('\n--- pad detection ---');
+const pads = [...document.querySelectorAll('.pad')];
+const clearFlags = () => pads.forEach((p) => {
+  p.removeAttribute('aria-pressed'); p.className = 'pad'; p.setAttribute('style', '');
+});
+
+clearFlags();
+pads.find((p) => p.textContent === 'Pump').setAttribute('aria-pressed', 'true');
+console.log('  aria-pressed  ->', window.__t.readVenue(), '(expected pump)');
+
+// style only: every chip grey except Pons, which is how a restyled j7 might do it
+clearFlags();
+pads.forEach((p) => p.setAttribute('style', 'background-color: rgb(26,30,36); border-top-color: rgb(38,43,51); color: rgb(138,147,161)'));
+const pons = pads.find((p) => p.textContent === 'Pons');
+pons.setAttribute('style', 'background-color: rgb(23,36,28); border-top-color: rgb(47,107,69); color: rgb(74,222,128)');
+console.log('  style outlier ->', window.__t.readVenue(), '(expected pons)');
+
+// a class name, no aria
+clearFlags();
+const stonk = pads.find((p) => p.textContent === 'Stonk');
+stonk.className = 'pad selected';
+console.log('  class name    ->', window.__t.readVenue(), '(expected stonk)');
+
+// nothing distinguishes them: must refuse rather than default to Pump
+clearFlags();
+pads.forEach((p) => p.setAttribute('style', 'background-color: rgb(26,30,36)'));
+const unclear = window.__t.readVenue();
+console.log('  all identical ->', unclear === '' ? 'refuses (correct)' : `WRONG: guessed "${unclear}"`);
+
+// and the refusal must stop a launch rather than silently pick pump
+clearFlags();
+pads.forEach((p) => p.setAttribute('style', 'background-color: rgb(26,30,36)'));
+captured = null; reset(); window.__t.state.armedToFire = false;
+window.__t.state.dirty = { name: false, symbol: false, venue: false };
+await window.__t.refresh(false);
+await window.__t.fire(true);
+await wait(200);
+console.log('  fire w/o pad  ->', captured ? `LAUNCHED ON "${captured.venue}" (WRONG)` : 'refused to launch (correct)');
+
+// --- dragging the bar ------------------------------------------------------
+console.log('\n--- drag the bar ---');
+const barEl = document.getElementById('j7fb-bar');
+const head = barEl.querySelector('.j7fb-head');
+Object.defineProperty(barEl, 'offsetWidth', { value: 300, configurable: true });
+Object.defineProperty(barEl, 'offsetHeight', { value: 220, configurable: true });
+window.innerWidth = 1280; window.innerHeight = 900;
+// jsdom has no layout, so stand in for where the bar currently sits
+barEl.setAttribute('data-rect', '964,664,1264,884');
+
+const down = (x, y) => head.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, button: 0, clientX: x, clientY: y }));
+const move = (x, y) => document.dispatchEvent(new window.MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y }));
+const up = () => document.dispatchEvent(new window.MouseEvent('mouseup', { bubbles: true }));
+
+barEl.classList.remove('j7fb-min');
+// a click that does not move must still toggle minimise, not count as a drag
+down(1000, 670); move(1001, 670); up();
+await wait(30);
+console.log('  1px move    ->', window.__t.state.dragMoved ? 'treated as a drag (WRONG)' : 'still a click (correct)');
+
+// drag to the bottom left
+down(1000, 670); move(200, 700); up();
+await wait(50);
+console.log('  dragged     -> left', barEl.style.left, 'top', barEl.style.top, '| right', barEl.style.right || '(unset)');
+console.log('  saved       ->', JSON.stringify(savedStorage.barPos));
+
+// dragged past the left edge: must clamp on screen, not vanish
+down(200, 700); move(-500, 700); up();
+await wait(50);
+console.log('  off-screen  -> left', barEl.style.left, '(clamped, must be >= 4px)');
