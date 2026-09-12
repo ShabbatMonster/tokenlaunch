@@ -1,8 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
-const FLAGS = ['armed', 'autoFire', 'prePin', 'cashback', 'feesToHolders'];
+const FLAGS = ['armed', 'autoFire', 'prePin', 'feesToHolders'];
 const TEXTS = ['rpcUrl'];
-const NUMS = ['slippageBps', 'defaultDevBuySol'];
+const NUMS = ['slippageBps', 'defaultDevBuySol', 'creatorFeeBps'];
 
 async function load() {
   const s = await chrome.runtime.sendMessage({ type: 'j7fb:getSettings' });

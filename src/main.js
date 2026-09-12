@@ -2498,8 +2498,11 @@ async function pumpArm(pad) {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
       name, symbol, uri: IPFS_GW(metaHash),
       devBuy: $('pumpDevBuy').value.trim() || '0',
-      cashback: $('pumpCashback').checked,
+      creatorFeeBps: pumpCreatorFeeBps(),
+      // pump.fun removed cashback - create_v2 fails when it is set
+      cashback: false,
       feesToHolders: $('pumpFeesToHolders').checked,
+      creatorFeeBps: pumpCreatorFeeBps(),
       quoteMint,
       quoteLabel: custom ? (custom.slice(0, 6) + '\u2026') : (sel.value ? (sel.options[sel.selectedIndex]?.text || '') : 'SOL'),
     });
@@ -2513,6 +2516,45 @@ async function pumpArm(pad) {
 
 /// Which contract to pair against: a pasted mint wins over the dropdown, so you
 /// can launch or arm against a quote pump has not listed yet.
+/// The creator fee the pump pad is asking for, in basis points.
+///
+/// Blank means "do not set one", which leaves pump's market-cap tier table in
+/// charge (top band 0.95%). A number is only allowed up to the chain's own
+/// max_configurable_creator_fee_bps, which launchPump re-checks against Global
+/// before it builds anything - this is just the early, friendlier complaint.
+function pumpCreatorFeeBps() {
+  const raw = ($('pumpCreatorFeePct')?.value || '').trim();
+  if (!raw) return 0;
+  const pct = Number(raw.replace('%', ''));
+  if (!Number.isFinite(pct) || pct < 0) throw new Error('fee rate must be a number of percent, or blank');
+  const bps = Math.round(pct * 100);
+  if (bps > 300) throw new Error(`${pct}% is above pump.fun's 3% ceiling for a set creator fee`);
+  return bps;
+}
+
+/// Read the fee ceiling out of pump's Global rather than trusting a constant.
+/// The tier table tops out at 0.95%, which is where the idea of a 1% maximum
+/// comes from; an explicitly set fee is capped by this instead.
+async function pumpReadFeeLimit() {
+  const hint = $('pumpFeeHint');
+  const pad = PADS.find((x) => x.family === 'pump') || activePad;
+  const prev = hint.innerHTML;
+  hint.innerHTML = 'reading pump.fun’s global config…';
+  try {
+    const { pumpStatus } = await import('./solana.js');
+    const g = await pumpStatus(pad.rpc);
+    const max = Number(g.maxConfigurableCreatorFeeBps || 0);
+    hint.innerHTML =
+      `on-chain right now: custom fees <b>${g.creatorFeeConfigurable ? 'allowed' : 'disabled'}</b>`
+      + ` · ceiling <b>${(max / 100).toFixed(2)}%</b> (${max} bps)`
+      + ` · holder-reward coins <b>${g.isHolderRewardEnabled ? 'enabled' : 'disabled'}</b>`
+      + `<br>leave the box blank to take the market-cap tier rate instead (tops out at 0.95%).`;
+  } catch (e) {
+    hint.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    setTimeout(() => { hint.innerHTML = prev; }, 6000);
+  }
+}
+
 function pumpQuoteMint() {
   const custom = $('pumpQuoteCustom').value.trim();
   if (custom) {
@@ -2561,8 +2603,8 @@ function pumpToggleWatch(index) {
       const r = await pumpProbe({
         rpcUrl: pad.rpc, payerPubkey: solPubkeyFromSecret(solKeyB58),
         name: a.name, symbol: a.symbol, uri: a.uri,
-        devBuySol: a.devBuy, cashback: a.cashback !== false,
-        feesToHolders: !!a.feesToHolders,
+        devBuySol: a.devBuy, cashback: false,
+        feesToHolders: !!a.feesToHolders, creatorFeeBps: a.creatorFeeBps || 0,
         quoteMint: a.quoteMint || undefined,
       });
       const at = new Date().toLocaleTimeString();
@@ -2595,8 +2637,8 @@ async function pumpFire(index) {
     const res = await launchPump({
       rpcUrl: pad.rpc, secretKey: solKeyB58,
       name: a.name, symbol: a.symbol, uri: a.uri,
-      devBuySol: a.devBuy, cashback: a.cashback !== false,
-      feesToHolders: !!a.feesToHolders,
+      devBuySol: a.devBuy, cashback: false,
+      feesToHolders: !!a.feesToHolders, creatorFeeBps: a.creatorFeeBps || 0,
       quoteMint: a.quoteMint || undefined,
       onStatus: (m) => setStatus(m),
     });
@@ -2691,8 +2733,9 @@ async function launchSol(pad, inp) {
     const res = await launchPump({
       rpcUrl: pad.rpc, secretKey: solKeyB58,
       name: inp.name, symbol: inp.symbol, uri, devBuySol,
-      cashback: $('pumpCashback').checked,
+      cashback: false,
       feesToHolders: $('pumpFeesToHolders').checked,
+      creatorFeeBps: pumpCreatorFeeBps(),
       quoteMint: pumpQuoteMint() || undefined,
       onStatus: (m) => setStatus(m),
     });
@@ -4516,6 +4559,7 @@ function init() {
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
   $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });
+  $('pumpFeeCheckBtn').addEventListener('click', () => pumpReadFeeLimit());
   $('pumpArmBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpArm(activePad); });
   $('solPumpEconBtn').addEventListener('click', () => { if (activePad.family === 'meteora') applyPumpEconomics(activePad); });
   $('clmmQuoteSelect').addEventListener('change', () => { if (activePad.family === 'clmm') updateClmmUI(activePad); });

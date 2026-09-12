@@ -145,6 +145,12 @@ export async function pumpStatus(rpcUrl) {
   g.buybackBasisPoints = num();
   g.initialVirtualQuoteReserves = num();
   g.whitelistedQuoteMints = pkArr(1);
+  // the switches that decide whether a custom creator fee is allowed at all,
+  // and how high it may go
+  g.creatorFeeConfigurable = bool();
+  g.maxConfigurableCreatorFeeBps = num();
+  g.holderRewardClaimAuthority = pk();
+  g.isHolderRewardEnabled = bool();
 
   const zero = NATIVE_QUOTE.toBase58();
   const quotes = [];
@@ -215,14 +221,31 @@ export function pumpTokensForSol(global, solLamports, quote = null) {
 // both this and the quote registry. Simulating both shapes shows the flagged one
 // costing ~1,500 more compute units, so the program reads it and acts on it
 // rather than ignoring a stray byte.
-function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, cashback = true, quote = null, feesToHolders = false }) {
+function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, cashback = false, quote = null, feesToHolders = false, creatorFeeBps = 0 }) {
   const solVault = pda([Buffer.from('sol-vault')], PUMP_MAYHEM_PROGRAM);
   const mayhemState = pda([Buffer.from('mayhem-state'), mint.toBuffer()], PUMP_MAYHEM_PROGRAM);
   const bondingCurve = pda([Buffer.from('bonding-curve'), mint.toBuffer()]);
-  // live launches carry a trailing u64 after the two flags (observed zero)
+  // create_v2's full argument list, from pump's published IDL:
+  //
+  //   name, symbol, uri, creator, is_mayhem_mode: bool,
+  //   is_cashback_enabled: OptionBool, creator_fee_bps: OptionU64,
+  //   is_holder_reward: OptionBool
+  //
+  // The three Option types are structs wrapping a value, not Rust Options, so
+  // each is just its payload - one byte, eight bytes, one byte - and they are
+  // trailing optionals, meaning a later one cannot be sent without the earlier
+  // ones. That is why the fee is always written even when it is zero.
+  //
+  // This u64 used to be hardcoded to zero here, described as "observed zero".
+  // It is the per-coin creator fee, and it is what sets a holder-rewards coin's
+  // payout rate. Zero means "fall back to the market-cap tier table", whose top
+  // band is 95 bps - which is why 1% looked like the ceiling. Set it explicitly
+  // and the limit is instead Global.max_configurable_creator_fee_bps, currently
+  // 300 bps.
   const data = Buffer.concat([
     IX.create_v2, str(name), str(symbol), str(uri), creator.toBuffer(),
-    Buffer.from([isMayhem ? 1 : 0]), Buffer.from([cashback ? 1 : 0]), u64(0),
+    Buffer.from([isMayhem ? 1 : 0]), Buffer.from([cashback ? 1 : 0]),
+    u64(Math.round(Number(creatorFeeBps) || 0)),
     ...(feesToHolders ? [Buffer.from([1])] : []),
   ]);
   return new TransactionInstruction({
@@ -339,7 +362,7 @@ export async function buildPumpLaunch(opts) {
   const {
     connection, payer, mint, name, symbol, uri,
     devBuySol = 0, slippageBps = 1000, priorityMicroLamports = 200000, computeUnits = 600000,
-    global, quote = null, cashback = true, feesToHolders = false,
+    global, quote = null, cashback = false, feesToHolders = false, creatorFeeBps = 0,
   } = opts;
   const g = global ?? await pumpStatus(connection.rpcEndpoint);
   const ixs = [
@@ -347,7 +370,7 @@ export async function buildPumpLaunch(opts) {
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityMicroLamports }),
     createV2Ix({
       mint: mint.publicKey, user: payer.publicKey, name, symbol, uri,
-      creator: payer.publicKey, quote, cashback, feesToHolders,
+      creator: payer.publicKey, quote, cashback, feesToHolders, creatorFeeBps,
     }),
   ];
 
@@ -613,7 +636,7 @@ export function quoteUiToRaw(uiAmount, quote) {
 export async function pumpProbe(opts) {
   const {
     rpcUrl, payerPubkey, name, symbol, uri, devBuySol = 0, slippageBps = 1000,
-    quoteMint, cashback = true, feesToHolders = false,
+    quoteMint, cashback = false, feesToHolders = false, creatorFeeBps = 0,
   } = opts;
   const connection = new Connection(rpcUrl, 'confirmed');
   try {
@@ -626,7 +649,7 @@ export async function pumpProbe(opts) {
       connection,
       payer: { publicKey: new PublicKey(payerPubkey) },
       mint: Keypair.generate(),
-      name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback, feesToHolders,
+      name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback, feesToHolders, creatorFeeBps,
     });
     if (quote?.blockers?.length) {
       return { ready: false, whitelisted, reason: quote.blockers.join('; '), blockers: quote.blockers };
@@ -676,7 +699,7 @@ export async function pumpWarmup({ rpcUrl, quoteMint }) {
 export async function launchPump(opts) {
   const {
     rpcUrl, secretKey, name, symbol, uri, devBuySol = 0,
-    slippageBps = 1000, quoteMint, cashback = true, feesToHolders = false,
+    slippageBps = 1000, quoteMint, cashback = false, feesToHolders = false, creatorFeeBps = 0,
     simulateOnly = false, onStatus,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
@@ -703,6 +726,41 @@ export async function launchPump(opts) {
   const lookupTable = pre.lookupTable ?? await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
 
   if (!g.createV2Enabled) throw new Error('pump.fun has create_v2 disabled right now');
+
+  // Cashback was retired by pump.fun and create_v2 now fails outright when the
+  // flag is set, so asking for it can only produce a launch that does not
+  // happen. Better to say why here than to let the program reject it.
+  if (cashback) {
+    throw new Error(
+      'pump.fun removed cashback coins - create_v2 rejects the flag now. '
+      + 'Holder rewards (fees to holders) is the replacement.',
+    );
+  }
+
+  // Checked against the chain rather than against a constant, because the
+  // ceiling is a global pump.fun can move and has: the tier table tops out at
+  // 95 bps, but an explicitly set fee is allowed up to
+  // max_configurable_creator_fee_bps, which currently reads 300.
+  const wantBps = Math.round(Number(creatorFeeBps) || 0);
+  if (wantBps > 0) {
+    if (!g.creatorFeeConfigurable) {
+      throw new Error('pump.fun currently has custom creator fees switched off, so the rate cannot be set');
+    }
+    const maxBps = Number(g.maxConfigurableCreatorFeeBps || 0);
+    if (wantBps > maxBps) {
+      throw new Error(
+        `a ${(wantBps / 100).toFixed(2)}% creator fee is above pump.fun's current ceiling of `
+        + `${(maxBps / 100).toFixed(2)}% (${maxBps} bps)`,
+      );
+    }
+  }
+  if (feesToHolders && !g.isHolderRewardEnabled) {
+    throw new Error('pump.fun currently has holder-reward coins switched off');
+  }
+  if (feesToHolders && wantBps === 0) {
+    say('note: no rate set, so holders get the market-cap tier rate (tops out at 0.95%)');
+  }
+  if (feesToHolders) say(`holders receive ${(wantBps / 100).toFixed(2)}% of every trade`);
   if (quote?.blockers?.length) {
     throw new Error(`cannot launch against ${quoteMint}: ${quote.blockers.join('; ')}`);
   }
@@ -714,7 +772,7 @@ export async function launchPump(opts) {
   say('simulating…');
   const dry = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-    feesToHolders, lookupTable,
+    feesToHolders, creatorFeeBps: wantBps, lookupTable,
   });
   const sim = await connection.simulateTransaction(dry, { commitment: 'confirmed' });
   if (sim.value.err) {
@@ -744,7 +802,7 @@ export async function launchPump(opts) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const tx = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-    feesToHolders, lookupTable, blockhash, computeUnits,
+    feesToHolders, creatorFeeBps: wantBps, lookupTable, blockhash, computeUnits,
   });
   const raw = tx.serialize();
 
