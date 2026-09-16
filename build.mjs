@@ -99,4 +99,11 @@ await esbuild.build({
   plugins: [singleBufferProcess, NodeModulesPolyfillPlugin()],
 });
 
+// Arc swap page: plain viem, its own bundle
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/arcswap-page.js'],
+  outfile: 'docs/arc.js',
+});
+
 console.log('build complete');
