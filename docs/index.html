@@ -430,6 +430,22 @@
         <span>BUYBACK — Pons auto-spends part of <b>your</b> creator fee buying the token back (vested 5yr, split you/protocol · not burned)</span>
       </label>
       <div class="hint" id="ponsHint" style="font-size:11px;margin-top:4px">bonding curve · paired vs an approved token · dev buy in that token (held in your wallet)</div>
+
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
+        <input type="checkbox" id="paidEnabled" style="width:auto;margin:0">
+        <span>USEPAID COIN &mdash; launch it "for" an X account, the way usepaid.app does</span>
+      </label>
+      <div id="paidRow" class="hidden" style="margin-top:8px">
+        <div class="row">
+          <div><label>X HANDLE THE FEES ARE FOR</label>
+            <input type="text" id="paidHandle" spellcheck="false" placeholder="vladtenev"></div>
+          <div style="flex:0 0 130px"><label>CREATOR TAX (BPS)</label>
+            <input type="text" id="paidTaxBps" value="100" spellcheck="false"></div>
+        </div>
+        <label style="margin-top:8px">CREATOR FEE RECIPIENT <span class="hint">blank = you keep the fees</span></label>
+        <input type="text" id="paidFeeRecipient" spellcheck="false" placeholder="0x… — paste the address UsePaid gives you for that handle">
+        <div class="hint" id="paidHint" style="font-size:11px;margin-top:6px"></div>
+      </div>
     </div>
 
     <div class="row">
