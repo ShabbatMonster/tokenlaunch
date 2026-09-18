@@ -4606,11 +4606,19 @@ function init() {
       if (!paidBox.checked) return;
       const { PAID_FEE_RECIPIENT_NOTE, paidDescription } = await import('./usepaid.js');
       const h = $('paidHandle').value.trim().replace(/^@/, '') || 'handle';
-      $('paidHint').innerHTML = `description will read <b>${esc(paidDescription(h))}</b><br>`
+      const recip = $('paidFeeRecipient').value.trim();
+      // Their rule one is that the whole fee goes to them. With this blank the
+      // coin keeps its own fees and will never be listed, which is worth saying
+      // loudly rather than leaving as a footnote.
+      const verdict = recip
+        ? '<span style="color:var(--accent)">fees go to that address &mdash; eligible to register</span>'
+        : '<span style="color:var(--danger)">fees stay with you, so UsePaid will NOT list it</span>';
+      $('paidHint').innerHTML = `description will read <b>${esc(paidDescription(h))}</b><br>${verdict}<br>`
         + esc(PAID_FEE_RECIPIENT_NOTE);
     };
     paidBox.addEventListener('change', syncPaid);
     $('paidHandle').addEventListener('input', syncPaid);
+    $('paidFeeRecipient').addEventListener('input', syncPaid);
   }
   $('pumpFeeCheckBtn').addEventListener('click', () => pumpReadFeeLimit());
   $('pumpArmBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpArm(activePad); });
