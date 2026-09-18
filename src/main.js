@@ -1958,6 +1958,38 @@ async function launch() {
   }
 
   if (pad.family === 'pons-v2') {
+    // UsePaid coins are Pons v2 launches with a description UsePaid recognises,
+    // sent through their router so the dev buy rides along in the same tx.
+    if (document.getElementById('paidEnabled')?.checked) {
+      const handle = $('paidHandle').value.trim().replace(/^@/, '');
+      if (!handle) throw new Error('enter the X handle the fees are for');
+      const recipient = $('paidFeeRecipient').value.trim();
+      if (recipient && !/^0x[a-fA-F0-9]{40}$/.test(recipient)) {
+        throw new Error('the fee recipient must be a valid address, or blank to keep the fees');
+      }
+      const keys = loadKeys();
+      if (!keys?.evm) throw new Error('no EVM key loaded — paste your key in the key form');
+
+      setStatus('loading UsePaid module...');
+      const { launchPaid } = await import('./usepaid.js');
+      const res = await launchPaid({
+        privateKey: keys.evm, name, symbol, logo, handle,
+        devBuyEth: document.getElementById('ponsDevBuy').value.trim() || '0',
+        creatorTaxBps: Number($('paidTaxBps').value.trim() || '100'),
+        feeRecipient: recipient || undefined,
+        buybackEnabled: document.getElementById('ponsBuyback').checked,
+        onStatus: (m) => setStatus(m),
+      });
+      if (res.token) rememberLaunch(pad, res.token, symbol);
+      $('status').innerHTML =
+        `<span style="color:var(--accent)">LAUNCHED ✓</span> ${esc(res.token ?? '(see tx)')}<br>`
+        + `${esc(res.params.description)}<br>`
+        + (res.hash ? `<a href="${pad.explorer}/tx/${res.hash}" target="_blank" rel="noopener">tx on explorer</a>` : '');
+      refreshBalance();
+      renderTokenList();
+      return;
+    }
+
     const pair = resolvePonsPair(pad);
     const devBuyStr = document.getElementById('ponsDevBuy').value.trim() || '0';
     const buyback = document.getElementById('ponsBuyback').checked;
@@ -4567,6 +4599,19 @@ function init() {
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
   $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });
+  const paidBox = $('paidEnabled');
+  if (paidBox) {
+    const syncPaid = async () => {
+      $('paidRow').classList.toggle('hidden', !paidBox.checked);
+      if (!paidBox.checked) return;
+      const { PAID_FEE_RECIPIENT_NOTE, paidDescription } = await import('./usepaid.js');
+      const h = $('paidHandle').value.trim().replace(/^@/, '') || 'handle';
+      $('paidHint').innerHTML = `description will read <b>${esc(paidDescription(h))}</b><br>`
+        + esc(PAID_FEE_RECIPIENT_NOTE);
+    };
+    paidBox.addEventListener('change', syncPaid);
+    $('paidHandle').addEventListener('input', syncPaid);
+  }
   $('pumpFeeCheckBtn').addEventListener('click', () => pumpReadFeeLimit());
   $('pumpArmBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpArm(activePad); });
   $('solPumpEconBtn').addEventListener('click', () => { if (activePad.family === 'meteora') applyPumpEconomics(activePad); });
