@@ -7,18 +7,29 @@ import { privateKeyToAccount } from 'viem/accounts';
 // ---------------------------------------------------------------------------
 // UsePaid coins on Pons.
 //
-// usepaid.app is not a launchpad of its own. A "paid" coin is an ordinary Pons
-// v2 launch - the same factory this repo already uses - with two conventions:
+// usepaid.app is not a launchpad of its own, and this router is not theirs
+// either: 0xe33E9E47... is Pons's general launch router, which wraps the
+// factory's launchToken and folds the dev buy into one transaction. Of 24
+// consecutive launches through it, nearly all send the fee to the launcher and
+// carry no UsePaid line at all. It is simply how Pons coins are launched.
 //
-//   1. it goes through UsePaid's router, which wraps Pons's launchToken and
-//      folds the dev buy into the same transaction
-//   2. its description reads exactly "Fees to @handle via UsePaid"
+// What makes a coin a UsePaid coin is not the route but the fee. Their docs give
+// two rules, and both are about where the money goes:
 //
-// Their docs are explicit that registration needs no approval: a token that
-// launches on a supported venue carrying that line "registers on its own".
-// Tested rather than trusted - a launch built from scratch here, with our own
-// name, symbol, salt and fee recipient, simulates clean against the live router
-// and returns a token address. Nothing is signed by UsePaid.
+//   1. the WHOLE creator fee must go to UsePaid - "a partial share would mean
+//      the payout we publish is a fraction of what the token earned"
+//   2. it must be PERMANENT - "a fee direction that can still be changed is a
+//      promise that can still be withdrawn"
+//
+// with the description line "Fees to @handle via UsePaid" naming who it is for.
+//
+// So pointing creatorFeeRecipient at yourself produces a perfectly good Pons
+// coin that UsePaid will never list, however the description reads. See
+// PAID_FEE_RECIPIENT_NOTE.
+//
+// The launch path itself is tested rather than trusted: a call built from our
+// own name, symbol, salt and recipient simulates clean against the live router
+// and returns a token address, so nothing here is gated on a signature.
 //
 // Read off the VLAD launch (0x2aa5bcAB..., tx 0x408acb61...):
 //
@@ -38,17 +49,20 @@ export const ROBINHOOD = defineChain({
   rpcUrls: { default: { http: [RPC] } },
 });
 
-export const USEPAID_ROUTER = '0xe33E9E479dF8802cb0866d5d05258bEc4cF62948';
+// Pons's launch router, not UsePaid's - named for what it does
+export const PONS_LAUNCH_ROUTER = '0xe33E9E479dF8802cb0866d5d05258bEc4cF62948';
+/** @deprecated misnamed: this is Pons's router, not UsePaid's */
+export const USEPAID_ROUTER = PONS_LAUNCH_ROUTER;
 export const PONS_V2_FACTORY = '0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e';
 const LAUNCH_SELECTOR = '0xf85f8e41';
 const NATIVE = '0x0000000000000000000000000000000000000000';
 
 export const PAID_FEE_RECIPIENT_NOTE =
-  'On chain the creator fee goes wherever creatorFeeRecipient points, and UsePaid assigns its own address '
-  + 'per handle when you launch from their site - VLAD’s went to 0xFEE40ADD..., which is theirs rather '
-  + 'than the creator’s. That address is issued by them and cannot be derived from the handle, so this '
-  + 'defaults the recipient to YOU. Left alone, the description still registers the coin with UsePaid while '
-  + 'the fees stay yours; paste the address UsePaid gives you for a handle to actually route them there.';
+  'UsePaid only lists a coin whose WHOLE creator fee goes to an address of theirs, permanently - that is '
+  + 'rule one in their docs, and the description line alone does not satisfy it. VLAD’s fee went to '
+  + '0xFEE40ADD..., which is UsePaid’s, not the creator’s. That address is issued per handle and '
+  + 'cannot be derived, so it has to come from usepaid.app. Leave this blank and you get a normal Pons coin '
+  + 'that keeps its own fees and will NOT appear on UsePaid, however the description reads.';
 
 // Read off the real launch. The first argument is Pons's own LaunchParams; the
 // rest belong to the router, and the fifth is zero in every launch seen.
