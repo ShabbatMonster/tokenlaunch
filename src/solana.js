@@ -209,6 +209,19 @@ async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quote
   const baseVault = deriveDbcTokenVaultAddress(pool, baseMint);
   const quoteVault = deriveDbcTokenVaultAddress(pool, quote);
   const mintMetadata = deriveMintMetadata(baseMint);
+
+  // The badge is needed here too, not just on create_config. Creating the pool
+  // opens a quote vault, and the program checks the badge before it will do that
+  // for a Token-2022 mint - which is why a launch could clear create_config and
+  // still die on the second transaction with the same InvalidTokenBadge (6080 /
+  // 0x17c0). A real pool init against a Token-2022 quote carries SEVENTEEN
+  // accounts: the sixteen the IDL declares, then the badge. Read off
+  // 3Di3sA4EVXPEuVEgmNVKF1..., an xStock-quoted pool.
+  const extra = [];
+  if (quoteProgram.equals(TOKEN_2022_PROGRAM_ID)) {
+    extra.push({ pubkey: meteoraTokenBadge(quote), isSigner: false, isWritable: false });
+  }
+
   const tx = await creator.program.methods
     .initializeVirtualPoolWithSplToken({ name, symbol, uri })
     .accountsPartial({
@@ -217,7 +230,9 @@ async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quote
       tokenQuoteProgram: quoteProgram,          // classic for SPL, Token-2022 for T22 quotes
       metadataProgram: METAPLEX_PROGRAM_ID,
       tokenProgram: TOKEN_PROGRAM_ID,           // base is a classic SPL mint
-    }).transaction();
+    })
+    .remainingAccounts(extra)
+    .transaction();
   return { tx, pool };
 }
 
@@ -270,11 +285,20 @@ export async function launchMeteora(opts) {
     createConfigTx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
     createConfigTx.sign(payer, config);
     const sim = await connection.simulateTransaction(createConfigTx);
+    // The pool cannot be simulated before its config exists, but its shape can
+    // still be checked - and the shape is exactly what was wrong.
+    const { tx: poolTx } = await buildCreatePoolTx(client, {
+      payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
+      quote, quoteProgram, name, symbol, uri,
+    });
+    const poolIx = poolTx.instructions.find((ix) => ix.programId.equals(DBC_PROGRAM));
+
     return {
       dryRun: true,
       quoteProgram: quoteProgram.toBase58(),
       tokenBadge: badge ? badge.toBase58() : null,
       createConfigAccounts: target.keys.map((k) => k.pubkey.toBase58()),
+      createPoolAccounts: poolIx ? poolIx.keys.map((k) => k.pubkey.toBase58()) : [],
       simulationError: sim.value.err ? JSON.stringify(sim.value.err) : null,
       logs: sim.value.logs || [],
     };
