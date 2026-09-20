@@ -210,6 +210,15 @@
       </div>
       <div class="hint" id="solQuoteHint" style="font-size:11px;margin-top:4px"></div>
 
+      <div class="row" style="margin-top:10px">
+        <div style="flex:0 0 190px"><label>DEV BUY (<span id="solDevSym">SOL</span>, OPT.)</label>
+          <input type="text" id="solDevBuy" value="0" spellcheck="false"></div>
+        <div><label>&nbsp;</label>
+          <div class="hint" id="solDevBuyHint" style="line-height:1.5">Bought in the <b>same transaction</b>
+          that opens the curve, so nobody can get in front of it and the price is the curve's
+          starting price.</div></div>
+      </div>
+
       <details class="adv" id="solParams">
         <summary>bonding-curve parameters (pump.fun defaults)</summary>
         <div class="row">

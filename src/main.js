@@ -2854,6 +2854,7 @@ async function launchSol(pad, inp) {
   const res = await launchMeteora({
     rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint,
     name: inp.name, symbol: inp.symbol, uri, params,
+    devBuyQuote: $('solDevBuy').value.trim(),
     onStatus: (m) => setStatus(m),
   });
 
@@ -2861,7 +2862,9 @@ async function launchSol(pad, inp) {
   $('status').innerHTML =
     `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>` +
     `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">token on solscan</a> · ` +
-    `<a href="${pad.explorer}/tx/${res.poolSig}" target="_blank" rel="noopener">pool tx</a>`;
+    `<a href="${pad.explorer}/tx/${res.poolSig}" target="_blank" rel="noopener">pool tx</a>` +
+    (res.devBuy ? ` · dev buy ✓ ~${res.devBuy.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+      + ` ${esc(inp.symbol)} (${res.devBuy.pctOfSupply.toFixed(2)}% of supply)` : '');
   refreshBalance();
   renderTokenList();
 }
@@ -4474,6 +4477,43 @@ function updateSolQuoteUI(pad) {
   $('solQuoteHint').textContent = custom
     ? 'any SPL or Token-2022 mint (metadata-only extensions)'
     : `token pooled against ${q.symbol} · threshold in ${q.symbol}`;
+  // the dev buy is funded in the quote, not in SOL - on a USDC-quoted curve a
+  // box labelled SOL would be asking for the wrong number entirely
+  $('solDevSym').textContent = custom ? 'QUOTE' : q.symbol;
+  previewSolDevBuy(pad);
+}
+
+// Price the dev buy off the curve the form describes. No pool exists yet, so
+// this is pure curve maths and costs nothing to run on every keystroke.
+let solDevBuyPreviewSeq = 0;
+async function previewSolDevBuy(pad) {
+  const hint = $('solDevBuyHint');
+  const base = 'Bought in the <b>same transaction</b> that opens the curve, so nobody can get in '
+    + "front of it and the price is the curve's starting price.";
+  const amt = $('solDevBuy').value.trim();
+  if (!amt || !(Number(amt) > 0)) { hint.innerHTML = base; return; }
+  const seq = ++solDevBuyPreviewSeq;
+  try {
+    const q = SOL_QUOTES[pad.quoteSel];
+    const quoteDecimals = q ? q.decimals : null;
+    // a custom quote's decimals have to be read on-chain before anything can be priced
+    if (quoteDecimals == null) { hint.innerHTML = base + ' Priced at launch for a custom quote.'; return; }
+    const params = solParamsFromUI(pad);
+    const { previewMeteoraDevBuy } = await import('./solana.js');
+    if (seq !== solDevBuyPreviewSeq) return;
+    const p = previewMeteoraDevBuy({ quoteDecimals, params, devBuyQuote: amt });
+    if (!p) { hint.innerHTML = base; return; }
+    hint.innerHTML = p.completesCurve
+      ? '<span style="color:var(--danger)">that fills the whole migration threshold on its own — the coin '
+        + 'would graduate in the transaction that creates it. Buy less than the threshold.</span>'
+      : base + `<br>≈ <b>${p.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })}</b> tokens, `
+        + `<b>${p.pctOfSupply.toFixed(2)}%</b> of supply · takes the curve ${p.pctOfThreshold.toFixed(1)}% `
+        + `of the way to graduation · fee ${(Number(p.feeRaw) / 10 ** quoteDecimals).toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
+  } catch (e) {
+    // the curve params are half-typed more often than they are wrong; say so
+    // quietly rather than shouting an error at someone mid-keystroke
+    if (seq === solDevBuyPreviewSeq) hint.innerHTML = base + ` (${esc(e.message)})`;
+  }
 }
 
 // flap: populate quote dropdown, toggle mode-dependent fields, set dev-buy symbol
@@ -4694,6 +4734,18 @@ function init() {
     updateRialtoHint(activePad);
   });
   $('solQuoteSelect').addEventListener('change', () => updateSolQuoteUI(activePad));
+  {
+    // the preview depends on the curve as much as on the amount, so a changed
+    // threshold or supply has to reprice it too
+    let t;
+    const reprice = () => {
+      clearTimeout(t);
+      t = setTimeout(() => { if (activePad.family === 'meteora') previewSolDevBuy(activePad); }, 250);
+    };
+    for (const id of ['solDevBuy', 'solSupply', 'solFeeBps', 'solMigThreshold', 'solMigPct']) {
+      $(id).addEventListener('input', reprice);
+    }
+  }
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
   $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });

@@ -17,11 +17,12 @@
 // a Token-2022 mint (like the pump token) works too as long as its only
 // extensions are metadata-related AND migration targets DAMM v2 (not v1).
 // ---------------------------------------------------------------------------
-import { Connection, Keypair, PublicKey, ComputeBudgetProgram, VersionedTransaction, sendAndConfirmTransaction, SystemProgram, Transaction, TransactionInstruction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, ComputeBudgetProgram, VersionedTransaction, sendAndConfirmTransaction, SystemProgram, Transaction, TransactionInstruction, SYSVAR_INSTRUCTIONS_PUBKEY } from '@solana/web3.js';
 import {
   TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync,
-  MINT_SIZE, getMinimumBalanceForRentExemptMint,
+  MINT_SIZE, getMinimumBalanceForRentExemptMint, NATIVE_MINT,
   createInitializeMint2Instruction, createAssociatedTokenAccountInstruction,
+  createAssociatedTokenAccountIdempotentInstruction,
   createMintToInstruction, createSetAuthorityInstruction, AuthorityType,
 } from '@solana/spl-token';
 import BN from 'bn.js';
@@ -29,6 +30,8 @@ import bs58 from 'bs58';
 import Decimal from 'decimal.js';
 import {
   DynamicBondingCurveClient, buildCurve, swapQuote, getCurrentPoint,
+  calculateQuoteToBaseFromAmountIn, MAX_SQRT_PRICE,
+  wrapSOLInstruction, unwrapSOLInstruction,
   deriveDbcPoolAddress, deriveDbcTokenVaultAddress, deriveMintMetadata, METAPLEX_PROGRAM_ID,
   TokenType, TokenDecimal, TokenAuthorityOption,
   BaseFeeMode, CollectFeeMode, MigrationOption, MigrationFeeOption, ActivationType,
@@ -236,6 +239,148 @@ async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quote
   return { tx, pool };
 }
 
+// ---------------------------------------------------------------------------
+// The dev buy - Meteora's own name for it is the "first buy".
+//
+// It rides in the SAME transaction as pool creation, which is the only place
+// worth putting it: the pool does not exist until that transaction runs, so
+// there is no block in which anyone else can buy ahead of it, and the price paid
+// is exactly the curve's start price rather than whatever a sniper leaves
+// behind. Meteora's createPoolWithFirstBuy works the same way - config in one
+// transaction, pool + buy in the next - so the existing two-step flow did not
+// have to change to make room for it.
+//
+// The swap is built here by hand for the same reason buildCreatePoolTx is: the
+// SDK's first-buy helper assumes the classic Token program for the quote side,
+// which is exactly the assumption that breaks a Token-2022 quote.
+//
+// minimumAmountOut is deliberately 0. Slippage protection guards against the
+// price moving between quoting and landing, and nothing can move it here - the
+// pool is created and bought from in one atomic sequence at a price fixed by the
+// curve. A non-zero floor would add no safety and one more way to revert.
+// ---------------------------------------------------------------------------
+
+/// Human "0.5" -> raw BN, or zero for blank/absent.
+function devBuyRaw(devBuyQuote, quoteDecimals) {
+  const v = String(devBuyQuote ?? '').trim();
+  if (!v || Number(v) === 0) return new BN(0);
+  if (!(Number(v) > 0)) throw new Error('dev buy must be a positive amount of the quote token');
+  return uiToRaw(v, quoteDecimals);
+}
+
+/// What a dev buy would actually get, priced off the curve we are about to
+/// create. There is no pool to ask yet - that is the point of doing it in the
+/// creation transaction - so this walks the same curve the program will walk.
+export function previewMeteoraDevBuy({ quoteDecimals, params, devBuyQuote }) {
+  const amountIn = devBuyRaw(devBuyQuote, quoteDecimals);
+  if (amountIn.isZero()) return null;
+
+  const curveConfig = buildLaunchConfig(quoteDecimals, params);
+  // collectFeeMode is QuoteToken, so the trading fee comes off the input before
+  // any of it reaches the curve - the dev pays the launch's own fee like anyone
+  const fee = amountIn.muln(Number(params.feeBps)).addn(9999).divn(10000);
+  const afterFee = amountIn.sub(fee);
+
+  const { outputAmount } = calculateQuoteToBaseFromAmountIn(
+    { curve: curveConfig.curve }, curveConfig.sqrtStartPrice, afterFee, MAX_SQRT_PRICE,
+  );
+
+  // The curve does not run out of liquidity - its last point sits at the
+  // maximum sqrt price - so a too-large buy does not show up as unspent input.
+  // What it does instead is fill the migration threshold, which completes the
+  // curve. A dev buy that graduates the coin inside its own creation
+  // transaction is not what anybody means by a dev buy.
+  const completesCurve = afterFee.gte(curveConfig.migrationQuoteThreshold);
+
+  const baseDecimals = params.baseDecimals ?? 6;
+  const supplyRaw = new BN(String(params.totalSupply)).mul(new BN(10).pow(new BN(baseDecimals)));
+  const out = Number(outputAmount.toString());
+  return {
+    amountIn: amountIn.toString(),
+    feeRaw: fee.toString(),
+    tokensOutRaw: outputAmount.toString(),
+    tokens: out / 10 ** baseDecimals,
+    pctOfSupply: (out / Number(supplyRaw.toString())) * 100,
+    completesCurve,
+    // how much of the way to graduation this single buy takes the coin
+    pctOfThreshold: (Number(afterFee.toString()) / Number(curveConfig.migrationQuoteThreshold.toString())) * 100,
+  };
+}
+
+/// The instructions that buy from the pool being created in the same tx.
+async function buildFirstBuyIxs(client, { payer, config, baseMint, quote, quoteProgram, pool, amountIn }) {
+  const baseVault = deriveDbcTokenVaultAddress(pool, baseMint);
+  const quoteVault = deriveDbcTokenVaultAddress(pool, quote);
+  const inputTokenAccount = getAssociatedTokenAddressSync(quote, payer, true, quoteProgram);
+  const outputTokenAccount = getAssociatedTokenAddressSync(baseMint, payer, true, TOKEN_PROGRAM_ID);
+
+  // idempotent: the quote account usually exists already, the base one never
+  // can - its mint does not exist until the pool instruction ahead of it runs
+  const pre = [
+    createAssociatedTokenAccountIdempotentInstruction(payer, inputTokenAccount, payer, quote, quoteProgram),
+    createAssociatedTokenAccountIdempotentInstruction(payer, outputTokenAccount, payer, baseMint, TOKEN_PROGRAM_ID),
+  ];
+  const post = [];
+  // a SOL-quoted curve trades wrapped SOL, so wrap on the way in and close the
+  // account on the way out - otherwise the dev buy silently strands lamports
+  if (quote.equals(NATIVE_MINT)) {
+    pre.push(...wrapSOLInstruction(payer, inputTokenAccount, BigInt(amountIn.toString())));
+    const unwrap = unwrapSOLInstruction(payer, payer);
+    if (unwrap) post.push(unwrap);
+  }
+
+  // Meteora's own createPoolWithFirstBuy hands the instructions sysvar to every
+  // first buy, whatever the config says, so this does too. The program reads it
+  // only when the config asks for the first-swap-minimum-fee rule; an unread
+  // remaining account costs 32 bytes and nothing else, and guessing the other
+  // way would fail the launch outright.
+  const remaining = [{ pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false }];
+
+  const tx = await client.pool.program.methods
+    .swap({ amountIn, minimumAmountOut: new BN(0) })
+    .accountsPartial({
+      poolAuthority: client.pool.poolAuthority,
+      config, pool, inputTokenAccount, outputTokenAccount,
+      baseVault, quoteVault, baseMint, quoteMint: quote,
+      payer,
+      tokenBaseProgram: TOKEN_PROGRAM_ID,   // base is always a classic SPL mint
+      tokenQuoteProgram: quoteProgram,      // and the quote is whatever it is
+      referralTokenAccount: null,
+    })
+    .remainingAccounts(remaining)
+    .preInstructions(pre)
+    .postInstructions(post)
+    .transaction();
+  return tx.instructions;
+}
+
+/// Refuse a dev buy the wallet cannot fund, before anything is signed. A
+/// create_config that lands and a create_pool that bounces leaves an orphaned
+/// config and a confusing error.
+async function checkDevBuyFunds(connection, payer, quote, quoteProgram, amountIn) {
+  if (quote.equals(NATIVE_MINT)) {
+    // pool creation alone costs roughly 0.03 SOL in rent (mint, two vaults, the
+    // metadata account), and none of it comes back
+    const RENT_HEADROOM = 40_000_000;
+    const lamports = await connection.getBalance(payer, 'confirmed');
+    if (new BN(lamports).lt(amountIn.addn(RENT_HEADROOM))) {
+      throw new Error(
+        `dev buy of ${Number(amountIn.toString()) / 1e9} SOL needs about `
+        + `${(Number(amountIn.toString()) + RENT_HEADROOM) / 1e9} SOL in the wallet once rent for the mint, `
+        + `vaults and metadata is counted; it holds ${lamports / 1e9}.`,
+      );
+    }
+    return;
+  }
+  const held = await tokenBalance(connection, payer, quote, quoteProgram);
+  if (held.lt(amountIn)) {
+    throw new Error(
+      `dev buy needs ${amountIn.toString()} of the quote token in base units and the wallet holds `
+      + `${held.toString()}. The curve is priced in the quote, so the buy has to be funded in it.`,
+    );
+  }
+}
+
 // wait for an account to be visible on the RPC node (config propagation guard)
 async function waitForAccount(connection, pubkey, tries = 30) {
   for (let i = 0; i < tries; i++) {
@@ -248,7 +393,10 @@ async function waitForAccount(connection, pubkey, tries = 30) {
 // main entry: create the config, then the pool. Reports progress via onStatus.
 // Returns { mint, config, pool, configSig, poolSig }.
 export async function launchMeteora(opts) {
-  const { rpcUrl, secretKey, quoteMint, name, symbol, uri, params, dryRun = false, onStatus } = opts;
+  const {
+    rpcUrl, secretKey, quoteMint, name, symbol, uri, params,
+    devBuyQuote = 0, dryRun = false, onStatus,
+  } = opts;
   const say = (m) => onStatus && onStatus(m);
 
   const connection = new Connection(rpcUrl, 'confirmed');
@@ -261,6 +409,24 @@ export async function launchMeteora(opts) {
   const config = Keypair.generate();
   const baseMint = Keypair.generate();
   const curveConfig = buildLaunchConfig(quoteDecimals, params);
+
+  // priced and funding-checked before the first signature, so a dev buy that
+  // cannot work fails while nothing has been spent
+  const devBuyAmount = devBuyRaw(devBuyQuote, quoteDecimals);
+  let devBuyPreview = null;
+  if (!devBuyAmount.isZero()) {
+    devBuyPreview = previewMeteoraDevBuy({ quoteDecimals, params, devBuyQuote });
+    if (devBuyPreview.completesCurve) {
+      throw new Error(
+        `a dev buy of ${devBuyQuote} fills the migration threshold of ${params.migrationThreshold} on its own, `
+        + 'so the coin would graduate in the same transaction that creates it. Buy less than the threshold.',
+      );
+    }
+    if (!dryRun) await checkDevBuyFunds(connection, payer.publicKey, quote, quoteProgram, devBuyAmount);
+    say(`dev buy: ${devBuyQuote} → about ${devBuyPreview.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} `
+      + `${symbol} (${devBuyPreview.pctOfSupply.toFixed(2)}% of supply, `
+      + `${devBuyPreview.pctOfThreshold.toFixed(1)}% of the way to graduation), in the same tx as the pool`);
+  }
 
   say('creating bonding-curve config…');
   const createConfigTx = await client.partner.createConfig({
@@ -287,14 +453,34 @@ export async function launchMeteora(opts) {
     const sim = await connection.simulateTransaction(createConfigTx);
     // The pool cannot be simulated before its config exists, but its shape can
     // still be checked - and the shape is exactly what was wrong.
-    const { tx: poolTx } = await buildCreatePoolTx(client, {
+    const { tx: poolTx, pool: dryPool } = await buildCreatePoolTx(client, {
       payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
       quote, quoteProgram, name, symbol, uri,
     });
     const poolIx = poolTx.instructions.find((ix) => ix.programId.equals(DBC_PROGRAM));
 
+    // the dev buy has to fit in the same transaction as the pool, so measure it
+    let firstBuyAccounts = [];
+    if (!devBuyAmount.isZero()) {
+      const buyIxs = await buildFirstBuyIxs(client, {
+        payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
+        quote, quoteProgram, pool: dryPool, amountIn: devBuyAmount,
+      });
+      const swapIx = buyIxs.find((ix) => ix.programId.equals(DBC_PROGRAM));
+      firstBuyAccounts = swapIx ? swapIx.keys.map((k) => k.pubkey.toBase58()) : [];
+      poolTx.add(...buyIxs);
+    }
+    addPriority(poolTx);
+    poolTx.feePayer = payer.publicKey;
+    poolTx.recentBlockhash = createConfigTx.recentBlockhash;
+    poolTx.sign(payer, baseMint);
+
     return {
       dryRun: true,
+      devBuy: devBuyPreview,
+      firstBuyAccounts,
+      poolTxInstructions: poolTx.instructions.length,
+      poolTxBytes: poolTx.serialize().length,
       quoteProgram: quoteProgram.toBase58(),
       tokenBadge: badge ? badge.toBase58() : null,
       createConfigAccounts: target.keys.map((k) => k.pubkey.toBase58()),
@@ -313,6 +499,17 @@ export async function launchMeteora(opts) {
     payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
     quote, quoteProgram, name, symbol, uri,
   });
+
+  // appended, not sent separately: in a tx of its own the buy would sit a block
+  // behind a pool anyone can already trade
+  if (!devBuyAmount.isZero()) {
+    createPoolTx.add(...await buildFirstBuyIxs(client, {
+      payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
+      quote, quoteProgram, pool, amountIn: devBuyAmount,
+    }));
+    say('minting token, opening the curve and buying, in one transaction…');
+  }
+
   addPriority(createPoolTx);
   const poolSig = await sendAndConfirmTransaction(connection, createPoolTx, [payer, baseMint], { commitment: 'confirmed' });
 
@@ -323,6 +520,7 @@ export async function launchMeteora(opts) {
     configSig,
     poolSig,
     creator: payer.publicKey.toBase58(),
+    devBuy: devBuyPreview,
   };
 }
 
@@ -483,6 +681,55 @@ export async function claimMeteoraFees({ rpcUrl, secretKey, pool, onStatus }) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Router: buy/sell a DBC token with SOL by chaining Jupiter (SOL<->quote) with
+// the DBC curve (quote<->token). Sequential - leg 1 confirms, then we read the
+// actual amount received and feed it into leg 2.
+//
+// These four helpers were deleted by accident when getMeteoraFees was rewritten,
+// and nothing pointed it out: they are only referenced inside functions, so the
+// module still imports and builds, and the trade router only fails at the moment
+// someone presses BUY. Restored verbatim.
+// ---------------------------------------------------------------------------
+async function resolvePool(client, connection, tokenMint) {
+  const mint = new PublicKey(tokenMint);
+  const pa = await client.state.getPoolByBaseMint(mint);
+  if (!pa) throw new Error('no Meteora DBC pool found for this token');
+  const virtualPool = pa.account;                    // { poolState }
+  const config = await client.state.getPoolConfig(virtualPool.poolState.config);
+  const quoteMint = config.quoteMint;
+  const quoteProgram = config.quoteTokenFlag === 1 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+  const [q, b] = await Promise.all([
+    connection.getParsedAccountInfo(quoteMint),
+    connection.getParsedAccountInfo(mint),
+  ]);
+  return {
+    poolAddr: pa.publicKey, virtualPool, config, quoteMint, quoteProgram,
+    quoteDecimals: q.value?.data?.parsed?.info?.decimals ?? 6,
+    baseDecimals: b.value?.data?.parsed?.info?.decimals ?? 6,
+    isMigrated: !!virtualPool.poolState.isMigrated,
+  };
+}
+
+async function tokenBalance(connection, owner, mint, program) {
+  const ata = getAssociatedTokenAddressSync(mint, owner, false, program);
+  try { return new BN((await connection.getTokenAccountBalance(ata)).value.amount); }
+  catch { return new BN(0); }
+}
+
+// human "1.5" -> raw BN at `decimals`, without float rounding
+function uiToRaw(ui, decimals) {
+  const [whole, frac = ''] = String(ui).trim().split('.');
+  const f = (frac + '0'.repeat(decimals)).slice(0, decimals);
+  return new BN((whole || '0') + f).add(new BN(0)); // normalize
+}
+
+const QUOTE_SYMBOLS = {
+  So11111111111111111111111111111111111111112: 'SOL',
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC',
+};
+
+// resolve token -> pool metadata for the UI (quote symbol, decimals, migrated?)
 export async function resolveToken({ rpcUrl, tokenMint }) {
   const connection = new Connection(rpcUrl, 'confirmed');
   const client = new DynamicBondingCurveClient(connection, 'confirmed');
