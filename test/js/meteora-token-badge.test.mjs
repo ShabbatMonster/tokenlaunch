@@ -6,8 +6,10 @@
 // on-chain - both are behind the live program - so the SDK builds an 8-account
 // create_config and the program answers InvalidTokenBadge (6080 / 0x17c0).
 //
-// The shape below was read off 5kxJcEvYpWVcLZZ8iyprXFkp..., a real successful
-// config with an xStock quote: nine accounts, badge last.
+// Both shapes were read off real successful launches with an xStock quote:
+// create_config carries nine accounts (5kxJcEvYpWVcLZZ8iyprXFkp...) and
+// initialize_virtual_pool_with_spl_token carries seventeen
+// (3Di3sA4EVXPEuVEgmNVKF1...), the badge last in each.
 //
 // Run: node test/js/meteora-token-badge.test.mjs
 
@@ -36,6 +38,14 @@ const badge = r.logs.filter((l) => /TokenBadge|InvalidTokenBadge|6080/.test(l));
 console.log('badge complaints   :', badge.length ? badge.join(' | ') : 'none');
 console.log((r.logs.join(' ').includes('InvalidTokenBadge')) ? '\nSTILL REJECTED' : '\nno InvalidTokenBadge - the quote is accepted now');
 
-const shapeOk = r.createConfigAccounts.length === 9 && r.createConfigAccounts[8] === r.tokenBadge;
-console.log(shapeOk ? 'PASS - nine accounts with the badge last' : 'FAIL - wrong account shape');
-process.exit(shapeOk ? 0 : 1);
+
+const configOk = r.createConfigAccounts.length === 9 && r.createConfigAccounts[8] === r.tokenBadge;
+console.log((configOk ? 'PASS' : 'FAIL') + '  create_config: nine accounts, badge last');
+
+// The pool instruction needs it too. Getting this wrong let a launch clear
+// create_config and then die on the second transaction with the same 0x17c0,
+// which is exactly what happened in the wild.
+const poolOk = r.createPoolAccounts.length === 17 && r.createPoolAccounts[16] === r.tokenBadge;
+console.log((poolOk ? 'PASS' : 'FAIL') + '  create_pool:   seventeen accounts, badge last');
+
+process.exit(configOk && poolOk ? 0 : 1);
