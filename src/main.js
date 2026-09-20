@@ -3989,33 +3989,55 @@ async function renderMeteoraClaims(box) {
     const { getMeteoraFees } = await import('./solana.js');
     const rows = await getMeteoraFees({ rpcUrl: activePad.rpc, owner });
     if (!rows.length) { box.innerHTML = '<div class="empty">no Meteora launches from this wallet yet</div>'; return; }
-    // Most fees first, by real value. Sorting the raw amounts put a 6-decimal
-    // token above a 9-decimal one holding a thousand times more.
-    const scaled = (r) => (r.quoteDecimals == null ? -1 : Number(r.claimableQuote) / 10 ** r.quoteDecimals);
-    rows.sort((a, b) => scaled(b) - scaled(a));
+
+    const val = (raw, d) => (d == null ? null : Number(raw) / 10 ** d);
+    // by what this wallet can actually take, not by lifetime earnings
+    rows.sort((x, y) => (val(y.claimableQuote, y.quoteDecimals) ?? -1) - (val(x.claimableQuote, x.quoteDecimals) ?? -1));
+
     box.innerHTML = '';
+    let mine = 0, elsewhere = 0;
     for (const r of rows) {
       const sym = SOL_QUOTE_SYMBOLS[r.quoteMint] || 'quote';
-      const has = BigInt(r.claimableQuote) > 0n || BigInt(r.claimableBase) > 0n;
-      // Without the quote's decimals an amount cannot be scaled, and printing
-      // the raw number would be off by whatever power of ten it happens to be.
-      // Say so instead, and still let it be claimed.
-      const amtText = r.quoteDecimals == null
-        ? 'amount unknown (' + esc(String(r.detailError || 'pool details unavailable').slice(0, 40)) + ')'
-        : fmtSolAmount(r.claimableQuote, r.quoteDecimals)
-            .toLocaleString(undefined, { maximumFractionDigits: 6 }) + ' ' + sym + ' claimable';
+      const yours = val(r.claimableQuote, r.quoteDecimals) ?? 0;
+      const locked = val(r.partnerQuote, r.quoteDecimals) ?? 0;
+      mine += yours;
+      if (!r.isFeeClaimer && locked > 0) elsewhere += locked;
+
+      // Say who the pool pays. The fee claimer is fixed at launch, so a pool you
+      // created can pay a wallet you no longer use - and a CLAIM button that
+      // reverts is worse than one that is plainly disabled.
+      let note;
+      if (r.quoteDecimals == null) note = 'amount unknown';
+      else if (yours > 0) note = yours.toLocaleString(undefined, { maximumFractionDigits: 6 }) + ' ' + sym
+        + (r.isFeeClaimer && r.isCreator ? '' : r.isCreator && !r.isFeeClaimer ? ' (creator share)' : '');
+      else if (locked > 0) note = locked.toLocaleString(undefined, { maximumFractionDigits: 6 }) + ' ' + sym
+        + ' → ' + String(r.feeClaimer || '?').slice(0, 6) + '…';
+      else note = 'nothing to claim';
+
       const row = document.createElement('div');
       row.className = 'token-row';
       row.innerHTML =
         `<span class="sym">${esc((r.baseMint || r.pool).slice(0, 4))}…</span>` +
-        `<span class="addr"><a href="https://solscan.io/account/${esc(r.pool)}" target="_blank" rel="noopener">` +
-        `${amtText}</a></span>`;
+        `<span class="addr"><a href="https://solscan.io/account/${esc(r.pool)}" target="_blank" rel="noopener">${esc(note)}</a></span>`;
       const btn = document.createElement('button');
-      btn.className = has ? 'mini accent' : 'mini';
+      btn.className = yours > 0 ? 'mini accent' : 'mini';
       btn.textContent = 'CLAIM';
+      btn.disabled = !(yours > 0);
+      btn.title = yours > 0 ? 'claim to this wallet'
+        : (locked > 0 ? 'this pool pays ' + r.feeClaimer + ' — import that key to claim it' : 'nothing accrued');
       btn.onclick = () => claimMeteora(r.pool, btn);
       row.appendChild(btn);
       box.appendChild(row);
+    }
+
+    if (elsewhere > 0) {
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.style.marginTop = '8px';
+      hint.innerHTML = `<b>${elsewhere.toLocaleString(undefined, { maximumFractionDigits: 4 })}</b> more is claimable `
+        + 'by other wallets that these pools name as fee claimer — the address is fixed at launch and cannot be '
+        + 'changed. Import that key here and the same buttons will claim it.';
+      box.appendChild(hint);
     }
   } catch (e) {
     box.innerHTML = `<div class="empty">couldn't load Meteora pools: ${esc(e.shortMessage || e.message)}</div>`;
