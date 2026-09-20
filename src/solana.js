@@ -341,47 +341,70 @@ export function solAddressFromSecret(secret) {
 // List every DBC pool this wallet created, with its unclaimed partner fee.
 // Returns [{ pool, baseMint, quoteMint, quoteDecimals, claimableQuote, claimableBase }]
 // (claimable* are raw integer strings in the token's base units).
+/// Every DBC pool this wallet launched, with what is actually claimable and by
+/// whom.
+///
+/// Three numbers matter and they are not the same thing. `lifetime` is what the
+/// pool has ever earned - it keeps counting after a claim, so reporting it as a
+/// balance shows money that is not there, which is exactly what this used to do.
+/// `partner` is the fee claimer's unclaimed share, `creator` is the creator's.
+/// They are claimed by different instructions and, often, by different wallets:
+/// the fee claimer is fixed in the config at launch, so a pool you created can
+/// pay someone else entirely.
 export async function getMeteoraFees({ rpcUrl, owner }) {
   const connection = new Connection(rpcUrl, 'confirmed');
   const client = new DynamicBondingCurveClient(connection, 'confirmed');
   const rows = await client.state.getPoolsFeesByCreator(new PublicKey(owner));
-  const quoteCache = new Map(); // config -> { mint, decimals }
+  const me = new PublicKey(owner).toBase58();
+  const decCache = new Map();
   const out = [];
+
   for (const r of rows) {
-    let baseMint = null, quoteMint = null, quoteDecimals = null, detail = null;
+    let baseMint = null, quoteMint = null, quoteDecimals = null;
+    let feeClaimer = null, creator = null, detail = null;
     try {
-      // The SDK wraps the decoded account: the fields live on .poolState, not on
-      // the object itself. Reading them off the top level returned undefined for
-      // every pool, which a swallowed catch then hid - so the list showed no coin
-      // names and fell back to 9 decimals. On a USDC pool that is 6, which made
-      // every amount read a thousand times too small.
+      // the SDK nests the decoded account under .poolState
       const raw = await client.state.getPool(r.poolAddress);
       const pool = raw?.poolState ?? raw;
       baseMint = pool?.baseMint?.toBase58?.() || null;
-      const cfgKey = pool?.config?.toBase58?.();
-      if (cfgKey) {
-        if (!quoteCache.has(cfgKey)) {
-          const rawCfg = await client.state.getPoolConfig(pool.config);
-          const cfg = rawCfg?.poolConfig ?? rawCfg;
-          const qm = cfg?.quoteMint;
-          const dec = qm ? (await readQuoteMint(connection, qm)).decimals : null;
-          quoteCache.set(cfgKey, { mint: qm?.toBase58?.() || null, decimals: dec });
+      creator = pool?.creator?.toBase58?.() || null;
+      if (pool?.config) {
+        const cfg = await connection.getAccountInfo(pool.config);
+        if (cfg) {
+          // PoolConfig: quote_mint at 8, fee_claimer at 40 (from the IDL order)
+          quoteMint = new PublicKey(cfg.data.subarray(8, 40)).toBase58();
+          feeClaimer = new PublicKey(cfg.data.subarray(40, 72)).toBase58();
+          if (!decCache.has(quoteMint)) {
+            decCache.set(quoteMint, (await readQuoteMint(connection, new PublicKey(quoteMint))).decimals);
+          }
+          quoteDecimals = decCache.get(quoteMint);
         }
-        const q = quoteCache.get(cfgKey);
-        quoteMint = q.mint; quoteDecimals = q.decimals;
       }
     } catch (e) {
-      // kept, not swallowed: without decimals the amount cannot be shown honestly
       detail = e?.message || String(e);
     }
+
+    const isFeeClaimer = !!feeClaimer && feeClaimer === me;
+    const isCreator = !!creator && creator === me;
     out.push({
       pool: r.poolAddress.toBase58(),
-      baseMint, quoteMint,
-      // null means unknown rather than nine; a caller that shows an amount
-      // without it would be guessing by a factor of a thousand
-      quoteDecimals, detailError: detail,
-      claimableQuote: r.partnerQuoteFee.toString(),
-      claimableBase: r.partnerBaseFee.toString(),
+      baseMint, quoteMint, quoteDecimals, feeClaimer, creator, detailError: detail,
+      partnerQuote: r.partnerQuoteFee.toString(),
+      partnerBase: r.partnerBaseFee.toString(),
+      creatorQuote: r.creatorQuoteFee.toString(),
+      creatorBase: r.creatorBaseFee.toString(),
+      lifetimeQuote: r.totalTradingQuoteFee.toString(),
+      isFeeClaimer, isCreator,
+      // what this wallet can actually take, which is the only number worth
+      // putting a button next to
+      claimableQuote: (
+        (isFeeClaimer ? BigInt(r.partnerQuoteFee.toString()) : 0n)
+        + (isCreator ? BigInt(r.creatorQuoteFee.toString()) : 0n)
+      ).toString(),
+      claimableBase: (
+        (isFeeClaimer ? BigInt(r.partnerBaseFee.toString()) : 0n)
+        + (isCreator ? BigInt(r.creatorBaseFee.toString()) : 0n)
+      ).toString(),
     });
   }
   return out;
@@ -395,72 +418,71 @@ export async function claimMeteoraFees({ rpcUrl, secretKey, pool, onStatus }) {
   const payer = keypairFromSecret(secretKey);
   const client = new DynamicBondingCurveClient(connection, 'confirmed');
   const poolPk = new PublicKey(pool);
+  const me = payer.publicKey.toBase58();
 
-  say('reading claimable fees…');
+  say('reading the pool…');
+  const raw = await client.state.getPool(poolPk);
+  const ps = raw?.poolState ?? raw;
+  if (!ps?.config) throw new Error('could not read that pool');
+  const cfg = await connection.getAccountInfo(ps.config);
+  const feeClaimer = new PublicKey(cfg.data.subarray(40, 72)).toBase58();
+  const creator = ps.creator?.toBase58?.() || null;
+
   const metrics = await client.state.getPoolFeeMetrics(poolPk);
-  const maxBase = metrics.current.partnerBaseFee;
-  const maxQuote = metrics.current.partnerQuoteFee;
-  if (maxBase.isZero() && maxQuote.isZero()) throw new Error('nothing to claim on this pool yet');
+  const cur = metrics.current;
 
-  say('building claim tx…');
-  const tx = await client.partner.claimPartnerTradingFee({
-    feeClaimer: payer.publicKey,
-    payer: payer.publicKey,
-    pool: poolPk,
-    maxBaseAmount: maxBase,
-    maxQuoteAmount: maxQuote,
-    receiver: payer.publicKey,
-  });
-  addPriority(tx);
-  say('sending claim tx…');
-  const sig = await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' });
-  return { sig, claimedBase: maxBase.toString(), claimedQuote: maxQuote.toString() };
-}
+  // Two buckets, two instructions, and the program checks the signer against
+  // the right one - calling the partner path as a non-fee-claimer is what
+  // "Unauthorized" (6053 / 0x17a5) means. Pick by who this key actually is
+  // rather than always reaching for the partner path.
+  const canPartner = feeClaimer === me && !(cur.partnerBaseFee.isZero() && cur.partnerQuoteFee.isZero());
+  const canCreator = creator === me && !(cur.creatorBaseFee.isZero() && cur.creatorQuoteFee.isZero());
 
-// ---------------------------------------------------------------------------
-// Router: buy/sell a DBC token with SOL by chaining Jupiter (SOL<->quote) with
-// the DBC curve (quote<->token). Sequential — leg 1 confirms, then we read the
-// actual amount received and feed it into leg 2.
-// ---------------------------------------------------------------------------
-async function resolvePool(client, connection, tokenMint) {
-  const mint = new PublicKey(tokenMint);
-  const pa = await client.state.getPoolByBaseMint(mint);
-  if (!pa) throw new Error('no Meteora DBC pool found for this token');
-  const virtualPool = pa.account;                    // { poolState }
-  const config = await client.state.getPoolConfig(virtualPool.poolState.config);
-  const quoteMint = config.quoteMint;
-  const quoteProgram = config.quoteTokenFlag === 1 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
-  const [q, b] = await Promise.all([
-    connection.getParsedAccountInfo(quoteMint),
-    connection.getParsedAccountInfo(mint),
-  ]);
+  if (!canPartner && !canCreator) {
+    if (feeClaimer !== me && creator !== me) {
+      throw new Error(`this wallet is neither the fee claimer (${feeClaimer.slice(0, 8)}…) `
+        + `nor the creator of that pool, so it cannot claim from it`);
+    }
+    throw new Error('nothing to claim on this pool yet (its lifetime total is not a balance)');
+  }
+
+  const sigs = [];
+  let claimedQuote = 0n, claimedBase = 0n;
+
+  if (canPartner) {
+    say('claiming the fee claimer’s share…');
+    const tx = await client.partner.claimPartnerTradingFee({
+      feeClaimer: payer.publicKey, payer: payer.publicKey, pool: poolPk,
+      maxBaseAmount: cur.partnerBaseFee, maxQuoteAmount: cur.partnerQuoteFee,
+      receiver: payer.publicKey,
+    });
+    addPriority(tx);
+    sigs.push(await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' }));
+    claimedQuote += BigInt(cur.partnerQuoteFee.toString());
+    claimedBase += BigInt(cur.partnerBaseFee.toString());
+  }
+
+  if (canCreator) {
+    say('claiming the creator’s share…');
+    const tx = await client.creator.claimCreatorTradingFee({
+      creator: payer.publicKey, payer: payer.publicKey, pool: poolPk,
+      maxBaseAmount: cur.creatorBaseFee, maxQuoteAmount: cur.creatorQuoteFee,
+      receiver: payer.publicKey,
+    });
+    addPriority(tx);
+    sigs.push(await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' }));
+    claimedQuote += BigInt(cur.creatorQuoteFee.toString());
+    claimedBase += BigInt(cur.creatorBaseFee.toString());
+  }
+
   return {
-    poolAddr: pa.publicKey, virtualPool, config, quoteMint, quoteProgram,
-    quoteDecimals: q.value?.data?.parsed?.info?.decimals ?? 6,
-    baseDecimals: b.value?.data?.parsed?.info?.decimals ?? 6,
-    isMigrated: !!virtualPool.poolState.isMigrated,
+    sig: sigs[0], sigs,
+    claimedQuote: claimedQuote.toString(),
+    claimedBase: claimedBase.toString(),
+    asPartner: canPartner, asCreator: canCreator,
   };
 }
 
-async function tokenBalance(connection, owner, mint, program) {
-  const ata = getAssociatedTokenAddressSync(mint, owner, false, program);
-  try { return new BN((await connection.getTokenAccountBalance(ata)).value.amount); }
-  catch { return new BN(0); }
-}
-
-// human "1.5" -> raw BN at `decimals`, without float rounding
-function uiToRaw(ui, decimals) {
-  const [whole, frac = ''] = String(ui).trim().split('.');
-  const f = (frac + '0'.repeat(decimals)).slice(0, decimals);
-  return new BN((whole || '0') + f).add(new BN(0)); // normalize
-}
-
-const QUOTE_SYMBOLS = {
-  So11111111111111111111111111111111111111112: 'SOL',
-  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC',
-};
-
-// resolve token -> pool metadata for the UI (quote symbol, decimals, migrated?)
 export async function resolveToken({ rpcUrl, tokenMint }) {
   const connection = new Connection(rpcUrl, 'confirmed');
   const client = new DynamicBondingCurveClient(connection, 'confirmed');
