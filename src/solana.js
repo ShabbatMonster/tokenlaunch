@@ -348,25 +348,38 @@ export async function getMeteoraFees({ rpcUrl, owner }) {
   const quoteCache = new Map(); // config -> { mint, decimals }
   const out = [];
   for (const r of rows) {
-    let baseMint = null, quoteMint = null, quoteDecimals = 9;
+    let baseMint = null, quoteMint = null, quoteDecimals = null, detail = null;
     try {
-      const pool = await client.state.getPool(r.poolAddress);
+      // The SDK wraps the decoded account: the fields live on .poolState, not on
+      // the object itself. Reading them off the top level returned undefined for
+      // every pool, which a swallowed catch then hid - so the list showed no coin
+      // names and fell back to 9 decimals. On a USDC pool that is 6, which made
+      // every amount read a thousand times too small.
+      const raw = await client.state.getPool(r.poolAddress);
+      const pool = raw?.poolState ?? raw;
       baseMint = pool?.baseMint?.toBase58?.() || null;
       const cfgKey = pool?.config?.toBase58?.();
       if (cfgKey) {
         if (!quoteCache.has(cfgKey)) {
-          const cfg = await client.state.getPoolConfig(pool.config);
+          const rawCfg = await client.state.getPoolConfig(pool.config);
+          const cfg = rawCfg?.poolConfig ?? rawCfg;
           const qm = cfg?.quoteMint;
-          const dec = qm ? (await readQuoteMint(connection, qm)).decimals : 9;
+          const dec = qm ? (await readQuoteMint(connection, qm)).decimals : null;
           quoteCache.set(cfgKey, { mint: qm?.toBase58?.() || null, decimals: dec });
         }
         const q = quoteCache.get(cfgKey);
         quoteMint = q.mint; quoteDecimals = q.decimals;
       }
-    } catch { /* pool details are best-effort; the fee numbers still stand */ }
+    } catch (e) {
+      // kept, not swallowed: without decimals the amount cannot be shown honestly
+      detail = e?.message || String(e);
+    }
     out.push({
       pool: r.poolAddress.toBase58(),
-      baseMint, quoteMint, quoteDecimals,
+      baseMint, quoteMint,
+      // null means unknown rather than nine; a caller that shows an amount
+      // without it would be guessing by a factor of a thousand
+      quoteDecimals, detailError: detail,
       claimableQuote: r.partnerQuoteFee.toString(),
       claimableBase: r.partnerBaseFee.toString(),
     });

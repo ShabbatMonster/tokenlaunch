@@ -3989,19 +3989,27 @@ async function renderMeteoraClaims(box) {
     const { getMeteoraFees } = await import('./solana.js');
     const rows = await getMeteoraFees({ rpcUrl: activePad.rpc, owner });
     if (!rows.length) { box.innerHTML = '<div class="empty">no Meteora launches from this wallet yet</div>'; return; }
-    // most fees first
-    rows.sort((a, b) => (BigInt(b.claimableQuote) > BigInt(a.claimableQuote) ? 1 : -1));
+    // Most fees first, by real value. Sorting the raw amounts put a 6-decimal
+    // token above a 9-decimal one holding a thousand times more.
+    const scaled = (r) => (r.quoteDecimals == null ? -1 : Number(r.claimableQuote) / 10 ** r.quoteDecimals);
+    rows.sort((a, b) => scaled(b) - scaled(a));
     box.innerHTML = '';
     for (const r of rows) {
       const sym = SOL_QUOTE_SYMBOLS[r.quoteMint] || 'quote';
-      const amt = fmtSolAmount(r.claimableQuote, r.quoteDecimals);
       const has = BigInt(r.claimableQuote) > 0n || BigInt(r.claimableBase) > 0n;
+      // Without the quote's decimals an amount cannot be scaled, and printing
+      // the raw number would be off by whatever power of ten it happens to be.
+      // Say so instead, and still let it be claimed.
+      const amtText = r.quoteDecimals == null
+        ? 'amount unknown (' + esc(String(r.detailError || 'pool details unavailable').slice(0, 40)) + ')'
+        : fmtSolAmount(r.claimableQuote, r.quoteDecimals)
+            .toLocaleString(undefined, { maximumFractionDigits: 6 }) + ' ' + sym + ' claimable';
       const row = document.createElement('div');
       row.className = 'token-row';
       row.innerHTML =
         `<span class="sym">${esc((r.baseMint || r.pool).slice(0, 4))}…</span>` +
         `<span class="addr"><a href="https://solscan.io/account/${esc(r.pool)}" target="_blank" rel="noopener">` +
-        `${amt.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${sym} claimable</a></span>`;
+        `${amtText}</a></span>`;
       const btn = document.createElement('button');
       btn.className = has ? 'mini accent' : 'mini';
       btn.textContent = 'CLAIM';
