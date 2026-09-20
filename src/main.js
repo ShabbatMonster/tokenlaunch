@@ -4030,6 +4030,51 @@ async function renderMeteoraClaims(box) {
       box.appendChild(row);
     }
 
+    // Post-migration. Once a curve graduates its liquidity becomes a DAMM v2
+    // position in another program, and the DBC buckets above go empty for good -
+    // so these fees are invisible to everything on this page until now.
+    try {
+      const { findDammPositions, previewDammClaim } = await import('./dammFees.js');
+      const positions = await findDammPositions({ rpcUrl: activePad.rpc, owner });
+      if (positions.length) {
+        const head = document.createElement('div');
+        head.className = 'hint';
+        head.style.marginTop = '10px';
+        head.textContent = 'after migration — Meteora DAMM v2 positions';
+        box.appendChild(head);
+
+        for (const p of positions) {
+          const q = await previewDammClaim({ rpcUrl: activePad.rpc, owner, position: p });
+          const scale = (raw, d) => (raw == null || d == null ? null : Number(raw) / 10 ** d);
+          const a = scale(q.claimableA, p.decimalsA);
+          const b = scale(q.claimableB, p.decimalsB);
+          const parts = [];
+          if (a > 0) parts.push(a.toLocaleString(undefined, { maximumFractionDigits: 6 }) + ' ' + (SOL_QUOTE_SYMBOLS[p.tokenAMint] || p.tokenAMint.slice(0, 4)));
+          if (b > 0) parts.push(b.toLocaleString(undefined, { maximumFractionDigits: 6 }) + ' ' + (SOL_QUOTE_SYMBOLS[p.tokenBMint] || p.tokenBMint.slice(0, 4)));
+          const label = q.error ? 'would fail: ' + esc(String(q.error).slice(0, 40))
+            : parts.length ? parts.join(' + ') : 'nothing to claim';
+
+          const row = document.createElement('div');
+          row.className = 'token-row';
+          row.innerHTML =
+            `<span class="sym">LP</span>` +
+            `<span class="addr"><a href="https://solscan.io/account/${esc(p.pool)}" target="_blank" rel="noopener">${label}</a></span>`;
+          const cb = document.createElement('button');
+          cb.className = parts.length ? 'mini accent' : 'mini';
+          cb.textContent = 'CLAIM';
+          cb.disabled = !parts.length;
+          cb.onclick = () => claimDamm(p, cb);
+          row.appendChild(cb);
+          box.appendChild(row);
+        }
+      }
+    } catch (e) {
+      const warn = document.createElement('div');
+      warn.className = 'hint';
+      warn.textContent = 'could not read post-migration positions: ' + (e.shortMessage || e.message);
+      box.appendChild(warn);
+    }
+
     if (elsewhere > 0) {
       const hint = document.createElement('div');
       hint.className = 'hint';
@@ -4041,6 +4086,26 @@ async function renderMeteoraClaims(box) {
     }
   } catch (e) {
     box.innerHTML = `<div class="empty">couldn't load Meteora pools: ${esc(e.shortMessage || e.message)}</div>`;
+  }
+}
+
+async function claimDamm(position, btn) {
+  const out = $('claimStatus');
+  const say = (m, err) => { out.innerHTML = err ? `<span class="err">${esc(m)}</span>` : esc(m); };
+  if (!solKeyB58) { say('import a SOL key first', true); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const { claimDammFees } = await import('./dammFees.js');
+    const res = await claimDammFees({
+      rpcUrl: activePad.rpc, secretKey: solKeyB58, position, onStatus: (m) => say(m),
+    });
+    out.innerHTML = `<span style="color:var(--accent)">LP FEES CLAIMED ✓</span> `
+      + `<a href="https://solscan.io/tx/${res.sig}" target="_blank" rel="noopener">tx</a>`;
+    refreshBalance(); renderTokenList();
+  } catch (e) {
+    say(e.shortMessage || e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
