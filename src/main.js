@@ -417,7 +417,10 @@ const SOL_QUOTES = {
   SOL:  { mint: 'So11111111111111111111111111111111111111112', symbol: 'SOL',  decimals: 9, defaultThreshold: 85 },
   USDC: { mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', symbol: 'USDC', decimals: 6, defaultThreshold: 17000 },
 };
-const SOL_FEE_WALLET = 'H5GAYEieNUyTmHFD4foJEKSpkggEDHBV9ffGebrD6wAW';
+// Where Meteora trading fees are claimable from. It is the FEE WALLET box's
+// default, and since creatorTradingFeePercentage is 0 the whole fee goes here -
+// so a stale value means every launch pays someone else.
+const SOL_FEE_WALLET = 'JDQKDrc1TQgBRvdFh56tkta5sYcDj1SoP52Eiu64rSrT';
 const SOL_CUSTOM_DEFAULT = '9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump'; // prefill for custom quote
 const SOL_CUSTOM_THRESHOLD = 1000000; // default migration threshold for custom quotes
 
