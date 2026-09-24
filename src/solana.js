@@ -776,18 +776,25 @@ export const PUMP_CURVE = {
   totalSupply: 1_000_000_000,
 };
 
+// Jupiter's lite API reports no decimals for the output mint - not at the top
+// level and not inside routePlan - so an amount taken off a route has to be
+// scaled by reading the mint itself. Cached, because decimals never change.
+const decimalsCache = new Map();
+async function mintDecimals(connection, mint) {
+  const k = String(mint);
+  if (!decimalsCache.has(k)) {
+    decimalsCache.set(k, (await readQuoteMint(connection, new PublicKey(k))).decimals);
+  }
+  return decimalsCache.get(k);
+}
+
 /// How many whole `quoteMint` tokens are worth `solAmount` SOL right now.
-export async function solEquivalent(quoteMint, solAmount) {
+export async function solEquivalent(rpcUrl, quoteMint, solAmount) {
   if (quoteMint === SOL_MINT) return solAmount;
+  const connection = new Connection(rpcUrl, 'confirmed');
   const lamports = Math.round(solAmount * 1e9);
   const q = await jupiterQuote(SOL_MINT, quoteMint, lamports, 100);
-  const decimals = q.outputMintDecimals
-    ?? q.routePlan?.[q.routePlan.length - 1]?.swapInfo?.outputMintDecimals;
-  if (decimals == null) {
-    // fall back to reading the mint when Jupiter does not report decimals
-    throw new Error('could not determine the quote mint decimals from Jupiter');
-  }
-  return Number(q.outAmount) / 10 ** decimals;
+  return Number(q.outAmount) / 10 ** await mintDecimals(connection, quoteMint);
 }
 
 /// pump.fun-shaped curve parameters for a given quote, priced live.
@@ -840,6 +847,93 @@ async function jupiterSwap(connection, owner, quoteResponse, onStatus) {
     'confirmed',
   );
   return sig;
+}
+
+// ---------------------------------------------------------------------------
+// Funding the quote side.
+//
+// A curve quoted in anything but SOL has to be FUNDED in that thing. The dev
+// buy spends the quote token, and so does anyone buying on the curve, so a
+// wallet holding nothing but SOL cannot buy its own launch. Jupiter is already
+// wired up for the trade router, so the same route fills the quote side first.
+//
+// The amount received is read as a balance delta rather than taken from the
+// route's estimate: a route that partially fills, or fills at a worse price
+// than quoted, still returns a happy-looking quote object.
+// ---------------------------------------------------------------------------
+
+/// What this wallet holds of the quote token, in its own units.
+export async function quoteHoldings({ rpcUrl, owner, quoteMint }) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const who = new PublicKey(owner);
+  if (quoteMint === SOL_MINT) {
+    const lamports = await connection.getBalance(who, 'confirmed');
+    return { isNative: true, decimals: 9, raw: String(lamports), ui: lamports / 1e9 };
+  }
+  const mint = new PublicKey(quoteMint);
+  const { program, decimals } = await readQuoteMint(connection, mint);
+  const raw = await tokenBalance(connection, who, mint, program);
+  return { isNative: false, decimals, raw: raw.toString(), ui: Number(raw.toString()) / 10 ** decimals };
+}
+
+/// What `uiSol` SOL would buy of the quote right now. No signing, no key.
+export async function previewSwapIntoQuote({ rpcUrl, quoteMint, uiSol, slippageBps = 100 }) {
+  if (quoteMint === SOL_MINT) throw new Error('the quote already is SOL - there is nothing to swap into');
+  const lamports = uiToRaw(uiSol, 9);
+  if (lamports.lten(0)) return null;
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const [q, decimals] = await Promise.all([
+    jupiterQuote(SOL_MINT, quoteMint, lamports.toString(), slippageBps),
+    mintDecimals(connection, quoteMint),
+  ]);
+  return {
+    outRaw: q.outAmount, decimals,
+    out: Number(q.outAmount) / 10 ** decimals,
+    route: q.routePlan.map((r) => r.swapInfo.label),
+  };
+}
+
+/// Swap SOL into the quote token so the launch and its dev buy can be funded.
+export async function swapIntoQuote({ rpcUrl, secretKey, quoteMint, uiSol, slippageBps = 100, onStatus }) {
+  const say = (m) => onStatus && onStatus(m);
+  if (quoteMint === SOL_MINT) throw new Error('the quote already is SOL - there is nothing to swap into');
+
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const owner = keypairFromSecret(secretKey);
+  const mint = new PublicKey(quoteMint);
+  const { program, decimals } = await readQuoteMint(connection, mint);
+
+  const lamports = uiToRaw(uiSol, 9);
+  if (lamports.lten(0)) throw new Error('enter an amount of SOL to swap');
+
+  // the launch itself is still paid for in SOL - rent for the mint, the two
+  // vaults and the metadata account - so swapping the wallet dry would fund the
+  // curve and then leave nothing to create it with
+  const LAUNCH_HEADROOM = 40_000_000;
+  const balance = await connection.getBalance(owner.publicKey, 'confirmed');
+  if (new BN(balance).lt(lamports.add(new BN(LAUNCH_HEADROOM)))) {
+    throw new Error(
+      `swapping ${uiSol} SOL would leave too little behind: creating the pool costs about `
+      + `${LAUNCH_HEADROOM / 1e9} SOL in rent and fees, and the wallet holds ${balance / 1e9}.`,
+    );
+  }
+
+  say('asking Jupiter for a route…');
+  const jq = await jupiterQuote(SOL_MINT, quoteMint, lamports.toString(), slippageBps);
+  const route = jq.routePlan.map((r) => r.swapInfo.label);
+
+  const pre = await tokenBalance(connection, owner.publicKey, mint, program);
+  say(`swapping ${uiSol} SOL via ${route.join(' → ')}…`);
+  const sig = await jupiterSwap(connection, owner, jq);
+
+  const post = await tokenBalance(connection, owner.publicKey, mint, program);
+  const received = post.sub(pre);
+  if (received.lten(0)) throw new Error('the swap confirmed but no quote token arrived - check the transaction');
+  return {
+    sig, route, decimals,
+    receivedRaw: received.toString(),
+    received: Number(received.toString()) / 10 ** decimals,
+  };
 }
 
 async function dbcSwap(client, connection, owner, info, amountIn, swapBaseForQuote, slippageBps) {

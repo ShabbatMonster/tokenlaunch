@@ -4480,7 +4480,82 @@ function updateSolQuoteUI(pad) {
   // the dev buy is funded in the quote, not in SOL - on a USDC-quoted curve a
   // box labelled SOL would be asking for the wrong number entirely
   $('solDevSym').textContent = custom ? 'QUOTE' : q.symbol;
+
+  // Nothing to swap into when the curve is already quoted in SOL - the wallet
+  // balance in the header is the answer.
+  const quotedInSol = !custom && q.mint === SOL_QUOTES.SOL.mint;
+  $('solFundRow').classList.toggle('hidden', quotedInSol);
+  $('solFundSym').textContent = custom ? 'QUOTE' : q.symbol;
   previewSolDevBuy(pad);
+  if (!quotedInSol) refreshSolQuoteHoldings(pad);
+}
+
+// What the wallet holds of the quote, which is the thing the dev buy and every
+// curve trade actually spend. A wallet full of SOL buys nothing on a USDC-quoted
+// launch, and that is not obvious from the SOL balance in the header.
+let solHoldingsSeq = 0;
+async function refreshSolQuoteHoldings(pad) {
+  const hint = $('solFundHint');
+  if (!solKeyB58) { hint.textContent = 'no SOL key loaded'; return; }
+  const seq = ++solHoldingsSeq;
+  try {
+    const quoteMint = solQuoteMint(pad);
+    const { quoteHoldings } = await import('./solana.js');
+    const h = await quoteHoldings({ rpcUrl: pad.rpc, owner: solPubkeyFromSecret(solKeyB58), quoteMint });
+    if (seq !== solHoldingsSeq) return;
+    const sym = pad.quoteSel === 'CUSTOM' ? 'of the quote' : SOL_QUOTES[pad.quoteSel].symbol;
+    hint.innerHTML = `wallet holds <b>${h.ui.toLocaleString(undefined, { maximumFractionDigits: 6 })}</b> ${esc(sym)}`
+      + (h.ui > 0 ? '' : ' — the dev buy and every curve trade are funded in it, not in SOL');
+  } catch (e) {
+    if (seq === solHoldingsSeq) hint.textContent = e.message;
+  }
+}
+
+// Estimate the swap as the amount is typed, then run it with the stored key.
+let solFundPreviewSeq = 0;
+async function previewSolFund(pad) {
+  const amt = $('solFundAmount').value.trim();
+  if (!amt || !(Number(amt) > 0)) { refreshSolQuoteHoldings(pad); return; }
+  const seq = ++solFundPreviewSeq;
+  const hint = $('solFundHint');
+  try {
+    const quoteMint = solQuoteMint(pad);
+    const { previewSwapIntoQuote } = await import('./solana.js');
+    const p = await previewSwapIntoQuote({ rpcUrl: pad.rpc, quoteMint, uiSol: amt });
+    if (seq !== solFundPreviewSeq || !p) return;
+    const sym = pad.quoteSel === 'CUSTOM' ? '' : ' ' + SOL_QUOTES[pad.quoteSel].symbol;
+    hint.innerHTML = `≈ <b>${p.out.toLocaleString(undefined, { maximumFractionDigits: 6 })}</b>${esc(sym)} `
+      + `via ${esc(p.route.join(' → '))}`;
+  } catch (e) {
+    if (seq === solFundPreviewSeq) hint.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  }
+}
+
+async function doSolFund(pad, btn) {
+  const hint = $('solFundHint');
+  if (!solKeyB58) { hint.textContent = 'no SOL key loaded'; return; }
+  const amt = $('solFundAmount').value.trim();
+  if (!(Number(amt) > 0)) { hint.textContent = 'enter an amount of SOL to swap'; return; }
+  btn.disabled = true;
+  try {
+    const quoteMint = solQuoteMint(pad);
+    const { swapIntoQuote } = await import('./solana.js');
+    const r = await swapIntoQuote({
+      rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint, uiSol: amt,
+      onStatus: (m) => { hint.textContent = m; },
+    });
+    const sym = pad.quoteSel === 'CUSTOM' ? '' : ' ' + SOL_QUOTES[pad.quoteSel].symbol;
+    hint.innerHTML = `<span style="color:var(--accent)">SWAPPED ✓</span> `
+      + `${r.received.toLocaleString(undefined, { maximumFractionDigits: 6 })}${esc(sym)} · `
+      + `<a href="${pad.explorer}/tx/${r.sig}" target="_blank" rel="noopener">tx</a>`;
+    refreshBalance();
+    // the dev buy is funded in the quote, so its affordability just changed
+    previewSolDevBuy(pad);
+  } catch (e) {
+    hint.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Price the dev buy off the curve the form describes. No pool exists yet, so
@@ -4734,6 +4809,26 @@ function init() {
     updateRialtoHint(activePad);
   });
   $('solQuoteSelect').addEventListener('change', () => updateSolQuoteUI(activePad));
+  $('solFundBtn').addEventListener('click', (e) => { if (activePad.family === 'meteora') doSolFund(activePad, e.currentTarget); });
+  {
+    // a different custom quote is a different token to hold and to price
+    let ct;
+    $('solCustomMint').addEventListener('input', () => {
+      clearTimeout(ct);
+      ct = setTimeout(() => {
+        if (activePad.family !== 'meteora') return;
+        refreshSolQuoteHoldings(activePad);
+        previewSolDevBuy(activePad);
+      }, 400);
+    });
+  }
+  {
+    let ft;
+    $('solFundAmount').addEventListener('input', () => {
+      clearTimeout(ft);
+      ft = setTimeout(() => { if (activePad.family === 'meteora') previewSolFund(activePad); }, 300);
+    });
+  }
   {
     // the preview depends on the curve as much as on the amount, so a changed
     // threshold or supply has to reprice it too
