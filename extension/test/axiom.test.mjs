@@ -118,19 +118,72 @@ check(!/secretKey|privateKey|keypairFrom|solAddressFromSecret/.test(SRC),
   'the content script never names a key at all');
 check(!/vendor\/launcher|pumpSnipe|pumpMigrate/.test(SRC),
   'the content script does not import the signing code');
-check(/pm:resolve|pm:preview|pm:migrate/.test(SRC) && (SRC.match(/type: 'pm:/g) || []).length === 3,
-  'it speaks exactly three message types to the worker');
+check(/pm:resolve/.test(SRC) && /pm:preview/.test(SRC) && /pm:migrate/.test(SRC),
+  'it speaks only the resolve / preview / migrate vocabulary');
 check(/e\.isTrusted/.test(SRC),
   'the one control that spends money refuses synthetic clicks');
+
+// --- the mount, which is what failed the first time --------------------------
+//
+// The button has to exist before anything is awaited. The first version read a
+// stored position first, so a slow or failing chrome.storage meant no button at
+// all rather than a button in the default place.
+// comments stripped first: this is an assertion about code, and the prose right
+// above the mount uses the word "awaited"
+const CODE = SRC.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+const startFn = CODE.slice(CODE.indexOf('function start()'));
+const firstAwait = startFn.indexOf('await');
+const firstMount = startFn.indexOf('mount()');
+check(firstMount !== -1 && (firstAwait === -1 || firstMount < firstAwait),
+  'the button is mounted before anything is awaited');
+check(/buildButton\(\);[\s\S]{0,80}buildPanel\(\);[\s\S]{0,40}mount\(\);/.test(startFn),
+  'build and mount happen together at start');
+check(/ANCHOR_LABELS/.test(SRC) && /'vamp'/.test(SRC),
+  'it looks for Axiom’s own VAMP button to sit beside');
+check(/setInterval\([\s\S]{0,200}mount\(\)/.test(SRC),
+  're-mounts on a timer, because React re-renders that row and drops our node');
+check(/document\.documentElement\.appendChild\(panel\)/.test(SRC),
+  'the panel hangs off <html> so no ancestor can clip it');
+check(/if \(!document\.body\)/.test(SRC),
+  'it waits for a body rather than throwing when injected early');
+
+// Meteora opens a DAMM v2 pool, so the pump first-buy does not apply there. The
+// box must be hidden rather than shown and then failing.
+check(/canBuy/.test(SRC) && /buybox'\)\.style\.display = info\.canBuy/.test(SRC),
+  'the buy box is hidden on venues where the first buy is not wired');
 
 // The worker must not hand back anything that cannot survive a structured
 // clone into a content script - a BigInt throws, a PublicKey arrives as {}.
 const BG = fs.readFileSync(path.join(import.meta.dirname, '..', 'background.js'), 'utf8');
-const trim = BG.slice(BG.indexOf('function trimInfo'), BG.indexOf('\n}', BG.indexOf('function trimInfo')) + 2);
-check(/toString\?\.\(\)|toBase58\?\.\(\)/.test(trim),
-  'the worker converts BigInts and PublicKeys before replying', 'trimInfo()');
-check(!/curve:|info\.curve\b(?!\?)/.test(trim.replace(/info\.curve\?\./g, '')),
+const trim = BG.slice(BG.indexOf('function trimPump'), BG.indexOf('// --- messages'));
+check(/toString\?\.\(\)/.test(trim) && /toBase58\?\.\(\)/.test(trim),
+  'the worker converts BigInts and PublicKeys before replying', 'trimPump()');
+check(!/curve:/.test(trim),
   'the raw curve object is never sent to the page');
+check(/canBuy: true/.test(trim) && /canBuy: false/.test(trim),
+  'each venue states whether a first buy is possible on it');
+
+// --- Raydium must never be offered ------------------------------------------
+//
+// migrate_to_cpswap requires Raydium's own address as payer - the program says
+// so itself. A button for it would fail every single time, so there is none.
+const RAY = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'raydiumMigrate.js'), 'utf8');
+check(/state: 'blocked'/.test(RAY) && !/state: 'migratable'/.test(RAY),
+  'the Raydium path never reports a migratable state');
+check(/RAYpQbFNq9i3mu6cKpTKKRwwHFDeK5AuZz8xvxUrCgw/.test(RAY),
+  'it names the address Raydium requires, taken from the program’s own error');
+check(/permissioned/.test(BG),
+  'the worker refuses a Raydium migration rather than attempting one');
+
+// --- j7 is gone --------------------------------------------------------------
+check(!fs.existsSync(path.join(import.meta.dirname, '..', 'content.js'))
+  && !fs.existsSync(path.join(import.meta.dirname, '..', 'overlay.css')),
+  'the j7tracker fallback is removed');
+// comments stripped again: the worker still explains in prose what it used to
+// do, and that sentence is worth keeping
+const BG_CODE = BG.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+check(!/j7|deployMirrored|uploadMetadata|pumpWarmup/.test(BG_CODE),
+  'the worker keeps no j7 machinery');
 
 console.log('');
 process.exit(fails.length ? 1 : 0);

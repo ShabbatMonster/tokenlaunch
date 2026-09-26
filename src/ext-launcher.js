@@ -21,6 +21,8 @@ export { launchPump, pumpStatus, pumpWarmup, launchRaydium, solAddressFromSecret
 // the service worker keeps a single bundle and a single copy of web3.js.
 export { inspectPumpMigration, migratePump, readPumpCurve } from './pumpMigrate.js';
 export { previewSnipe, snipeMigration } from './pumpSnipe.js';
+export { inspectMeteoraMigration, migrateMeteora, findStuckMeteoraPools } from './meteoraMigrate.js';
+export { inspectRaydiumMigration, LAUNCHLAB_BLOCKER } from './raydiumMigrate.js';
 
 export const WSOL = 'So11111111111111111111111111111111111111112';
 
