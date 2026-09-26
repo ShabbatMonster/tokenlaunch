@@ -139,6 +139,32 @@ export const totalBuyFeeBps = (cfg) => cfg.lpFeeBps + cfg.protocolFeeBps + cfg.c
 // simulation with the floor set to 1 and reads how much base actually arrives;
 // that number comes from the program itself and needs no theory to be correct.
 
+/// Refuse a buy the wallet cannot pay for, naming what is short.
+async function checkQuoteFunding({ connection, user, spend, isNativeQuote, quoteMint, quoteAtaInfo }) {
+  if (isNativeQuote) {
+    // the migration still creates accounts, and that rent is paid in SOL on top
+    // of whatever is being spent on the buy
+    const RENT_HEADROOM = 30_000_000;
+    const lamports = BigInt(await connection.getBalance(user, 'confirmed'));
+    if (lamports < spend + BigInt(RENT_HEADROOM)) {
+      throw new Error(
+        `not enough SOL: the buy spends ${Number(spend) / 1e9} and the migration needs about `
+        + `${RENT_HEADROOM / 1e9} more for rent and fees, but the wallet holds ${Number(lamports) / 1e9}.`,
+      );
+    }
+    return;
+  }
+  // already fetched for the ATA check above, so this costs no extra round trip
+  const held = quoteAtaInfo ? quoteAtaInfo.data.readBigUInt64LE(TOKEN_ACCOUNT_AMOUNT) : 0n;
+  if (held >= spend) return;
+  throw new Error(
+    `this coin is not quoted in SOL - it trades against ${quoteMint.toBase58()}, and that is what the buy `
+    + `spends. There is no wrapping step for it, so the wallet has to hold it already: the buy needs `
+    + `${spend} in base units and the wallet holds ${held}`
+    + (quoteAtaInfo ? '.' : ' (no token account for it at all).'),
+  );
+}
+
 function createAtaIdempotentIx(payer, owner, mint, tokenProgram) {
   return new TransactionInstruction({
     programId: ATA_PROGRAM,
@@ -300,6 +326,22 @@ export async function buildMigrateAndBuy({
   ]);
   if (!baseAtaInfo) instructions.push(createAtaIdempotentIx(user, user, new PublicKey(mint), built.baseTokenProgram));
   if (!quoteAtaInfo) instructions.push(createAtaIdempotentIx(user, user, built.quoteMint, built.quoteTokenProgram));
+
+  // Can this buy actually be funded?
+  //
+  // A SOL-quoted coin is bought with lamports, which the wrap below turns into
+  // wrapped SOL. ANY OTHER QUOTE HAS NO SUCH STEP - the coin trades against that
+  // token, so the wallet has to be holding it already. There is nothing to
+  // convert from and nowhere to convert it.
+  //
+  // Without this the shortfall surfaces as the token program's own answer,
+  // `custom program error: 0x1`, which names neither the token nor the amount.
+  // The account list is fine either way; it is the funding that is missing, and
+  // the two failures look identical from the outside.
+  await checkQuoteFunding({
+    connection, user, spend, isNativeQuote,
+    quoteMint: built.quoteMint, quoteAtaInfo,
+  });
 
   // a SOL-quoted pool trades wrapped SOL, so the lamports have to be wrapped in
   // the same transaction - there is no earlier one to do it in

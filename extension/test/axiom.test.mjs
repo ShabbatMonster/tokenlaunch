@@ -163,6 +163,12 @@ check(!/curve:/.test(trim),
 check(/canBuy: true/.test(trim) && /canBuy: false/.test(trim),
   'each venue states whether a first buy is possible on it');
 
+// A coin quoted in something other than SOL spends that token, and there is no
+// wrapping step for it. The panel has to name the token or you cannot know what
+// to hold.
+check(/quoteMint\.slice/.test(SRC) && /not quoted in SOL/.test(SRC),
+  'the panel names a non-SOL quote instead of calling it QUOTE');
+
 // --- Raydium must never be offered ------------------------------------------
 //
 // migrate_to_cpswap requires Raydium's own address as payer - the program says

@@ -290,7 +290,11 @@ function paint() {
     const [label, kind] = STATE_LABEL[info.state] || ['UNKNOWN', 'dim'];
     setHtml('state', `<span class="${ID}-${kind}">${label}</span>`
       + (info.reason ? `<div class="${ID}-why">${escapeHtml(info.reason)}</div>` : ''));
-    setText('sym', info.isNativeQuote ? 'SOL' : 'QUOTE');
+    // name the quote rather than saying "QUOTE": on a non-SOL coin the buy
+    // spends that token and there is no wrapping step, so you have to know
+    // which one to be holding
+    setText('sym', info.isNativeQuote ? 'SOL'
+      : (info.quoteMint ? info.quoteMint.slice(0, 4) + '…' + info.quoteMint.slice(-4) : 'QUOTE'));
     // Meteora opens a DAMM v2 pool, which is a different program from PumpSwap:
     // the first buy is not wired for it, so do not offer a box that lies.
     $('buybox').style.display = info.canBuy ? '' : 'none';
@@ -333,7 +337,13 @@ async function preview() {
     return;
   }
   const spend = spendRaw();
-  if (spend <= 0n) { setText('hint', 'leave the amount at 0 to migrate without buying.'); return; }
+  if (spend <= 0n) {
+    setText('hint', state.info?.isNativeQuote
+      ? 'leave the amount at 0 to migrate without buying.'
+      : 'leave the amount at 0 to migrate without buying. This coin is not quoted in SOL, so a buy '
+        + 'spends its quote token and your wallet has to be holding it already.');
+    return;
+  }
   const seq = ++previewSeq;
   setText('hint', 'simulating the buy to measure the fill…');
   const r = await send({
