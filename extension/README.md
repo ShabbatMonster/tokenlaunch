@@ -130,3 +130,71 @@ node extension/test/panel.test.mjs
 
 Mocks the panel from the screenshot and asserts the scrape, then the three cases that
 decide whether money moves: j7 errors, j7 stays silent, j7 succeeds.
+
+---
+
+## On Axiom: migrating a pump.fun coin, and buying first
+
+Open a pump.fun coin on **axiom.trade** and a small **MIGRATE** button appears near
+the header. Click it and a panel opens with the coin's state already read off the
+chain. Type a buy amount, press **MIGRATE + BUY**, and that is the whole job.
+
+A pump curve stops trading the instant it fills and stays dead until somebody calls
+`migrate_v2` to drain it into a PumpSwap pool. pump's own bot normally does that in
+seconds; this is for when it does not — and it attaches your buy to the same
+transaction, so you are the first buy at the pool's opening price.
+
+### How it finds the contract address
+
+It does not trust a selector. Axiom's markup is theirs and will change, so the
+address is gathered from everywhere it could be — explorer links, the URL, any text
+on the page shaped like base58, data attributes — and the **service worker decides
+which candidate is real by asking the chain** whether it has a pump bonding curve.
+Being wrong about the DOM is therefore cheap and self-correcting.
+
+Addresses ending in `pump` are tried first, because that is pump.fun's own vanity
+suffix, but every other candidate is still offered: the chain has the final say and
+the suffix does not.
+
+### What the panel tells you
+
+| state | means |
+| --- | --- |
+| READY TO MIGRATE | the curve has filled, no pool exists, and the call simulates |
+| STILL ON THE CURVE | not full yet — `migrate_v2` would answer `BondingCurveNotComplete` |
+| ALREADY MIGRATED | somebody beat you to it, or it never needed you |
+| BLOCKED | it does not simulate; the reason is the program's own |
+
+The fill under the amount box is **measured, not estimated**: the worker simulates
+the real buy and reads how much base actually arrives. Constant product over the
+pool's vaults — the obvious formula — overpredicted a live fill by 16.7x, so no
+formula is used.
+
+### Route
+
+One transaction by default. It lands at about 1210 of the 1232 bytes a transaction
+may be, so when a coin's shape does not fit, it goes as a **Jito bundle** instead —
+migrate in the first transaction, buy in the second, one slot, all or nothing. You
+can also force the bundle. Tip accounts are fetched from the block engine rather
+than hardcoded, because Jito rotates them and a tip to a stale address is a tip to
+nobody.
+
+### The key
+
+Same split as the rest of this extension, and it is the whole security design: the
+key lives in the service worker and `axiom.js` never names it, never imports the
+signing code, and speaks exactly three messages — `pm:resolve`, `pm:preview`,
+`pm:migrate`. A page that turns hostile can at worst watch you press a button you
+were already pressing. The one control that spends money also refuses untrusted
+clicks, so a script on the page cannot press it for you.
+
+Import the key once in the launcher and the extension borrows it; see **Keys** above.
+
+### Test
+
+```
+node extension/test/axiom.test.mjs
+```
+
+Runs the real address scraper against mock pages that look nothing like each other,
+and asserts the security properties at the source level.

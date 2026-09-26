@@ -16,6 +16,12 @@ import {
 
 export { launchPump, pumpStatus, pumpWarmup, launchRaydium, solAddressFromSecret };
 
+// The Axiom side of the extension: reading a pump coin's migration state, and
+// migrating it with a first buy attached. Re-exported through this one entry so
+// the service worker keeps a single bundle and a single copy of web3.js.
+export { inspectPumpMigration, migratePump, readPumpCurve } from './pumpMigrate.js';
+export { previewSnipe, snipeMigration } from './pumpSnipe.js';
+
 export const WSOL = 'So11111111111111111111111111111111111111112';
 
 // j7's pad buttons, mapped onto the launch paths this repo can actually drive.
