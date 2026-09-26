@@ -16,6 +16,7 @@ import {
   inspectPumpMigration, previewSnipe, snipeMigration, migratePump,
   inspectMeteoraMigration, migrateMeteora, findStuckMeteoraPools,
   inspectRaydiumMigration,
+  previewSwapIntoQuote, swapIntoQuote, tokenHoldings,
 } from './vendor/launcher.js';
 
 // where the launcher keeps its keys, so the extension can borrow rather than
@@ -30,7 +31,13 @@ const LAUNCHER_HOME = 'https://shabbatmonster.github.io/tokenlaunch/';
 const DEFAULTS = {
   // measured 15-21ms against 23-110ms for the other key in this repo
   rpcUrl: 'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea',
-  slippageBps: 500,
+  // 40% by default, which is a choice about LOSING the race rather than about
+  // price impact. The floor is measured by simulating the real buy, so your own
+  // impact - however large the buy - is already inside the number it is a
+  // percentage of. What the tolerance actually buys is: if somebody else's
+  // migration lands first and moves the price, how much worse a fill will you
+  // still take rather than reverting. See the README.
+  slippageBps: 4000,
   route: 'auto',
   tipLamports: 1_000_000,
   // Tried in order when the configured one is refusing. A throttled key answers
@@ -255,6 +262,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             spendQuote: msg.spendQuote, slippageBps: msg.slippageBps ?? 500,
           }) });
         } catch (e) { sendResponse({ ok: false, error: e?.message || String(e) }); }
+        return;
+      }
+      case 'pm:balance': {
+        // what the wallet holds of a mint, for the MAX button
+        const rpcUrl = await healthyRpc(await getSettings());
+        const owner = await addressOrNull();
+        if (!owner) { sendResponse({ ok: false, error: 'no key imported yet' }); return; }
+        try { sendResponse({ ok: true, holdings: await tokenHoldings({ rpcUrl, owner, mint: msg.mint }) }); }
+        catch (e) { sendResponse({ ok: false, error: e?.message || String(e) }); }
+        return;
+      }
+      case 'pm:quoteSwap': {
+        const rpcUrl = await healthyRpc(await getSettings());
+        try {
+          sendResponse({ ok: true, preview: await previewSwapIntoQuote({
+            rpcUrl, quoteMint: msg.quoteMint, lamports: msg.lamports, slippageBps: msg.slippageBps ?? 100,
+          }) });
+        } catch (e) { sendResponse({ ok: false, error: e?.message || String(e) }); }
+        return;
+      }
+      case 'pm:swap': {
+        if (migrateInFlight) { sendResponse({ ok: false, error: 'something is already running' }); return; }
+        migrateInFlight = true;
+        try {
+          const rpcUrl = await healthyRpc(await getSettings());
+          const secretKey = await getKey();
+          if (!secretKey) { sendResponse({ ok: false, error: 'no key imported yet' }); return; }
+          const tabId = sender.tab?.id ?? null;
+          const say = (m) => { if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'pm:status', text: m }).catch(() => {}); };
+          sendResponse({ ok: true, result: await swapIntoQuote({
+            rpcUrl, secretKey, quoteMint: msg.quoteMint, lamports: msg.lamports,
+            slippageBps: msg.slippageBps ?? 100, onStatus: say,
+          }) });
+        } catch (e) {
+          sendResponse({ ok: false, error: e?.message || String(e) });
+        } finally { migrateInFlight = false; }
         return;
       }
       case 'pm:migrate': {

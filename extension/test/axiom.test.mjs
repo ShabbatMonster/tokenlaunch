@@ -169,6 +169,25 @@ check(/canBuy: true/.test(trim) && /canBuy: false/.test(trim),
 check(/quoteMint\.slice/.test(SRC) && /not quoted in SOL/.test(SRC),
   'the panel names a non-SOL quote instead of calling it QUOTE');
 
+// --- funding a non-SOL quote from inside the panel ---------------------------
+//
+// A non-SOL quote has to be held already, so the panel offers the way to get it
+// (Jupiter) and the way to spend all of it (MAX). Both only make sense on a
+// non-SOL quote, so both are hidden otherwise.
+check(/pm:quoteSwap/.test(SRC) && /pm:swap/.test(SRC) && /pm:balance/.test(SRC),
+  'the panel can quote a swap, run it, and read the balance');
+check(/swapbox'\)\.classList\.toggle\(`\$\{ID\}-hidden`, !needsQuote\)/.test(SRC)
+  && /max'\)\.classList\.toggle\(`\$\{ID\}-hidden`, !needsQuote\)/.test(SRC),
+  'the swap row and MAX appear only when the quote is not SOL');
+check(/e\.isTrusted/.test(SRC) && (SRC.match(/if \(!e\.isTrusted/g) || []).length >= 2,
+  'the swap button refuses synthetic clicks too, not just the migrate button');
+
+// MAX writes the balance into the amount box. Dividing a raw u64 by 10^decimals
+// in a float loses the low digits of a large balance, and this is the number
+// that then gets spent - so it is assembled as a string.
+check(/padStart\(dec \+ 1/.test(SRC) && !/heldRaw \/ 10/.test(SRC),
+  'MAX builds the amount as a string rather than through a float divide');
+
 // --- Raydium must never be offered ------------------------------------------
 //
 // migrate_to_cpswap requires Raydium's own address as payer - the program says

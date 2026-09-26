@@ -197,12 +197,24 @@ function buildPanel() {
     </div>
     <div class="${ID}-ca" id="${ID}-ca">reading the page…</div>
     <div class="${ID}-state" id="${ID}-state"></div>
+    <div id="${ID}-swapbox" class="${ID}-hidden">
+      <label class="${ID}-lab">THIS COIN IS NOT QUOTED IN SOL &mdash; SWAP IN FIRST</label>
+      <div class="${ID}-row">
+        <input class="${ID}-in" id="${ID}-swapsol" value="0" spellcheck="false" autocomplete="off"
+               placeholder="SOL to swap">
+        <button class="${ID}-side" id="${ID}-swapgo" type="button">SWAP</button>
+      </div>
+      <div class="${ID}-hint" id="${ID}-swaphint"></div>
+    </div>
     <div id="${ID}-buybox">
       <label class="${ID}-lab">BUY (<span id="${ID}-sym">SOL</span>) &mdash; 0 just migrates</label>
-      <input class="${ID}-in" id="${ID}-amt" value="0" spellcheck="false" autocomplete="off">
+      <div class="${ID}-row">
+        <input class="${ID}-in" id="${ID}-amt" value="0" spellcheck="false" autocomplete="off">
+        <button class="${ID}-side ${ID}-hidden" id="${ID}-max" type="button">MAX</button>
+      </div>
       <div class="${ID}-row">
         <div><label class="${ID}-lab">SLIPPAGE %</label>
-          <input class="${ID}-in" id="${ID}-slip" value="5" spellcheck="false" autocomplete="off"></div>
+          <input class="${ID}-in" id="${ID}-slip" value="40" spellcheck="false" autocomplete="off"></div>
         <div><label class="${ID}-lab">ROUTE</label>
           <select class="${ID}-in" id="${ID}-route">
             <option value="auto">one tx (bundle if too big)</option>
@@ -222,6 +234,13 @@ function buildPanel() {
   panel.querySelector(`#${ID}-amt`).addEventListener('input', repreview);
   panel.querySelector(`#${ID}-slip`).addEventListener('input', repreview);
   panel.querySelector(`#${ID}-go`).addEventListener('click', onGo);
+
+  let st;
+  panel.querySelector(`#${ID}-swapsol`).addEventListener('input', () => {
+    clearTimeout(st); st = setTimeout(previewSwap, 450);
+  });
+  panel.querySelector(`#${ID}-swapgo`).addEventListener('click', onSwap);
+  panel.querySelector(`#${ID}-max`).addEventListener('click', onMax);
   return panel;
 }
 
@@ -298,6 +317,12 @@ function paint() {
     // Meteora opens a DAMM v2 pool, which is a different program from PumpSwap:
     // the first buy is not wired for it, so do not offer a box that lies.
     $('buybox').style.display = info.canBuy ? '' : 'none';
+    // a non-SOL quote has to be held already: offer the way to get it, and a
+    // way to spend all of what you have
+    const needsQuote = info.canBuy && !info.isNativeQuote;
+    $('swapbox').classList.toggle(`${ID}-hidden`, !needsQuote);
+    $('max').classList.toggle(`${ID}-hidden`, !needsQuote);
+    if (needsQuote) showHeld();
   }
   paintButton();
 }
@@ -356,6 +381,61 @@ async function preview() {
   setHtml('hint', `fills <b>${Number(p.tokens).toLocaleString(undefined, { maximumFractionDigits: 2 })}</b> tokens `
     + `(<b>${Number(p.pctOfSupply).toFixed(3)}%</b> of supply) · ${p.bytes} of 1232 bytes`
     + (p.bytes > 1232 ? ' · <b>goes as a bundle</b>' : ''));
+}
+
+/// What the wallet holds of the quote, shown under the swap box so the gap
+/// between "have" and "want to spend" is visible without a second tool.
+let heldRaw = null;
+async function showHeld() {
+  const r = await send({ type: 'pm:balance', mint: state.info?.quoteMint });
+  if (!r?.ok) { setHtml('swaphint', `<span class="${ID}-err">${escapeHtml(r?.error || '')}</span>`); return; }
+  heldRaw = r.holdings.raw;
+  setHtml('swaphint', `you hold <b>${Number(r.holdings.ui).toLocaleString(undefined, { maximumFractionDigits: 6 })}</b> of the quote`);
+}
+
+function onMax() {
+  if (heldRaw == null) { showHeld(); return; }
+  const dec = state.info?.quoteDecimals ?? 0;
+  // written out rather than divided: a float divide loses the low digits of a
+  // large balance, and this is the number that gets spent
+  const raw = String(heldRaw).padStart(dec + 1, '0');
+  const whole = raw.slice(0, raw.length - dec) || '0';
+  const frac = dec ? raw.slice(raw.length - dec).replace(/0+$/, '') : '';
+  $('amt').value = frac ? `${whole}.${frac}` : whole;
+  preview();
+}
+
+let swapSeq = 0;
+async function previewSwap() {
+  const v = ($('swapsol')?.value || '').trim();
+  if (!v || !(Number(v) > 0)) { showHeld(); return; }
+  const lamports = Math.round(Number(v) * 1e9);
+  const seq = ++swapSeq;
+  setText('swaphint', 'asking Jupiter…');
+  const r = await send({ type: 'pm:quoteSwap', quoteMint: state.info?.quoteMint, lamports: String(lamports) });
+  if (seq !== swapSeq) return;
+  if (!r?.ok) { setHtml('swaphint', `<span class="${ID}-err">${escapeHtml(r?.error || 'no route')}</span>`); return; }
+  const p = r.preview;
+  setHtml('swaphint', `≈ <b>${Number(p.out).toLocaleString(undefined, { maximumFractionDigits: 6 })}</b> `
+    + `of the quote via ${escapeHtml(p.route.join(' → '))}`);
+}
+
+async function onSwap(e) {
+  if (!e.isTrusted || state.busy) return;
+  const v = ($('swapsol')?.value || '').trim();
+  if (!(Number(v) > 0)) { setText('swaphint', 'enter an amount of SOL to swap'); return; }
+  state.busy = true; paintButton();
+  setText('status', 'swapping…');
+  const r = await send({
+    type: 'pm:swap', quoteMint: state.info?.quoteMint,
+    lamports: String(Math.round(Number(v) * 1e9)),
+  });
+  state.busy = false; paintButton();
+  if (!r?.ok) { setHtml('status', `<span class="${ID}-err">${escapeHtml(r?.error || 'the swap failed')}</span>`); return; }
+  setHtml('status', `<span class="${ID}-ok">SWAPPED</span> `
+    + `${Number(r.result.received).toLocaleString(undefined, { maximumFractionDigits: 6 })} of the quote · `
+    + `<a href="https://solscan.io/tx/${r.result.sig}" target="_blank" rel="noopener">tx</a>`);
+  await showHeld();
 }
 
 async function onGo(e) {

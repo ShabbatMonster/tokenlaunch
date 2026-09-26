@@ -45,6 +45,33 @@ migrator — 15 of 15 sampled migrations were signed by it. There is no rescue p
 and no delay after which it opens up, unlike Pons. So the panel diagnoses a
 LaunchLab coin and offers no button, because a button would fail every time.
 
+### Funding a non-SOL quote
+
+A coin quoted in something other than SOL is bought **with that token**. The
+transaction wraps lamports for a SOL-quoted coin; there is no equivalent step for
+anything else, so the wallet has to be holding it.
+
+The panel handles this itself when the quote is not SOL: a **SWAP** row routes SOL
+into the quote through Jupiter, showing the route and what you would get, and a
+**MAX** button next to the buy box fills in everything you hold. Both are hidden on
+a SOL-quoted coin, where neither means anything.
+
+### Slippage, and what it is actually for
+
+The default is **40%**, and it is not a tolerance for your own price impact.
+
+The floor is measured, not modelled: the worker simulates your real buy — all 20 or
+40 SOL of it — and reads how much base actually arrives. Your own impact is already
+inside the number the percentage applies to. At 0% the transaction still simulates
+clean, because nothing can move the price between measuring and landing: the curve
+is complete and the pool does not exist until your own instruction creates it.
+
+What the tolerance buys is the case where you **lose the race**. If somebody else's
+migration lands first, `migrate_v2` does not fail — it logs and returns success —
+so your buy carries on into a pool that already exists and may already have been
+bought. 40% means "if that happens, I will still take the fill, down to 40% fewer
+tokens than I measured". A tighter number reverts instead and costs only the fee.
+
 ### Meteora's first buy is not wired yet
 
 A DBC migration opens a **DAMM v2** pool, which is a different program from

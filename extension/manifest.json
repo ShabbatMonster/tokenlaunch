@@ -19,7 +19,9 @@
     "https://axiom.trade/*",
     "https://*.axiom.trade/*",
     "https://mainnet.block-engine.jito.wtf/*",
-    "https://*.mainnet.block-engine.jito.wtf/*"
+    "https://*.mainnet.block-engine.jito.wtf/*",
+    "https://lite-api.jup.ag/*",
+    "https://quote-api.jup.ag/*"
   ],
   "optional_host_permissions": [
     "*://*/*"
