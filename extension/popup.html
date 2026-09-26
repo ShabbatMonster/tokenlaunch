@@ -3,27 +3,27 @@
 <head>
 <meta charset="utf-8">
 <style>
-  body { width: 240px; margin: 0; padding: 14px; background: #0b0d10; color: #e6e9ee;
-         font: 12px/1.5 ui-monospace, Consolas, monospace; }
+  body { width: 260px; margin: 0; padding: 14px; background: #0b0d10; color: #e6e9ee;
+         font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; }
   h1 { font-size: 11px; letter-spacing: 2px; margin: 0 0 10px; }
-  .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
-  .kv span:first-child { color: #8a93a1; }
-  button { width: 100%; margin-top: 9px; padding: 9px; border: none; border-radius: 8px;
-           background: #1a1e24; color: #e6e9ee; border: 1px solid #262b33; font: inherit; cursor: pointer; }
-  button.go { background: #4ade80; color: #04160b; font-weight: 700; border: none; }
-  .ok { color: #4ade80; } .err { color: #f87171; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; }
+  .kv dt { color: #8a93a1; } .kv dd { margin: 0; word-break: break-all; }
+  .ok { color: #4ade80; } .warn { color: #fbbf24; }
+  button { margin-top: 12px; width: 100%; padding: 9px; border: none; border-radius: 8px;
+           background: #1a1e24; color: #e6e9ee; border: 1px solid #262b33;
+           font: inherit; letter-spacing: 1px; cursor: pointer; }
+  button:hover { border-color: #3b4453; }
+  p { color: #8a93a1; margin: 10px 0 0; font-size: 11px; line-height: 1.5; }
 </style>
 </head>
 <body>
-  <h1>J7 DEPLOY FALLBACK</h1>
-  <div class="kv"><span>armed</span><span id="armed">…</span></div>
-  <div class="kv"><span>auto-fire</span><span id="auto">…</span></div>
-  <div class="kv"><span>wallet</span><span id="addr">…</span></div>
-  <div class="kv"><span>running</span><span id="busy">…</span></div>
-  <button class="go" id="fire">DEPLOY NOW (FORCE)</button>
-  <button id="refresh">RE-READ PANEL</button>
-  <button id="reset">CLEAR FIRED HISTORY</button>
-  <button id="opts">OPTIONS</button>
-<script src="popup.js"></script>
+  <h1>PUMP MIGRATE</h1>
+  <dl class="kv">
+    <dt>wallet</dt><dd id="who">…</dd>
+    <dt>rpc</dt><dd id="rpc">…</dd>
+  </dl>
+  <button id="options">OPTIONS</button>
+  <p>Open a coin on axiom.trade and use the MIGRATE button next to VAMP.</p>
 </body>
+<script src="popup.js"></script>
 </html>

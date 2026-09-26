@@ -1,200 +1,117 @@
-# j7 deploy fallback
+# pump migrate
 
-A Chrome/Edge extension that sits on **j7tracker.io**'s Token Deploy panel, mirrors
-whatever you have set up there, and finishes the launch itself when j7 can't — a
-timeout, an expired blockhash, an error toast, or j7 simply never confirming.
+A Chrome extension that puts a **MIGRATE** button on a coin's page on
+[axiom.trade](https://axiom.trade). Click it, and a panel tells you what state the
+coin is in — read off the chain, not off the page. On pump.fun you can also type a
+buy amount and take the **first buy off the migration, in the same transaction**.
 
-You set `$POOP — Poopcoin` up on j7 with an image and a dev buy, press Deploy, and
-if j7 falls over, the bar covers the error and launches the same coin through this
-repo's own launch path instead.
+A bonding curve that fills does not migrate itself. The venue's own keeper normally
+cranks it within seconds; when it doesn't, the coin sits there untradeable with
+everything it raised locked in the curve. This is for those.
+
+> The j7tracker deploy fallback that used to live here has been removed. The
+> extension now does one job.
 
 ## Install
 
-```
-node build.mjs          # writes extension/vendor/launcher.js
-```
+1. `npm run build` in the repo root (this writes `extension/vendor/launcher.js`).
+2. `chrome://extensions` → Developer mode → **Load unpacked** → pick `extension/`.
+3. Open the extension's options and press **import from launcher**, or paste a
+   Solana key. The key is stored by the extension and read only by its service
+   worker.
 
-Then `chrome://extensions` → Developer mode → **Load unpacked** → pick `extension/`.
+## Venues
 
-Open the extension's **Options** and:
+| venue | migrate | first buy | why |
+| --- | --- | --- | --- |
+| **pump.fun** | yes | **yes** | `migrate_v2` is permissionless; the buy rides in the same transaction |
+| **Meteora DBC** | yes | not yet | `migration_damm_v2` is permissionless — simulated clean from an address that is neither the creator nor the fee claimer |
+| **Raydium LaunchLab** | **no** | no | permissioned — see below |
 
-1. paste your Solana private key (base58), or press **IMPORT FROM LAUNCHER** to
-   reuse the one the launcher already has in this browser,
-2. tick **Armed**,
-3. leave **Fire automatically** off until you've watched it mirror a panel correctly at least once.
+### Raydium LaunchLab cannot be migrated
 
-## The button in j7's toolbar
-
-A **FALLBACK** button with its own buy-amount box is injected into j7's own
-toolbar, next to its Panel control, so it is already under your hand when a
-deploy dies. The unit follows the pad — SOL for Pump/BONK/Stonk, ETH for the
-Robinhood-chain pads, BNB for Flap and four.meme.
-
-It takes two clicks (the second says `FIRE?`) so a stray click in a dense
-toolbar can't spend money — **except** once j7 has actually failed, when it
-pre-arms itself and taking over is the single click it should be.
-
-Type an amount in its box and that number is what launches; it stops mirroring
-j7's field until the launch is done, so clicking the button can't quietly
-restore the old size.
-
-Press **⇱** on the bar to move the button somewhere else, then click where it
-should sit. The bar itself you drag by its header — it remembers where you put
-it and stays on screen if the window changes size.
-
-## Which pad it thinks is selected
-
-This is the one that must not guess, because a wrong answer launches on the
-wrong chain. It used to fall through to the first pad in the DOM — Pump — when
-it could not tell, so a Robinhood-chain coin could have gone to pump.fun.
-
-Now it compares every pad chip's computed style against the others and takes the
-odd one out, after first honouring any explicit `aria-pressed` / `data-state` /
-`active` class. If nothing distinguishes them it says so and **refuses to
-launch** rather than picking one. Type the pad into the bar to override, and
-whatever you type sticks until the launch is done.
-
-## Why a launch used to take ten seconds
-
-Not the transaction — the setup before it. Three reads that have nothing to do
-with your coin (pump's global config, the quote, the address lookup table) plus
-pinning the metadata, all on the critical path after you clicked.
-
-- **the setup is pre-read** while you fill the panel in and handed to the
-  launch, so a warm launch starts at its simulation.
-- **the metadata is pinned early** too (the slowest single step). Turn this off
-  in options if you would rather nothing is uploaded until you fire.
-- **a throttled RPC is abandoned, not waited out.** This was the real cost: a
-  rate-limited Helius key answers `429` and web3.js retries *the same host* with
-  a 500ms, 1000ms, 2000ms backoff. The worker now probes and moves to the next
-  endpoint instead — 91ms to skip a dead host and pick a live one.
-
-Firing the three reads off together was the obvious fix and measured *worse* —
-158ms against 72ms on one key — because the provider throttles concurrent
-requests per key. They stay sequential.
-
-## Where the key lives
-
-In `chrome.storage.local`, read **only** by the background service worker. The content
-script running inside j7tracker.io never receives it and has no message that can ask
-for it — its entire vocabulary is "here are the parameters I read" and "show this
-status". So a compromised j7 page can at worst request a launch it could already watch
-you configure; it cannot get the key. `FORGET THE KEY` in options wipes it.
-
-## How the panel is read
-
-j7's markup isn't ours and will change, so nothing here relies on a class name.
-Fields are found the way a person finds them — by the small uppercase label sitting
-above each one — and the selected pad is found by comparing the buttons against each
-other and taking the odd one out (`aria-pressed`, an `active` class, a border the
-others don't have).
-
-Everything read is **shown in the bar before it is used**, in editable boxes. If a
-field comes out wrong you can type over it, or press **◎** and click j7's fields in
-turn to teach it permanently; taught selectors are stored and take priority.
-
-This matters: a fallback that silently mirrors the wrong symbol is worse than one
-that admits it is unsure. The dot goes amber and the button still works, but you can
-see what it's about to do.
-
-## When it takes over
-
-- j7 renders anything matching *timeout / failed / error / rejected / insufficient /
-  expired* → immediately.
-- You press Deploy and nothing confirms within the take-over delay (20s default) →
-  on the timer.
-- A success toast cancels the timer, so a launch that works is left alone.
-
-It won't fire twice for the same panel — name, symbol, pad and dev buy form a
-fingerprint, and a repeat needs **DEPLOY NOW (FORCE)** in the popup. Failures clear
-the fingerprint so a retry is allowed.
-
-## Which pads it can cover
-
-| j7 pad | covered by |
-| --- | --- |
-| Pump | `launchPump` — pump.fun `create_v2`, cashback and fees-to-holders supported |
-| BONK | Raydium LaunchLab, bonk platform id |
-| Stonk | Raydium LaunchLab, stonkfun platform id |
-
-Everything else is refused with a reason rather than launched somewhere else.
-OTC / Ansem / o1 aren't implemented; four.meme, Flap, ETH, Pons and Pools are EVM
-chains and would need an EVM key rather than your Solana one.
-
-## Test
+`migrate_to_cpswap` takes no arguments and declares no admin account, so it reads
+as permissionless. It isn't. Replaying a real migration with only the payer
+swapped, everything else identical, gets:
 
 ```
-npm i --no-save jsdom
-node extension/test/panel.test.mjs
+AnchorError caused by account: payer. Error Code: InvalidOwner. Error Number: 6001.
+Left:  Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS   (our payer)
+Right: RAYpQbFNq9i3mu6cKpTKKRwwHFDeK5AuZz8xvxUrCgw    (what it wants)
 ```
 
-Mocks the panel from the screenshot and asserts the scrape, then the three cases that
-decide whether money moves: j7 errors, j7 stays silent, j7 succeeds.
+The program names the address it requires, and that address is Raydium's own
+migrator — 15 of 15 sampled migrations were signed by it. There is no rescue path
+and no delay after which it opens up, unlike Pons. So the panel diagnoses a
+LaunchLab coin and offers no button, because a button would fail every time.
 
----
+### Meteora's first buy is not wired yet
 
-## On Axiom: migrating a pump.fun coin, and buying first
+A DBC migration opens a **DAMM v2** pool, which is a different program from
+PumpSwap with its own swap encoding. The migration works; the buy does not carry
+over, and the buy box hides itself on that venue rather than offering something
+that would fail.
 
-Open a pump.fun coin on **axiom.trade** and a small **MIGRATE** button appears near
-the header. Click it and a panel opens with the coin's state already read off the
-chain. Type a buy amount, press **MIGRATE + BUY**, and that is the whole job.
-
-A pump curve stops trading the instant it fills and stays dead until somebody calls
-`migrate_v2` to drain it into a PumpSwap pool. pump's own bot normally does that in
-seconds; this is for when it does not — and it attaches your buy to the same
-transaction, so you are the first buy at the pool's opening price.
-
-### How it finds the contract address
+## How it finds the contract address
 
 It does not trust a selector. Axiom's markup is theirs and will change, so the
 address is gathered from everywhere it could be — explorer links, the URL, any text
-on the page shaped like base58, data attributes — and the **service worker decides
-which candidate is real by asking the chain** whether it has a pump bonding curve.
-Being wrong about the DOM is therefore cheap and self-correcting.
+shaped like base58, data attributes — and the **service worker decides which
+candidate is real by asking the chain** which venue it belongs to. Being wrong
+about the DOM is therefore cheap and self-correcting.
 
 Addresses ending in `pump` are tried first, because that is pump.fun's own vanity
-suffix, but every other candidate is still offered: the chain has the final say and
-the suffix does not.
+suffix, but every other candidate is still offered: the chain has the final say.
 
-### What the panel tells you
+## Where the button goes
+
+Next to Axiom's own **VAMP** button, found by its label rather than a class name.
+If no such button is on the page it floats in the top right instead. Either way you
+can drag it, and it remembers where you put it.
+
+React owns that row and re-renders it, which silently removes anything we put
+inside, so the button re-mounts itself on a timer. The panel is a separate
+fixed-position element rather than a child of the button, so an ancestor with
+`overflow: hidden` cannot clip it. The button is also built and attached before
+anything is awaited — an earlier version read a stored position first, so any
+hiccup in `chrome.storage` meant no button at all.
+
+## What the panel tells you
 
 | state | means |
 | --- | --- |
 | READY TO MIGRATE | the curve has filled, no pool exists, and the call simulates |
-| STILL ON THE CURVE | not full yet — `migrate_v2` would answer `BondingCurveNotComplete` |
+| STILL ON THE CURVE | not full yet |
 | ALREADY MIGRATED | somebody beat you to it, or it never needed you |
 | BLOCKED | it does not simulate; the reason is the program's own |
 
-The fill under the amount box is **measured, not estimated**: the worker simulates
-the real buy and reads how much base actually arrives. Constant product over the
-pool's vaults — the obvious formula — overpredicted a live fill by 16.7x, so no
-formula is used.
+On pump.fun the fill under the amount box is **measured, not estimated**: the
+worker simulates the real buy and reads how much base actually arrives. Constant
+product over the pool's vaults — the obvious formula — overpredicted a live fill by
+16.7x, so no formula is used.
 
-### Route
+## Route (pump.fun only)
 
 One transaction by default. It lands at about 1210 of the 1232 bytes a transaction
-may be, so when a coin's shape does not fit, it goes as a **Jito bundle** instead —
-migrate in the first transaction, buy in the second, one slot, all or nothing. You
-can also force the bundle. Tip accounts are fetched from the block engine rather
-than hardcoded, because Jito rotates them and a tip to a stale address is a tip to
-nobody.
+may be, so when a coin's shape does not fit it goes as a **Jito bundle** instead —
+migrate first, buy second, one slot, all or nothing. You can also force the bundle.
+Tip accounts are fetched from the block engine rather than hardcoded, because Jito
+rotates them and a tip to a stale address is a tip to nobody.
 
-### The key
+## The key
 
-Same split as the rest of this extension, and it is the whole security design: the
-key lives in the service worker and `axiom.js` never names it, never imports the
-signing code, and speaks exactly three messages — `pm:resolve`, `pm:preview`,
-`pm:migrate`. A page that turns hostile can at worst watch you press a button you
-were already pressing. The one control that spends money also refuses untrusted
-clicks, so a script on the page cannot press it for you.
+The key lives in the service worker. `axiom.js` never names it, never imports the
+signing code, and speaks four message types: `pm:resolve`, `pm:preview`,
+`pm:migrate`, and a status channel back. A page that turns hostile can at worst
+watch you press a button you were already pressing. The one control that spends
+money also refuses untrusted clicks, so a script on the page cannot press it.
 
-Import the key once in the launcher and the extension borrows it; see **Keys** above.
-
-### Test
+## Test
 
 ```
 node extension/test/axiom.test.mjs
 ```
 
 Runs the real address scraper against mock pages that look nothing like each other,
-and asserts the security properties at the source level.
+and asserts the mount order, the venue handling and the security properties at the
+source level.

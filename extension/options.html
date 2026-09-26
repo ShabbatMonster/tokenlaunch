@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>j7 deploy fallback</title>
+<title>pump migrate — options</title>
 <style>
   :root { --bg:#0b0d10; --panel:#14171c; --panel2:#1a1e24; --border:#262b33;
-          --text:#e6e9ee; --dim:#8a93a1; --accent:#4ade80; --danger:#f87171; }
+          --text:#e6e9ee; --dim:#8a93a1; --accent:#4ade80; --danger:#f87171; --warn:#fbbf24; }
   * { box-sizing: border-box; margin: 0; }
-  body { background: var(--bg); color: var(--text); padding: 26px 16px;
-         font: 14px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  body { background: var(--bg); color: var(--text); padding: 24px 16px;
+         font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
          display: flex; justify-content: center; }
   .app { width: 100%; max-width: 520px; }
   h1 { font-size: 14px; letter-spacing: 3px; margin-bottom: 14px; }
@@ -16,88 +16,60 @@
   .card + .card { margin-top: 14px; }
   label { display: block; font-size: 10px; letter-spacing: 2px; color: var(--dim); margin: 14px 0 5px; }
   label:first-child { margin-top: 0; }
-  input[type=text], input[type=password], input[type=number] {
-    width: 100%; background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 8px; color: var(--text); padding: 10px 12px; font: inherit; outline: none; }
-  input:focus { border-color: #3b4453; }
-  .row { display: flex; gap: 10px; align-items: center; }
-  .row > div { flex: 1; }
-  .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
-  .check input { width: 15px; height: 15px; accent-color: var(--accent); }
-  .btn { width: 100%; margin-top: 16px; padding: 12px; border: none; border-radius: 10px;
-         background: var(--accent); color: #04160b; font: inherit; font-weight: 700; letter-spacing: 2px; cursor: pointer; }
-  .btn.sec { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
+  input, select { width: 100%; background: var(--panel2); border: 1px solid var(--border);
+          border-radius: 8px; color: var(--text); padding: 9px 11px; font: inherit; outline: none; }
+  input:focus, select:focus { border-color: #3b4453; }
+  .row2 { display: flex; gap: 10px; }
+  .row2 > div { flex: 1; }
+  button { margin-top: 14px; padding: 11px; border: none; border-radius: 9px; width: 100%;
+           background: var(--accent); color: #04160b; font: inherit; font-weight: 700;
+           letter-spacing: 2px; cursor: pointer; }
+  button.secondary { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
+  .state { margin-top: 10px; font-size: 12px; color: var(--dim); word-break: break-all; }
+  .ok { color: var(--accent); } .err { color: var(--danger); } .warn { color: var(--warn); }
+  .dim { color: var(--dim); }
   .note { font-size: 11px; color: var(--dim); margin-top: 10px; line-height: 1.55; }
-  .status { font-size: 12px; margin-top: 10px; min-height: 16px; }
-  .ok { color: var(--accent); } .err { color: var(--danger); }
-  code { color: var(--text); }
+  #stuck .row { margin-top: 6px; font-size: 12px; }
+  #stuck a { color: var(--accent); }
 </style>
 </head>
 <body>
 <div class="app">
-  <h1>J7 DEPLOY FALLBACK</h1>
+  <h1>PUMP MIGRATE</h1>
 
   <div class="card">
-    <label>SOLANA PRIVATE KEY (base58)</label>
-    <input type="password" id="secretKey" spellcheck="false" placeholder="paste to set — leave blank to keep the saved one">
-    <div class="status" id="addr"></div>
-    <p class="note">Kept in this extension's local storage and read only by its background worker.
-    It is never handed to the content script and never reaches j7tracker.io, so the page cannot
-    read it even if the page turns hostile. Clearing it below removes it immediately.</p>
-    <div class="row" style="gap:10px">
-      <button class="btn sec" id="importKey" style="margin-top:0">IMPORT FROM LAUNCHER</button>
-      <button class="btn sec" id="clearKey" style="margin-top:0">FORGET THE KEY</button>
-    </div>
-    <p class="note">Importing reads the Solana key the launcher already saved in this browser
-    (<code>keys.v1</code> on its own origin) so you don't paste it twice. It reuses an open
-    launcher tab if there is one, otherwise it opens one in the background and closes it again.</p>
+    <label>SOLANA KEY</label>
+    <input id="secretKey" placeholder="base58 or a 64-byte JSON array — leave blank to keep the current one"
+           spellcheck="false" autocomplete="off">
+    <div class="state" id="keyState"></div>
+    <button class="secondary" id="import">IMPORT FROM LAUNCHER</button>
+    <p class="note">The key is stored by the extension and read only by its service worker. No page
+      ever receives it, and nothing a page sends can ask for it.</p>
   </div>
 
   <div class="card">
-    <label>SOLANA RPC</label>
-    <input type="text" id="rpcUrl" spellcheck="false">
-    <div class="row">
-      <div>
-        <label>TAKE OVER AFTER (SECONDS)</label>
-        <input type="number" id="takeoverSec" min="3" max="300">
-      </div>
-      <div>
-        <label>DEFAULT DEV BUY (SOL)</label>
-        <input type="number" id="defaultDevBuySol" min="0" step="0.1">
-      </div>
+    <label>RPC</label>
+    <input id="rpcUrl" spellcheck="false" autocomplete="off">
+    <div class="row2">
+      <div><label>SLIPPAGE %</label><input id="slippage" spellcheck="false" autocomplete="off"></div>
+      <div><label>JITO TIP (SOL)</label><input id="tip" spellcheck="false" autocomplete="off"></div>
     </div>
-    <label>SLIPPAGE (BPS)</label>
-    <input type="number" id="slippageBps" min="50" max="10000">
-
-    <div class="check"><input type="checkbox" id="armed"><span>Armed — show the bar on j7tracker.io</span></div>
-    <div class="check"><input type="checkbox" id="autoFire"><span>Fire automatically when j7 fails (otherwise it waits for a click)</span></div>
-    <div class="check"><input type="checkbox" id="prePin"><span>Pre-pin metadata and pre-read pump's config while you fill the panel in (much faster launches)</span></div>
-    <div class="check"><input type="checkbox" id="feesToHolders"><span>Fees to holders (holder-rewards coin) by default</span></div>
-    <label>HOLDERS' SHARE OF EVERY TRADE (BPS)</label>
-    <input type="number" id="creatorFeeBps" min="0" max="300" step="5">
-    <p class="note">300 is 3%, which is pump.fun's on-chain ceiling
-    (<code>max_configurable_creator_fee_bps</code>) for a fee you set yourself. Leave it at 0 to take
-    pump's market-cap tier rate instead, which tops out at 0.95% &mdash; that is where the idea of a
-    1% maximum comes from. Cashback coins are gone: <code>create_v2</code> rejects them now.</p>
-
-    <button class="btn" id="save">SAVE</button>
-    <div class="status" id="saved"></div>
-    <p class="note">Pre-pinning uploads the name, ticker and image to pump.fun's IPFS pinner before
-    you launch, which is the single slowest step and the reason a launch used to take about ten
-    seconds. It publishes nothing discoverable &mdash; the metadata sits behind a content hash nobody
-    can guess &mdash; but it does leave the file there whether or not you go through with the launch.
-    Turn it off if you would rather nothing is uploaded until you fire.</p>
-    <p class="note">Auto-fire spends money without asking. It is off by default on purpose: the panel
-    reader is heuristic, and you should see what it mirrored at least once before letting it launch
-    on its own.</p>
+    <label>ROUTE</label>
+    <select id="route">
+      <option value="auto">one transaction (bundle only if it will not fit)</option>
+      <option value="bundle">always a Jito bundle</option>
+    </select>
+    <button id="save">SAVE</button>
+    <div class="state" id="saveState"></div>
   </div>
 
   <div class="card">
-    <label style="margin-top:0">LEARNED FIELDS</label>
-    <div class="status" id="taught">none</div>
-    <p class="note">If the bar misreads a field, open j7, press <b>◎</b> on the bar and click each
-    field in turn. Those selectors are stored here and take priority over the guesswork.</p>
-    <button class="btn sec" id="clearSelectors">FORGET LEARNED FIELDS</button>
+    <label>STUCK METEORA POOLS</label>
+    <p class="note">Every Meteora DBC pool this wallet launched whose curve finished and never
+      migrated — the case this tool exists for.</p>
+    <button class="secondary" id="scan">SCAN</button>
+    <div class="state" id="stuckState"></div>
+    <div id="stuck"></div>
   </div>
 </div>
 <script src="options.js"></script>

@@ -2,11 +2,20 @@
    Axiom's stylesheet can reach them: every value is stated outright and the ids
    are specific enough to win without !important. Colours match the launcher. */
 
+/* Floating by default. When it sits inside Axiom's own header row it goes back
+   into the flow, so the row lays it out like any other button. */
 #pmx-root {
   position: fixed;
   z-index: 2147483647;
   font: 12px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
   color: #e6e9ee;
+}
+#pmx-root.pmx-inline {
+  position: static;
+  display: inline-flex;
+  align-items: center;
+  margin: 0 6px;
+  vertical-align: middle;
 }
 #pmx-root * { box-sizing: border-box; font: inherit; }
 
@@ -34,18 +43,27 @@
 .pmx-dot.warn { background: #fbbf24; }
 .pmx-dot.done { background: #60a5fa; }
 
-.pmx-panel {
-  position: absolute;
-  top: 34px;
-  right: 0;
+/* The panel is fixed and attached to <html> rather than nested in the button,
+   so no ancestor of the header row can clip it with overflow:hidden. */
+#pmx-panel {
+  position: fixed;
+  z-index: 2147483647;
   width: 288px;
+  font: 12px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: #e6e9ee;
   background: #14171c;
   border: 1px solid #262b33;
   border-radius: 12px;
   padding: 11px 12px 12px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, .6);
 }
-.pmx-hidden { display: none; }
+#pmx-panel * { box-sizing: border-box; font: inherit; }
+.pmx-hidden { display: none !important; }
+
+.pmx-venue {
+  font-size: 9px; letter-spacing: 1px; color: #60a5fa;
+  border: 1px solid #262b33; border-radius: 999px; padding: 2px 7px;
+}
 
 .pmx-head { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
 .pmx-head b { font-size: 10px; letter-spacing: 2px; }
