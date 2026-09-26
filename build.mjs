@@ -51,6 +51,17 @@ await esbuild.build({
   outfile: 'docs/swap.js',
 });
 
+// pump.fun migration: web3.js, so it needs the same Node-globals treatment as
+// the solana bundle rather than the plain browser one
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/pumpMigrate-page.js'],
+  outfile: 'docs/pump-migrate.js',
+  inject: ['src/node-shim.js'],
+  define: { global: 'globalThis', 'process.env.NODE_ENV': '"production"' },
+  plugins: [singleBufferProcess, NodeModulesPolyfillPlugin()],
+});
+
 await esbuild.build({
   ...base,
   entryPoints: ['src/openfour.js'],
