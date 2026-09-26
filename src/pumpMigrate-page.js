@@ -1,5 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { inspectPumpMigration, migratePump, keypairFrom } from './pumpMigrate.js';
+import { previewSnipe, snipeMigration } from './pumpSnipe.js';
 
 // ---------------------------------------------------------------------------
 // The pump migrate page. Same shape as force-migrate.html for Pons: paste a
@@ -89,9 +90,10 @@ function render(info) {
   const btn = $('actionBtn');
   const ready = info.state === 'migratable';
   btn.classList.toggle('hidden', !ready);
+  $('snipeBox').classList.toggle('hidden', !ready);
   if (ready) {
-    btn.textContent = solKey ? 'MIGRATE IT' : 'IMPORT A SOL KEY FIRST';
-    btn.disabled = !solKey;
+    $('snipeSym').textContent = info.isNativeQuote ? 'SOL' : 'QUOTE';
+    updateActionLabel();
   }
   $('actionStatus').textContent = ready && solKey
     ? 'the call simulates clean' + (info.simulation?.unitsConsumed ? ` (${info.simulation.unitsConsumed} CU)` : '')
@@ -105,17 +107,84 @@ function render(info) {
   $('resultCard').classList.remove('hidden');
 }
 
+/// The spend box in the quote's own base units, or 0n for a plain migration.
+function spendRaw() {
+  const v = $('snipeAmount').value.trim();
+  if (!v || !(Number(v) > 0)) return 0n;
+  const dec = current?.quoteDecimals;
+  if (dec == null) throw new Error('the quote mint decimals are unknown, so the spend cannot be scaled');
+  const [whole, frac = ''] = v.split('.');
+  return BigInt((whole || '0') + (frac + '0'.repeat(dec)).slice(0, dec));
+}
+
+function updateActionLabel() {
+  const btn = $('actionBtn');
+  let buying = false;
+  try { buying = spendRaw() > 0n; } catch { buying = false; }
+  $('tipRow').classList.toggle('hidden', $('snipeRoute').value !== 'bundle');
+  btn.textContent = !solKey ? 'IMPORT A SOL KEY FIRST'
+    : (buying ? 'MIGRATE + BUY FIRST' : 'MIGRATE IT');
+  btn.disabled = !solKey;
+}
+
+/// Measure the fill before anything is signed. The number comes from simulating
+/// the real buy, so it is what the transaction will do rather than an estimate.
+let previewSeq = 0;
+async function refreshSnipePreview() {
+  const hint = $('snipeHint');
+  updateActionLabel();
+  let spend;
+  try { spend = spendRaw(); } catch (e) { hint.innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+  if (spend <= 0n) { hint.textContent = 'leave this at 0 to migrate without buying.'; return; }
+  if (!owner) { hint.textContent = 'import a SOL key to price the buy — the fill is measured against your wallet.'; return; }
+  const seq = ++previewSeq;
+  hint.textContent = 'simulating the buy to measure the fill…';
+  try {
+    const p = await previewSnipe({
+      rpcUrl: RPC, mint: current.mint, buyer: owner,
+      spendQuote: spend.toString(), slippageBps: Math.round(Number($('snipeSlippage').value || '5') * 100),
+    });
+    if (seq !== previewSeq) return;
+    hint.innerHTML = `fills <b>${p.tokens.toLocaleString(undefined, { maximumFractionDigits: 2 })}</b> tokens `
+      + `(<b>${p.pctOfSupply.toFixed(3)}%</b> of supply) · floor ${p.minBaseOut} · `
+      + `${p.bytes} of 1232 bytes${p.bytes > 1232 ? ' — <b>too big, it will go as a bundle</b>' : ''}`;
+  } catch (e) {
+    if (seq === previewSeq) hint.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
 async function act() {
   const st = $('actionStatus');
   if (!solKey || !current) return;
   $('actionBtn').disabled = true;
   try {
-    const res = await migratePump({
-      rpcUrl: RPC, secretKey: solKey, mint: current.mint,
-      onStatus: (m) => { st.textContent = m; },
-    });
-    st.innerHTML = '<span class="ok">MIGRATED ✓</span> pool ' + link('account', res.pool)
-      + ' · ' + `<a href="${SOLSCAN}/tx/${res.sig}" target="_blank" rel="noopener">tx</a>`;
+    const spend = spendRaw();
+    if (spend <= 0n) {
+      const res = await migratePump({
+        rpcUrl: RPC, secretKey: solKey, mint: current.mint,
+        onStatus: (m) => { st.textContent = m; },
+      });
+      st.innerHTML = '<span class="ok">MIGRATED ✓</span> pool ' + link('account', res.pool)
+        + ' · ' + `<a href="${SOLSCAN}/tx/${res.sig}" target="_blank" rel="noopener">tx</a>`;
+    } else {
+      const res = await snipeMigration({
+        rpcUrl: RPC, secretKey: solKey, mint: current.mint,
+        spendQuote: spend.toString(),
+        slippageBps: Math.round(Number($('snipeSlippage').value || '5') * 100),
+        route: $('snipeRoute').value,
+        tipLamports: Math.round(Number($('snipeTip').value || '0.001') * 1e9),
+        onStatus: (m) => { st.textContent = m; },
+      });
+      if (res.route === 'bundle') {
+        st.innerHTML = res.landed
+          ? `<span class="ok">MIGRATED + BOUGHT ✓</span> bundle landed in slot ${res.slot} · `
+            + res.sigs.map((g) => `<a href="${SOLSCAN}/tx/${g}" target="_blank" rel="noopener">tx</a>`).join(' ')
+          : `<span class="warn">bundle ${esc(res.bundleId)} did not land</span> — ${esc(res.reason)}`;
+      } else {
+        st.innerHTML = '<span class="ok">MIGRATED + BOUGHT ✓</span> filled ' + esc(res.filled)
+          + ' · ' + `<a href="${SOLSCAN}/tx/${res.sig}" target="_blank" rel="noopener">tx</a>`;
+      }
+    }
     analyze();
   } catch (e) {
     st.innerHTML = `<span class="err">${esc(e.message)}</span>`;
@@ -139,6 +208,11 @@ function start() {
   $('analyzeBtn').onclick = analyze;
   $('mintInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') analyze(); });
   $('actionBtn').onclick = act;
+  let t;
+  const repreview = () => { clearTimeout(t); t = setTimeout(refreshSnipePreview, 400); };
+  $('snipeAmount').addEventListener('input', repreview);
+  $('snipeSlippage').addEventListener('input', repreview);
+  $('snipeRoute').addEventListener('change', updateActionLabel);
 
   const pre = new URLSearchParams(location.search).get('mint');
   if (pre) { $('mintInput').value = pre; analyze(); }

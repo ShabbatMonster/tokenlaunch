@@ -92,6 +92,24 @@
     <div id="statusBadge"></div>
     <dl class="kv" id="details"></dl>
     <div class="note hidden" id="stateNote"></div>
+
+    <div class="hidden" id="snipeBox" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+      <label style="margin-top:0">FIRST BUY &mdash; SPEND (<span id="snipeSym">SOL</span>, 0 = JUST MIGRATE)</label>
+      <input id="snipeAmount" value="0" autocomplete="off" spellcheck="false">
+      <div class="row" style="display:flex;gap:10px;margin-top:10px">
+        <div style="flex:0 0 120px"><label style="margin-top:0">SLIPPAGE %</label>
+          <input id="snipeSlippage" value="5" autocomplete="off" spellcheck="false"></div>
+        <div style="flex:1"><label style="margin-top:0">ROUTE</label>
+          <select id="snipeRoute" style="width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 12px;font:inherit">
+            <option value="auto">one transaction (bundle only if it will not fit)</option>
+            <option value="bundle">always a Jito bundle</option>
+          </select></div>
+      </div>
+      <div class="hidden" id="tipRow"><label>JITO TIP (SOL)</label>
+        <input id="snipeTip" value="0.001" autocomplete="off" spellcheck="false"></div>
+      <div class="note" id="snipeHint" style="margin-top:8px"></div>
+    </div>
+
     <button class="btn force hidden" id="actionBtn"></button>
     <div class="status" id="actionStatus"></div>
     <details class="dev">
