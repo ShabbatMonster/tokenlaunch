@@ -23,6 +23,7 @@ export { inspectPumpMigration, migratePump, readPumpCurve } from './pumpMigrate.
 export { previewSnipe, snipeMigration } from './pumpSnipe.js';
 export { inspectMeteoraMigration, migrateMeteora, findStuckMeteoraPools } from './meteoraMigrate.js';
 export { inspectRaydiumMigration, LAUNCHLAB_BLOCKER } from './raydiumMigrate.js';
+export { previewSwapIntoQuote, swapIntoQuote, tokenHoldings } from './jupSwap.js';
 
 export const WSOL = 'So11111111111111111111111111111111111111112';
 

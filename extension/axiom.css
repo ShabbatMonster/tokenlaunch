@@ -88,8 +88,15 @@
 .pmx-in:focus { border-color: #3b4453; }
 select.pmx-in { cursor: pointer; }
 
-.pmx-row { display: flex; gap: 8px; }
+.pmx-row { display: flex; gap: 8px; align-items: flex-end; }
 .pmx-row > div { flex: 1; min-width: 0; }
+.pmx-row > input { flex: 1; min-width: 0; }
+
+.pmx-side {
+  flex: 0 0 auto; padding: 8px 11px; border-radius: 8px; cursor: pointer;
+  background: #1a1e24; color: #8a93a1; border: 1px solid #262b33; letter-spacing: 1px;
+}
+.pmx-side:hover { color: #e6e9ee; border-color: #3b4453; }
 
 .pmx-hint { margin-top: 8px; font-size: 11px; color: #8a93a1; line-height: 1.5; }
 .pmx-hint b { color: #e6e9ee; }
