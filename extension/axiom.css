@@ -1,0 +1,91 @@
+/* The button and its panel sit over Axiom rather than inside it, so none of
+   Axiom's stylesheet can reach them: every value is stated outright and the ids
+   are specific enough to win without !important. Colours match the launcher. */
+
+#pmx-root {
+  position: fixed;
+  z-index: 2147483647;
+  font: 12px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: #e6e9ee;
+}
+#pmx-root * { box-sizing: border-box; font: inherit; }
+
+.pmx-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  background: #1a1e24;
+  color: #8a93a1;
+  border: 1px solid #262b33;
+  border-radius: 8px;
+  cursor: pointer;
+  letter-spacing: 1px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.pmx-btn:hover { color: #e6e9ee; border-color: #3b4453; }
+.pmx-btn.pmx-ready { color: #04160b; background: #4ade80; border-color: #4ade80; }
+
+.pmx-dot { width: 7px; height: 7px; border-radius: 50%; background: #8a93a1; flex: 0 0 auto; }
+.pmx-dot.ok { background: #04160b; }
+.pmx-dot.warn { background: #fbbf24; }
+.pmx-dot.done { background: #60a5fa; }
+
+.pmx-panel {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  width: 288px;
+  background: #14171c;
+  border: 1px solid #262b33;
+  border-radius: 12px;
+  padding: 11px 12px 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .6);
+}
+.pmx-hidden { display: none; }
+
+.pmx-head { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+.pmx-head b { font-size: 10px; letter-spacing: 2px; }
+.pmx-grow { flex: 1; }
+.pmx-x {
+  background: #1a1e24; color: #8a93a1; border: 1px solid #262b33; border-radius: 6px;
+  width: 22px; height: 20px; line-height: 1; cursor: pointer; padding: 0;
+}
+.pmx-x:hover { color: #e6e9ee; }
+
+.pmx-ca { color: #8a93a1; font-size: 11px; word-break: break-all; }
+.pmx-state { margin: 6px 0 4px; font-size: 11px; font-weight: 700; letter-spacing: .5px; }
+.pmx-why { font-weight: 400; letter-spacing: 0; color: #8a93a1; margin-top: 3px; line-height: 1.45; }
+
+.pmx-lab {
+  display: block; font-size: 9px; letter-spacing: 1.5px; color: #8a93a1; margin: 10px 0 4px;
+}
+.pmx-in {
+  width: 100%; background: #1a1e24; border: 1px solid #262b33; border-radius: 8px;
+  color: #e6e9ee; padding: 8px 10px; outline: none;
+}
+.pmx-in:focus { border-color: #3b4453; }
+select.pmx-in { cursor: pointer; }
+
+.pmx-row { display: flex; gap: 8px; }
+.pmx-row > div { flex: 1; min-width: 0; }
+
+.pmx-hint { margin-top: 8px; font-size: 11px; color: #8a93a1; line-height: 1.5; }
+.pmx-hint b { color: #e6e9ee; }
+
+.pmx-go {
+  width: 100%; margin-top: 11px; padding: 11px; border: none; border-radius: 9px;
+  background: #fbbf24; color: #1a1400; font-weight: 700; letter-spacing: 2px; cursor: pointer;
+}
+.pmx-go:disabled { opacity: .45; cursor: default; }
+
+.pmx-status { margin-top: 9px; font-size: 11px; color: #8a93a1; word-break: break-all; line-height: 1.5; }
+.pmx-status a { color: #4ade80; }
+
+.pmx-ok { color: #4ade80; }
+.pmx-err { color: #f87171; }
+.pmx-warn { color: #fbbf24; }
+.pmx-dim { color: #60a5fa; }

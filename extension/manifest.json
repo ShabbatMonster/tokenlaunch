@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "j7 deploy fallback",
+  "name": "j7 deploy fallback + pump migrate",
   "version": "1.0.0",
-  "description": "Mirrors the token you set up in j7tracker's deploy panel and finishes the launch yourself when j7 times out or errors.",
+  "description": "Mirrors the token you set up in j7tracker's deploy panel and finishes the launch yourself when j7 times out or errors. On Axiom, adds a MIGRATE button to a pump.fun coin's page that migrates it and buys first in the same transaction.",
   "permissions": [
     "storage",
     "notifications",
@@ -18,7 +18,11 @@
     "https://api.mainnet-beta.solana.com/*",
     "https://shabbatmonster.github.io/tokenlaunch/*",
     "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "https://axiom.trade/*",
+    "https://*.axiom.trade/*",
+    "https://mainnet.block-engine.jito.wtf/*",
+    "https://*.mainnet.block-engine.jito.wtf/*"
   ],
   "optional_host_permissions": [
     "*://*/*"
@@ -41,6 +45,20 @@
       ],
       "run_at": "document_idle",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "https://axiom.trade/*",
+        "https://*.axiom.trade/*"
+      ],
+      "js": [
+        "axiom.js"
+      ],
+      "css": [
+        "axiom.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ],
   "options_page": "options.html",
@@ -62,6 +80,15 @@
       "matches": [
         "https://j7tracker.io/*",
         "https://*.j7tracker.io/*"
+      ]
+    },
+    {
+      "resources": [
+        "axiom.css"
+      ],
+      "matches": [
+        "https://axiom.trade/*",
+        "https://*.axiom.trade/*"
       ]
     }
   ],
