@@ -137,5 +137,27 @@ console.log(`\nJito tip accounts: ${tips.length}`);
 check(tips.length > 0, 'the Jito tip accounts are fetched live, not hardcoded',
   tips[0].toBase58() + '…');
 
+// --- funding a non-SOL quote -------------------------------------------------
+//
+// A SOL-quoted coin is bought with lamports, which the transaction wraps. Any
+// other quote has no such step: the coin trades against that token, so the
+// wallet must already hold it. Unchecked, the shortfall arrives as the token
+// program's own `custom program error: 0x1`, which names neither the token nor
+// the amount - and looks exactly like a wrong account list.
+const T22_COIN = 'GacgmKkuqxLfL7qox6YMeP7SWHdC1ayMsLUJcuKB5huf';   // quoted in CbcyNo7m..., not SOL
+let unfunded = null;
+try { await measureFirstBuy({ connection, mint: T22_COIN, buyer: BUYER, spendQuote: 1_000_000 }); }
+catch (e) { unfunded = e.message; }
+check(/not quoted in SOL/.test(unfunded || '') && /CbcyNo7m/.test(unfunded || ''),
+  'a non-SOL quote the wallet does not hold is refused by name, not by 0x1',
+  (unfunded || 'it was not refused').slice(0, 90) + '…');
+
+let broke = null;
+try { await measureFirstBuy({ connection, mint: SOL_COIN, buyer: BUYER, spendQuote: 500_000_000_000 }); }
+catch (e) { broke = e.message; }
+check(/not enough SOL/.test(broke || '') && /rent and fees/.test(broke || ''),
+  'a SOL buy bigger than the wallet is refused, counting the rent the migration still needs',
+  (broke || 'it was not refused').slice(0, 80) + '…');
+
 console.log('');
 process.exit(fails.length ? 1 : 0);
