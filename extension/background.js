@@ -17,6 +17,7 @@ import {
   inspectMeteoraMigration, migrateMeteora, findStuckMeteoraPools,
   inspectRaydiumMigration,
   previewSwapIntoQuote, swapIntoQuote, tokenHoldings,
+  inspectPonsMigration, measurePonsFirstBuy, migratePons, evmAddressFromKey,
 } from './vendor/launcher.js';
 
 // where the launcher keeps its keys, so the extension can borrow rather than
@@ -51,6 +52,15 @@ const DEFAULTS = {
 
 const getSettings = async () => ({ ...DEFAULTS, ...(await chrome.storage.local.get(Object.keys(DEFAULTS))) });
 const getKey = async () => (await chrome.storage.local.get('secretKey')).secretKey || '';
+// Pons runs on Robinhood Chain, so the extension needs the launcher's EVM key
+// too. It is stored and read exactly like the Solana one and never leaves here.
+const getEvmKey = async () => (await chrome.storage.local.get('evmKey')).evmKey || '';
+
+const evmAddressOrNull = async () => {
+  const key = await getEvmKey();
+  if (!key) return null;
+  try { return evmAddressFromKey(key); } catch { return null; }
+};
 
 const addressOrNull = async () => {
   const key = await getKey();
@@ -137,6 +147,7 @@ async function importKeyFromLauncher() {
     if (!result) return { ok: false, error: 'the launcher has no key saved in this browser' };
 
     const keys = JSON.parse(result);
+    if (keys?.evm) await chrome.storage.local.set({ evmKey: keys.evm });
     if (!keys?.sol) {
       return { ok: false, error: keys?.evm
         ? 'the launcher only has an EVM key saved - migrations run on Solana'
@@ -162,6 +173,12 @@ async function importKeyFromLauncher() {
 // that claims the mint wins, and a coin cannot be on two.
 
 async function identify(rpcUrl, mint, user) {
+  // an 0x address is never a Solana mint, so the venues do not overlap and the
+  // cheap check is which shape the address is
+  if (/^0x[0-9a-fA-F]{40}$/.test(mint)) {
+    const pons = await inspectPonsMigration({ token: mint }).catch(() => null);
+    return pons?.isPonsCoin ? trimPons(pons) : null;
+  }
   const pump = await inspectPumpMigration({ rpcUrl, mint, user }).catch(() => null);
   if (pump?.isPumpCoin) return trimPump(pump);
 
@@ -177,6 +194,21 @@ async function identify(rpcUrl, mint, user) {
     };
   }
   return null;
+}
+
+function trimPons(info) {
+  return {
+    venue: 'pons', canBuy: !!info.isNativeQuote, chain: 'evm',
+    state: info.state,
+    reason: info.reason || null,
+    pool: info.curve || null,
+    quoteMint: info.pairToken || null,
+    quoteDecimals: 18,
+    isNativeQuote: !!info.isNativeQuote,
+    creator: null,
+    raisedQuote: info.quoteReserve || null,
+    symbol: info.symbol || null,
+  };
 }
 
 // Only what the panel draws. The raw results carry BigInts and PublicKeys,
@@ -221,7 +253,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg?.type) {
       case 'pm:getSettings': {
         const s = await getSettings();
-        sendResponse({ ...s, hasKey: !!(await getKey()), address: await addressOrNull() });
+        sendResponse({ ...s, hasKey: !!(await getKey()), address: await addressOrNull(),
+          hasEvmKey: !!(await getEvmKey()), evmAddress: await evmAddressOrNull() });
         return;
       }
       case 'pm:setSettings': {
@@ -253,6 +286,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
       case 'pm:preview': {
+        if (msg.venue === 'pons') {
+          const buyer = await evmAddressOrNull();
+          if (!buyer) { sendResponse({ ok: false, error: 'no EVM key - import it from the launcher' }); return; }
+          try {
+            const m = await measurePonsFirstBuy({ token: msg.mint, buyer, buyWei: String(msg.spendQuote) });
+            sendResponse({ ok: true, preview: { tokens: Number(m.filled) / 1e18, filled: m.filled.toString() } });
+          } catch (e) { sendResponse({ ok: false, error: e?.shortMessage || e?.message || String(e) }); }
+          return;
+        }
         const rpcUrl = await healthyRpc(await getSettings());
         const address = await addressOrNull();
         if (!address) { sendResponse({ ok: false, error: 'no key imported yet' }); return; }
@@ -311,6 +353,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const tabId = sender.tab?.id ?? null;
           const say = (m) => { if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'pm:status', text: m }).catch(() => {}); };
 
+          if (msg.venue === 'pons') {
+            const privateKey = await getEvmKey();
+            if (!privateKey) { sendResponse({ ok: false, error: 'no EVM key - import it from the launcher' }); return; }
+            sendResponse({ ok: true, result: await migratePons({
+              privateKey, token: msg.mint, buyWei: String(msg.spendQuote || '0'),
+              slippageBps: msg.slippageBps ?? settings.slippageBps, onStatus: say,
+            }) });
+            return;
+          }
           if (msg.venue === 'meteora') {
             sendResponse({ ok: true, result: await migrateMeteora({ rpcUrl, secretKey, mint: msg.mint, onStatus: say }) });
             return;

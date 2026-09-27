@@ -30,6 +30,9 @@
 
 const ID = 'pmx';
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+/// Pons lives on Robinhood Chain, so a coin can be an 0x address as easily as a
+/// base58 one. The worker tells them apart by shape and asks the right chain.
+const EVM_ADDR = /^0x[0-9a-fA-F]{40}$/;
 const MINT_IN_URL = /(?:solscan\.io\/token\/|pump\.fun\/(?:coin\/)?|dexscreener\.com\/solana\/|birdeye\.so\/(?:solana\/)?token\/|explorer\.solana\.com\/address\/|solana\.fm\/address\/)([1-9A-HJ-NP-Za-km-z]{32,44})/;
 
 /// Buttons Axiom already puts in the coin header. Ours goes next to the first
@@ -50,7 +53,7 @@ const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
 
 // --- finding the contract address -------------------------------------------
 
-const looksLikeMint = (s) => typeof s === 'string' && BASE58.test(s);
+const looksLikeMint = (s) => typeof s === 'string' && (BASE58.test(s) || EVM_ADDR.test(s));
 
 /// Every address on the page that could be the coin, best guesses first. The
 /// worker checks them against the chain in this order, so the ordering is a
@@ -72,6 +75,11 @@ function candidateMints() {
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const t = (n.nodeValue || '').trim();
     if (looksLikeMint(t)) loose.push(t);
+    else {
+      // an 0x address is often inside a longer line rather than alone in a node
+      const m = /0x[0-9a-fA-F]{40}/.exec(t);
+      if (m) loose.push(m[0]);
+    }
   }
   for (const m of loose) if (m.endsWith('pump')) add(m);
   for (const m of loose) add(m);
@@ -276,7 +284,7 @@ const STATE_LABEL = {
   'on-curve': ['STILL ON THE CURVE', 'warn'],
   blocked: ['BLOCKED', 'err'],
 };
-const VENUE_LABEL = { pump: 'pump.fun', meteora: 'Meteora DBC', raydium: 'Raydium LaunchLab' };
+const VENUE_LABEL = { pump: 'pump.fun', meteora: 'Meteora DBC', raydium: 'Raydium LaunchLab', pons: 'Pons v2' };
 
 let resolving = null;
 async function resolveMint(force) {
@@ -312,14 +320,19 @@ function paint() {
     // name the quote rather than saying "QUOTE": on a non-SOL coin the buy
     // spends that token and there is no wrapping step, so you have to know
     // which one to be holding
-    setText('sym', info.isNativeQuote ? 'SOL'
+    const native = info.venue === 'pons' ? 'ETH' : 'SOL';
+    setText('sym', info.isNativeQuote ? native
       : (info.quoteMint ? info.quoteMint.slice(0, 4) + '…' + info.quoteMint.slice(-4) : 'QUOTE'));
     // Meteora opens a DAMM v2 pool, which is a different program from PumpSwap:
     // the first buy is not wired for it, so do not offer a box that lies.
     $('buybox').style.display = info.canBuy ? '' : 'none';
+    // Jito is a Solana thing; Pons lands on an Arbitrum sequencer with no bundles
+    $('route').parentElement.style.display = info.venue === 'pons' ? 'none' : '';
     // a non-SOL quote has to be held already: offer the way to get it, and a
     // way to spend all of what you have
-    const needsQuote = info.canBuy && !info.isNativeQuote;
+    // the Jupiter row is Solana-only; a Pons pair token is on the same EVM chain
+    // and has its own swap page rather than a route through here
+    const needsQuote = info.canBuy && !info.isNativeQuote && info.venue !== 'pons';
     $('swapbox').classList.toggle(`${ID}-hidden`, !needsQuote);
     $('max').classList.toggle(`${ID}-hidden`, !needsQuote);
     if (needsQuote) showHeld();
@@ -347,7 +360,7 @@ function spendRaw() {
   if (!state.info?.canBuy) return 0n;
   const v = ($('amt')?.value || '').trim();
   if (!v || !(Number(v) > 0)) return 0n;
-  const dec = state.info?.quoteDecimals;
+  const dec = state.info?.venue === 'pons' ? 18 : state.info?.quoteDecimals;
   if (dec == null) return 0n;
   const [whole, frac = ''] = v.split('.');
   try { return BigInt((whole || '0') + (frac + '0'.repeat(dec)).slice(0, dec)); } catch { return 0n; }
@@ -372,14 +385,15 @@ async function preview() {
   const seq = ++previewSeq;
   setText('hint', 'simulating the buy to measure the fill…');
   const r = await send({
-    type: 'pm:preview', mint: state.mint, spendQuote: spend.toString(),
+    type: 'pm:preview', mint: state.mint, venue: state.info?.venue, spendQuote: spend.toString(),
     slippageBps: Math.round(Number($('slip')?.value || '5') * 100),
   });
   if (seq !== previewSeq) return;
   if (!r?.ok) { setHtml('hint', `<span class="${ID}-err">${escapeHtml(r?.error || 'preview failed')}</span>`); return; }
   const p = r.preview;
-  setHtml('hint', `fills <b>${Number(p.tokens).toLocaleString(undefined, { maximumFractionDigits: 2 })}</b> tokens `
-    + `(<b>${Number(p.pctOfSupply).toFixed(3)}%</b> of supply) · ${p.bytes} of 1232 bytes`
+  setHtml('hint', `fills <b>${Number(p.tokens).toLocaleString(undefined, { maximumFractionDigits: 2 })}</b> tokens`
+    + (p.pctOfSupply != null ? ` (<b>${Number(p.pctOfSupply).toFixed(3)}%</b> of supply)` : '')
+    + (p.bytes ? ` · ${p.bytes} of 1232 bytes` : '')
     + (p.bytes > 1232 ? ' · <b>goes as a bundle</b>' : ''));
 }
 
@@ -457,9 +471,11 @@ async function onGo(e) {
     return;
   }
   const res = r.result;
-  const tx = res.sig || res.sigs?.[0];
+  const tx = res.sig || res.sigs?.[0] || res.hash;
+  const explorer = res.venue === 'pons'
+    ? 'https://robinhoodchain.blockscout.com/tx/' : 'https://solscan.io/tx/';
   setHtml('status', `<span class="${ID}-ok">DONE</span> `
-    + (tx ? `<a href="https://solscan.io/tx/${tx}" target="_blank" rel="noopener">tx</a>` : '')
+    + (tx ? `<a href="${explorer}${tx}" target="_blank" rel="noopener">tx</a>` : '')
     + (res.landed === false ? ` <span class="${ID}-warn">bundle did not land</span>` : ''));
   await resolveMint(true);
 }
