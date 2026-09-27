@@ -29,6 +29,7 @@ function loadCandidateMints(dom) {
   const body = SRC.slice(start, end);
   const prelude = `
     const BASE58 = ${SRC.match(/const BASE58 = (.+);/)[1]};
+    const EVM_ADDR = ${SRC.match(/const EVM_ADDR = (.+);/)[1]};
     const MINT_IN_URL = ${SRC.match(/const MINT_IN_URL = (.+);/)[1]};
     const looksLikeMint = ${SRC.match(/const looksLikeMint = (.+);/)[1]};
   `;
@@ -99,15 +100,37 @@ const WALLET = 'JDQKDrc1TQgBRvdFh56tkta5sYcDj1SoP52Eiu64rSrT';
   check(out.length === 0, 'a page with no addresses yields no candidates, rather than junk', String(out.length));
 }
 
-// --- things that merely look like base58 ------------------------------------
+// --- things that merely look like an address --------------------------------
+//
+// An 0x address IS a candidate now - that is how Pons coins are found - but the
+// worker decides which chain to ask by its shape, so junk must still be refused.
 {
   const dom = new JSDOM(`<!doctype html><body>
-    <span>0x60f4D66B464bFCE01Ffa6B8145A1116Dc537de65</span>
     <span>short</span>
     <span>IIIIOOOOllll0000IIIIOOOOllll0000IIII</span>
+    <span>0xnothex0xnothex0xnothex0xnothex0xnothexZZ</span>
   </body>`, { url: 'https://axiom.trade/meme/x' });
   const out = loadCandidateMints(dom)();
-  check(out.length === 0, 'an EVM address and base58-illegal characters are not offered', out.join(','));
+  check(out.length === 0, 'base58-illegal text and malformed hex are not offered', out.join(','));
+}
+
+// --- Pons is an EVM chain, so the scraper has to see 0x addresses ------------
+{
+  const PONS = '0xC20676E8727913e0Cf512A94e16c05edA0015cc5';
+  const dom = new JSDOM(`<!doctype html><body>
+    <div class="header"><span>AMERICA</span><span>${PONS}</span></div>
+    <a href="https://robinhoodchain.blockscout.com/token/${PONS}">explorer</a>
+  </body>`, { url: 'https://axiom.trade/meme/' + PONS });
+  const out = loadCandidateMints(dom)();
+  check(out.includes(PONS), 'an 0x address is offered as a candidate, for Pons', out.join(',') || 'none');
+}
+{
+  // an address inside a longer line, which is how most pages render one
+  const dom = new JSDOM(`<!doctype html><body>
+    <div>Contract: 0xC20676E8727913e0Cf512A94e16c05edA0015cc5 (copy)</div>
+  </body>`, { url: 'https://axiom.trade/x' });
+  const out = loadCandidateMints(dom)();
+  check(out.some((a) => /^0x/.test(a)), 'an 0x address embedded in a sentence is still found', out.join(','));
 }
 
 // --- the security line -------------------------------------------------------
@@ -187,6 +210,13 @@ check(/e\.isTrusted/.test(SRC) && (SRC.match(/if \(!e\.isTrusted/g) || []).lengt
 // that then gets spent - so it is assembled as a string.
 check(/padStart\(dec \+ 1/.test(SRC) && !/heldRaw \/ 10/.test(SRC),
   'MAX builds the amount as a string rather than through a float divide');
+
+// Pons is EVM and Jito is not: neither the swap row nor the bundle route makes
+// sense there, and the amounts are wei rather than lamports.
+check(/venue !== 'pons'/.test(SRC), 'the Jupiter row is hidden on Pons');
+check(/venue === 'pons' \? 'none'/.test(SRC), 'the Jito route selector is hidden on Pons');
+check(/venue === 'pons' \? 18/.test(SRC), 'a Pons amount is scaled as 18-decimal ETH');
+check(/robinhoodchain\.blockscout\.com/.test(SRC), 'a Pons result links to the right explorer');
 
 // --- Raydium must never be offered ------------------------------------------
 //

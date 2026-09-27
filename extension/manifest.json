@@ -21,7 +21,9 @@
     "https://mainnet.block-engine.jito.wtf/*",
     "https://*.mainnet.block-engine.jito.wtf/*",
     "https://lite-api.jup.ag/*",
-    "https://quote-api.jup.ag/*"
+    "https://quote-api.jup.ag/*",
+    "https://rpc.mainnet.chain.robinhood.com/*",
+    "https://robinhoodchain.blockscout.com/*"
   ],
   "optional_host_permissions": [
     "*://*/*"

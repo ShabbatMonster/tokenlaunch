@@ -26,6 +26,7 @@ everything it raised locked in the curve. This is for those.
 | --- | --- | --- | --- |
 | **pump.fun** | yes | **yes** | `migrate_v2` is permissionless; the buy rides in the same transaction |
 | **Meteora DBC** | yes | not yet | `migration_damm_v2` is permissionless — simulated clean from an address that is neither the creator nor the fee claimer |
+| **Pons v2** (Robinhood Chain) | yes | **yes** | `createGraduatedPool` is permissionless; Multicall3 batches the buy into the same transaction |
 | **Raydium LaunchLab** | **no** | no | permissioned — see below |
 
 ### Raydium LaunchLab cannot be migrated
@@ -44,6 +45,33 @@ The program names the address it requires, and that address is Raydium's own
 migrator — 15 of 15 sampled migrations were signed by it. There is no rescue path
 and no delay after which it opens up, unlike Pons. So the panel diagnoses a
 LaunchLab coin and offers no button, because a button would fail every time.
+
+### Pons, which is EVM
+
+Pons coins are `0x` addresses on Robinhood Chain, so the panel scrapes those too
+and the worker picks the chain by the shape of the address.
+
+An EOA transaction is one call to one address — there is no Solana-style
+side-by-side instruction list. What there is, is **Multicall3**, deployed at its
+canonical address here, whose `aggregate3Value` forwards ETH per sub-call. So
+graduate-and-buy fits in one transaction with **nothing deployed**:
+`createGraduatedPool` first, the Universal Router second.
+
+Two things that were not obvious:
+
+- the call that is open is `createGraduatedPool`, **not** `forceSweptGraduation`.
+  The latter is `onlyOwner` and refuses even Pons's own `graduationExecutor`.
+- under Multicall3 the Universal Router's caller is Multicall3, so the swap ends
+  in **TAKE** (which names a recipient) rather than TAKE_ALL (which pays the
+  caller). With TAKE_ALL the tokens would land in Multicall3 and stay there.
+
+It is a **race, not a rescue**: Pons's executor sweeps promptly — of 600 recent
+launches, none was ready-and-ungraduated — and Robinhood Chain is an Arbitrum
+Nitro sequencer, first come first served, with no bundles to buy priority with.
+The Jito route selector and the Jupiter row both hide themselves there.
+
+Pons needs the launcher's **EVM** key, which the import now picks up alongside
+the Solana one.
 
 ### Funding a non-SOL quote
 
