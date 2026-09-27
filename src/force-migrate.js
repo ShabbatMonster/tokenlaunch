@@ -15,12 +15,23 @@ import { privateKeyToAccount } from 'viem/accounts';
 // by reading real values off a real launch. See git history for how.
 //
 //   PonsV2LaunchFactory (0x7eD598…C7e)
-//     createGraduatedPool(token)     — normal path once a curve is ready;
-//                                      likely restricted to graduationExecutor.
-//     forceSweptGraduation(token)    — the permissionless rescue path, opens
-//                                      up GRADUATION_RESCUE_DELAY (7 days,
-//                                      read live below) after the curve
-//                                      became ready, if nobody swept it.
+//     createGraduatedPool(token)     — the PERMISSIONLESS path, and the one
+//                                      that actually works for us. Checked
+//                                      against mainnet: of 30 sampled Pons
+//                                      graduations, five different senders
+//                                      called it and none of them was the
+//                                      graduationExecutor. Simulating it from
+//                                      a stranger and from the executor returns
+//                                      the same state error (0x9465dbd4), so
+//                                      what gates it is the curve's state, not
+//                                      the caller.
+//     forceSweptGraduation(token)    — NOT the permissionless rescue path this
+//                                      comment used to claim. It is onlyOwner:
+//                                      simulating it returns
+//                                      OwnableUnauthorizedAccount (0x118cdaa7)
+//                                      even for the graduationExecutor itself.
+//                                      GRADUATION_RESCUE_DELAY (7 days) is real
+//                                      but it is the owner's gate, not ours.
 //     rescueSweptGraduation(token,x) — a further manual-recovery path with an
 //                                      ambiguous second argument; NOT wired to
 //                                      a button here (see README below) —
