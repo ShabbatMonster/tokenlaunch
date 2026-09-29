@@ -31,6 +31,10 @@ contract AnyQuoteCurveFactory {
         uint256 graduationThreshold;
         /// @dev total token supply, all of it minted to the curve
         uint256 supply;
+        /// @dev starting market cap in quote terms - the virtual quote reserve,
+        ///      which for this curve is the same number. 0 keeps the old
+        ///      default of threshold * 2/5.
+        uint256 startMarketCap;
         /// @dev v4 pool params for the graduated pool
         uint24 poolFee;
         int24 tickSpacing;
@@ -118,6 +122,7 @@ contract AnyQuoteCurveFactory {
                 poolManager: poolManager,
                 graduationThreshold: p.graduationThreshold,
                 launchSupply: p.supply,
+                startMarketCap: p.startMarketCap,
                 poolFee: p.poolFee,
                 tickSpacing: p.tickSpacing,
                 hooks: p.hooks,

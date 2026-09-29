@@ -433,9 +433,13 @@
       <input type="text" id="v4curveQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px" placeholder="any ERC-20 quote token address (0x…)">
       <div class="row" style="margin-top:8px">
         <div><label>SUPPLY</label><input type="text" id="v4curveSupply" value="1000000000" spellcheck="false"></div>
-        <div style="flex:0 0 170px"><label>DEV BUY (<span id="v4curveDevSym">ETH</span>, opt.)</label><input type="text" id="v4curveDevBuy" value="0" spellcheck="false"></div>
+        <div style="flex:0 0 170px"><label>OPEN AT (<span id="v4curveOpenSym">ETH</span> MCAP)</label><input type="text" id="v4curveOpen" value="1.3" spellcheck="false" placeholder="blank = 0.4x threshold"></div>
       </div>
-      <div class="hint" id="v4curveHint" style="font-size:11px;margin-top:6px">our own curve · ANY quote token (no allowlist) · graduates straight into a Uniswap v4 pool · anyone can trigger graduation the moment the threshold is hit, so it can never get stuck</div>
+      <div class="row" style="margin-top:8px">
+        <div style="flex:0 0 170px"><label>DEV BUY (<span id="v4curveDevSym">ETH</span>, opt.)</label><input type="text" id="v4curveDevBuy" value="0" spellcheck="false"></div>
+        <div><label>&nbsp;</label><div class="hint" id="v4curveShape" style="font-size:11px;line-height:1.5"></div></div>
+      </div>
+      <div class="hint" id="v4curveHint" style="font-size:11px;margin-top:6px">our own curve · ANY quote token, including a memecoin — paste its contract under <b>custom…</b> and its decimals are read on-chain · graduates straight into a Uniswap v4 pool · anyone can trigger graduation the moment the threshold is hit, so it can never get stuck</div>
     </div>
 
     <div id="ponsRow" class="hidden">
