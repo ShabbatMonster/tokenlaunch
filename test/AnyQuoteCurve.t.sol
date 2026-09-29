@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {AnyQuoteCurveFactory} from "../contracts/AnyQuoteCurveFactory.sol";
 import {AnyQuoteCurve} from "../contracts/AnyQuoteCurve.sol";
 import {CurveToken} from "../contracts/CurveToken.sol";
+import {FullMath} from "../contracts/lib/FullMath.sol";
 
 interface IERC20 {
     function balanceOf(address) external view returns (uint256);
@@ -33,6 +34,15 @@ contract AnyQuoteCurveTest is Test {
     }
 
     function _launch(address quote, uint256 threshold) internal returns (AnyQuoteCurve curve, CurveToken token) {
+        return _launch(quote, threshold, 0);
+    }
+
+    /// startMarketCap of 0 means "keep the old 0.4x default", so every existing
+    /// test goes through the overload above and must behave exactly as before.
+    function _launch(address quote, uint256 threshold, uint256 startMarketCap)
+        internal
+        returns (AnyQuoteCurve curve, CurveToken token)
+    {
         vm.prank(creator);
         (address t, address c) = factory.launch(
             AnyQuoteCurveFactory.LaunchParams({
@@ -45,6 +55,7 @@ contract AnyQuoteCurveTest is Test {
                 quoteToken: quote,
                 graduationThreshold: threshold,
                 supply: 1_000_000_000 ether,
+                startMarketCap: startMarketCap,
                 poolFee: 10000,
                 tickSpacing: 200,
                 hooks: address(0),
@@ -249,5 +260,145 @@ contract AnyQuoteCurveTest is Test {
 
         assertApproxEqRel(IERC20(NVDA).balanceOf(POOL_MANAGER) - pmQuoteBefore, quoteSeed, 0.02e18, "~all NVDA seeded");
         assertApproxEqRel(token.balanceOf(POOL_MANAGER) - pmTokBefore, tokenSeed, 0.02e18, "~all tokens seeded");
+    }
+
+    // -----------------------------------------------------------------------
+    // startMarketCap
+    //
+    // The virtual quote reserve IS the starting market cap, because the virtual
+    // token reserve is the whole supply: price = quoteReserve/supply, so
+    // price * supply == quoteReserve. These tests pin that identity, because it
+    // is the only reason the parameter can honestly be named after a market cap.
+    // -----------------------------------------------------------------------
+
+    /// The shape asked for: 4.2 ETH raised to graduate, opening at 1.3 ETH.
+    function test_startMarketCap_4point2_threshold_1point3_open() public {
+        uint256 threshold = 4.2 ether;
+        uint256 startMcap = 1.3 ether;
+        (AnyQuoteCurve curve, CurveToken token) = _launch(address(0), threshold, startMcap);
+
+        assertEq(curve.startMarketCap(), startMcap, "startMarketCap should be what was asked for");
+        assertEq(curve.quoteReserve(), startMcap, "virtual quote reserve is the starting market cap");
+        assertEq(curve.tokenReserve(), token.totalSupply(), "virtual token reserve is the whole supply");
+
+        // price * supply == startMarketCap, to the wei
+        uint256 supply = token.totalSupply();
+        assertEq(FullMath.mulDiv(curve.quoteReserve(), supply, curve.tokenReserve()), startMcap,
+            "opening valuation of the whole supply is exactly the start market cap");
+
+        // buy all the way to graduation and check where it lands
+        vm.deal(trader, 100 ether);
+        vm.prank(trader);
+        curve.buy{value: 10 ether}(10 ether, 0, trader);   // overpay; the curve refunds the excess
+
+        assertEq(curve.realQuoteReserve(), threshold, "lands exactly on the threshold");
+        assertTrue(curve.readyToGraduate(), "ready once the threshold is met");
+
+        // GROSS vs NET, which is the thing that will surprise someone reading
+        // "4.2 ETH to graduate". The threshold counts what buyers PAY:
+        // realQuoteReserve takes the gross, while the pricing reserve only
+        // receives what is left after the trade fee. With feeBps = 100 the
+        // curve ends up holding 4.158, not 4.2.
+        uint256 netIn = threshold - (threshold * 100) / 10_000;   // feeBps is 100 in _launch
+        assertEq(curve.quoteReserve(), startMcap + netIn, "the pricing reserve gets the NET, not the gross");
+
+        // sold = supply * netIn / (startMcap + netIn)
+        uint256 expectedSold = FullMath.mulDiv(supply, netIn, startMcap + netIn);
+        uint256 sold = supply - curve.tokenReserve();
+        assertApproxEqRel(sold, expectedSold, 1e12, "76.18% of supply sells on the curve");
+
+        // and what is left seeds the pool
+        uint256 left = curve.tokenReserve();
+        assertApproxEqRel(left, supply - expectedSold, 1e12, "23.82% is left to seed the pool");
+
+        // where the coin ends up: the valuation it graduates at
+        uint256 finalMcap = FullMath.mulDiv(curve.quoteReserve(), supply, left);
+        assertApproxEqRel(finalMcap, 22.9 ether, 0.01e18, "graduates at roughly 22.9 ETH, a ~17.6x on the open");
+    }
+
+    /// Zero keeps the old behaviour exactly, so curves launched before this
+    /// parameter existed are unaffected.
+    function test_startMarketCap_zero_is_the_old_default() public {
+        uint256 threshold = 4.2 ether;
+        (AnyQuoteCurve a,) = _launch(address(0), threshold, 0);
+        assertEq(a.quoteReserve(), (threshold * 2) / 5, "0 means 0.4x the threshold");
+        assertEq(a.startMarketCap(), (threshold * 2) / 5, "and the reported start cap says so");
+
+        // stating it explicitly gives an identical curve
+        (AnyQuoteCurve b,) = _launch(address(0), threshold, (threshold * 2) / 5);
+        assertEq(b.quoteReserve(), a.quoteReserve(), "explicit 0.4x matches the default");
+    }
+
+    /// A lower opening valuation means more of the supply sells on the curve,
+    /// and the pool is seeded with less. Worth pinning: it is the trade-off a
+    /// launcher is actually making when they move this dial.
+    function test_startMarketCap_lower_open_sells_more_of_the_supply() public {
+        uint256 threshold = 4.2 ether;
+        (AnyQuoteCurve low,) = _launch(address(0), threshold, 1.3 ether);
+        (AnyQuoteCurve high,) = _launch(address(0), threshold, 3 ether);
+
+        vm.deal(trader, 200 ether);
+        vm.startPrank(trader);
+        low.buy{value: 10 ether}(10 ether, 0, trader);
+        high.buy{value: 10 ether}(10 ether, 0, trader);
+        vm.stopPrank();
+
+        uint256 lowLeft = low.tokenReserve();
+        uint256 highLeft = high.tokenReserve();
+        assertLt(lowLeft, highLeft, "opening lower leaves less for the pool");
+    }
+
+    /// The whole point of this curve: the quote can be a contract nobody
+    /// allowlisted. A token deployed in this test has never been seen by the
+    /// factory and still works as the quote asset end to end.
+    function test_startMarketCap_withACompletelyUnknownQuoteToken() public {
+        MockQuote quote = new MockQuote();
+        uint256 threshold = 4200 * 1e18;
+        (AnyQuoteCurve curve,) = _launch(address(quote), threshold, 1300 * 1e18);
+        assertEq(curve.startMarketCap(), 1300 * 1e18, "a brand new ERC20 is a valid quote");
+
+        quote.mint(trader, 10_000 ether);
+        vm.startPrank(trader);
+        quote.approve(address(curve), type(uint256).max);
+        curve.buy(threshold, 0, trader);
+        vm.stopPrank();
+
+        assertEq(curve.realQuoteReserve(), threshold, "it raises in that token");
+        assertTrue(curve.readyToGraduate(), "and graduates on it");
+    }
+}
+
+/// A quote token nobody has ever heard of - deployed inside the test, so it is
+/// in no allowlist anywhere. This is what "pair against a memecoin" means in
+/// practice: an arbitrary ERC20 contract address.
+contract MockQuote {
+    string public name = "Mock Memecoin";
+    string public symbol = "MOCK";
+    uint8 public decimals = 18;
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+        totalSupply += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (allowance[from][msg.sender] != type(uint256).max) allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
     }
 }

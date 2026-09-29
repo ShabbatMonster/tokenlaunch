@@ -48,11 +48,19 @@ interface IERC20 {
 ///         The quote can be native ETH or any ERC20 - a stock token, a stable, a
 ///         memecoin, whatever the deployer passes in.
 ///
-/// Curve shape (matches the ratios observed on live Pons v2 curves):
-///   virtualQuote = threshold * 2/5          (0.4x the threshold)
-///   k            = supply * virtualQuote
-/// which means graduation lands with ~71.43% of supply sold and ~28.57% left in
-/// the contract to seed the pool alongside the raised quote.
+/// Curve shape. The virtual token reserve is the whole supply, so the starting
+/// price is virtualQuote/supply and the starting MARKET CAP is exactly
+/// virtualQuote - the two are the same number in quote terms. That is why the
+/// dial is called startMarketCap rather than something about reserves: it is
+/// the figure a launcher actually thinks in.
+///
+///   quoteReserve  = startMarketCap        (0 => threshold * 2/5, the old default)
+///   tokenReserve  = supply
+///   sold at graduation = supply * threshold / (startMarketCap + threshold)
+///
+/// Leaving startMarketCap at 0 reproduces the ratio the live Pons v2 curves use
+/// (0.4x the threshold, ~71.43% of supply sold, ~28.57% seeding the pool), so
+/// every curve launched before this parameter existed behaves identically.
 ///
 /// Graduation is permissionless by design: anyone can call graduate() once the
 /// threshold is met. That is the whole point - a curve that has met its
@@ -68,6 +76,8 @@ contract AnyQuoteCurve {
 
     uint256 public immutable graduationThreshold;
     uint256 public immutable launchSupply;
+    /// @dev what the coin is worth in quote terms before anyone has bought
+    uint256 public immutable startMarketCap;
     uint24 public immutable poolFee;
     int24 public immutable tickSpacing;
     address public immutable hooks;
@@ -124,6 +134,8 @@ contract AnyQuoteCurve {
         address poolManager;
         uint256 graduationThreshold;
         uint256 launchSupply;
+        /// @dev starting market cap in quote terms; 0 => threshold * 2/5
+        uint256 startMarketCap;
         uint24 poolFee;
         int24 tickSpacing;
         address hooks;
@@ -148,9 +160,12 @@ contract AnyQuoteCurve {
         protocolFeeShareBps = p.protocolFeeShareBps;
 
         tokenReserve = p.launchSupply;
-        // 0.4x the threshold as the starting virtual quote - the same ratio the
-        // live Pons curves use, which is what puts graduation at ~71.43% sold.
-        quoteReserve = (p.graduationThreshold * 2) / 5;
+        // The virtual quote reserve IS the starting market cap: price is
+        // quoteReserve/tokenReserve and tokenReserve is the whole supply, so
+        // price * supply == quoteReserve. Zero keeps the old behaviour - 0.4x
+        // the threshold, the ratio the live Pons curves use.
+        quoteReserve = p.startMarketCap == 0 ? (p.graduationThreshold * 2) / 5 : p.startMarketCap;
+        startMarketCap = quoteReserve;
         launchedAt = block.timestamp;
     }
 

@@ -225,7 +225,14 @@ const PONS_V2_FACTORY_ABI = [
 // the two restrictions removed: ANY quote token is allowed, and graduate() is
 // permissionless the moment the threshold is met — no executor bot, no rescue
 // delay, so a curve can never end up closed-but-poolless.
-const V4CURVE_FACTORY = '0xaE6c291948611B29C030eBac5f71FD1C6928aE41'; // AnyQuoteCurveFactory, deployed 2026-09-02
+// Redeployed 2026-09-29 to add startMarketCap. The old factory
+// (0xaE6c2919...) hardcoded the opening valuation at 0.4x the threshold, so
+// asking for "4.2 ETH to graduate, opening at 1.3" was not expressible on it:
+// 4.2 forced an opening of 1.68. The parameter is the virtual quote reserve,
+// which for this curve IS the starting market cap - the virtual token reserve
+// is the whole supply, so price * supply == quoteReserve exactly.
+// Passing 0 reproduces the old 0.4x behaviour.
+const V4CURVE_FACTORY = '0xdC0E6273a9312cA1c311CFf05fBED687B3E4F917'; // AnyQuoteCurveFactory, deployed 2026-09-29
 const V4CURVE_ABI = [
   {
     type: 'function', name: 'launch', stateMutability: 'payable',
@@ -234,7 +241,8 @@ const V4CURVE_ABI = [
       { name: 'logo', type: 'string' }, { name: 'description', type: 'string' },
       { name: 'twitter', type: 'string' }, { name: 'website', type: 'string' },
       { name: 'quoteToken', type: 'address' }, { name: 'graduationThreshold', type: 'uint256' },
-      { name: 'supply', type: 'uint256' }, { name: 'poolFee', type: 'uint24' },
+      { name: 'supply', type: 'uint256' }, { name: 'startMarketCap', type: 'uint256' },
+      { name: 'poolFee', type: 'uint24' },
       { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' },
       { name: 'feeBps', type: 'uint16' },
     ] }],
@@ -3396,6 +3404,15 @@ async function launchV4Curve(pad, inp) {
   if (!(+supplyStr > 0)) throw new Error('set a supply');
   const supply = parseEther(supplyStr);
 
+  // The opening valuation of the whole supply, in the quote asset. Blank or 0
+  // falls back to the curve's own default of 0.4x the threshold.
+  const openStr = $('v4curveOpen').value.trim();
+  if (openStr && !(+openStr > 0)) throw new Error('the opening market cap has to be a positive number, or blank for the default');
+  const startMarketCap = openStr ? parseUnits(openStr, decimals) : 0n;
+  if (startMarketCap > 0n && startMarketCap >= graduationThreshold * 4n) {
+    throw new Error('an opening market cap that big leaves almost nothing selling on the curve — keep it well under the threshold');
+  }
+
   const devBuyStr = $('v4curveDevBuy').value.trim() || '0';
   const devBuyRaw = +devBuyStr > 0 ? parseUnits(devBuyStr, decimals) : 0n;
 
@@ -3404,7 +3421,7 @@ async function launchV4Curve(pad, inp) {
   const params = {
     name: inp.name, symbol: inp.symbol, logo: inp.logo, description: inp.description,
     twitter: inp.twitter, website: inp.website,
-    quoteToken, graduationThreshold, supply,
+    quoteToken, graduationThreshold, supply, startMarketCap,
     poolFee: pad.poolFee, tickSpacing: pad.tickSpacing, hooks: ZERO_ADDR, feeBps: pad.feeBps,
   };
 
@@ -4648,6 +4665,33 @@ function updateV4CurveUI(pad) {
   const sym = isCustom ? 'quote' : q.symbol;
   $('v4curveThreshSym').textContent = sym;
   $('v4curveDevSym').textContent = sym;
+  $('v4curveOpenSym').textContent = sym;
+  paintV4CurveShape(pad);
+}
+
+/// What the two numbers actually imply, worked out the way the contract does it.
+///
+/// The threshold is GROSS - it counts what buyers pay, and the trade fee comes
+/// off before the curve sees it - so the split is computed on the net. Showing
+/// the pre-fee figure would overstate how much of the supply sells, which is
+/// the number a launcher is really choosing.
+function paintV4CurveShape(pad) {
+  const hint = $('v4curveShape');
+  if (!hint) return;
+  const sym = $('v4curveThreshSym').textContent || 'quote';
+  const threshold = +$('v4curveThreshold').value.trim();
+  const openRaw = $('v4curveOpen').value.trim();
+  if (!(threshold > 0)) { hint.textContent = ''; return; }
+  const open = openRaw ? +openRaw : threshold * 0.4;
+  if (!(open > 0)) { hint.textContent = ''; return; }
+
+  const net = threshold * (1 - (pad.feeBps || 0) / 10000);
+  const soldPct = (net / (open + net)) * 100;
+  const finalMcap = (open + net) / (1 - net / (open + net));
+  hint.innerHTML = `opens at <b>${open}</b> ${esc(sym)} · <b>${soldPct.toFixed(1)}%</b> of supply sells on the curve, `
+    + `<b>${(100 - soldPct).toFixed(1)}%</b> seeds the pool · graduates around `
+    + `<b>${finalMcap.toFixed(2)}</b> ${esc(sym)} (${(finalMcap / open).toFixed(1)}x the open)`
+    + (openRaw ? '' : ' <span style="opacity:.7">— default 0.4x the threshold</span>');
 }
 
 // long.xyz: numeraire dropdown grouped by asset class, plus the custom field
@@ -4808,6 +4852,9 @@ function init() {
     activePad.quoteToken = $('quoteSelect').value;
     updateRialtoHint(activePad);
   });
+  for (const id of ['v4curveThreshold', 'v4curveOpen']) {
+    $(id).addEventListener('input', () => { if (activePad.family === 'v4curve') paintV4CurveShape(activePad); });
+  }
   $('solQuoteSelect').addEventListener('change', () => updateSolQuoteUI(activePad));
   $('solFundBtn').addEventListener('click', (e) => { if (activePad.family === 'meteora') doSolFund(activePad, e.currentTarget); });
   {
