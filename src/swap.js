@@ -157,6 +157,13 @@ const CURVE_ABI = [
   { type: 'function', name: 'sell', stateMutability: 'nonpayable', outputs: [{ type: 'uint256' }],
     inputs: [{ name: 'tokenAmountIn', type: 'uint256' }, { name: 'minQuoteOut', type: 'uint256' }, { name: 'recipient', type: 'address' }] },
   { type: 'function', name: 'getReserves', inputs: [], outputs: [{ type: 'uint256' }, { type: 'uint256' }], stateMutability: 'view' },
+  // AnyQuoteCurve (contracts/AnyQuoteCurve.sol) is the same curve with a
+  // different surface: it has no getReserves()/pairToken(), exposing the two
+  // reserves and the quote as separate getters instead. buy() and sell() are
+  // identical, so only discovery needs to know the difference.
+  { type: 'function', name: 'quoteReserve', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'tokenReserve', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+  { type: 'function', name: 'quoteToken', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
   { type: 'function', name: 'graduated', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
   { type: 'function', name: 'readyToGraduate', inputs: [], outputs: [{ type: 'bool' }], stateMutability: 'view' },
   { type: 'function', name: 'pairToken', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' },
@@ -658,13 +665,31 @@ async function findCurvePool(token) {
   const rd = (fn, args) => pub.readContract({ address: curve, abi: CURVE_ABI, functionName: fn, args }).catch(() => null);
   const [graduated, reserves, pairToken] = await Promise.all([rd('graduated'), rd('getReserves'), rd('pairToken')]);
   // once it has graduated the curve is empty and the v4 pool is the real venue
-  if (graduated !== false || !reserves) return [];
+  if (graduated !== false) return [];
+
+  // Two curve shapes answer to `graduated`. The Pons-style one has
+  // getReserves()/pairToken(); ours has quoteReserve()/tokenReserve()/
+  // quoteToken(). Treating a missing getReserves() as "no curve" is what made
+  // our own launches untradeable on this page - the coin was fine, the reader
+  // was looking for the wrong getter.
+  let quoteRes;
+  let tokenRes;
+  let quoteAddr = pairToken;
+  if (reserves) {
+    [quoteRes, tokenRes] = reserves;
+  } else {
+    const [qr, tr, qt] = await Promise.all([rd('quoteReserve'), rd('tokenReserve'), rd('quoteToken')]);
+    if (qr == null || tr == null) return [];   // neither shape: genuinely not a curve
+    quoteRes = qr;
+    tokenRes = tr;
+    quoteAddr = qt;
+  }
 
   const [feeBps, creatorTaxBps, snipeStart, snipeSecs, threshold, realQuote] = await Promise.all([
     rd('feeBps'), rd('creatorTaxBps'), rd('snipeTaxStartBps'), rd('snipeTaxSeconds'),
     rd('graduationThreshold'), rd('realQuoteReserve'),
   ]);
-  const quote = pairToken ? getAddress(pairToken) : ZERO;
+  const quote = quoteAddr ? getAddress(quoteAddr) : ZERO;
   const [quoteSymbol, quoteDecimals] = quote === ZERO
     ? ['ETH', 18]
     : await Promise.all([
@@ -683,12 +708,12 @@ async function findCurvePool(token) {
   return [{
     venue: 'curve', label: 'bonding curve', curve: getAddress(curve), exitLiquidity,
     quote, quoteSymbol, quoteDecimals,
-    quoteReserve: reserves[0], tokenReserve: reserves[1],
+    quoteReserve: quoteRes, tokenReserve: tokenRes,
     feeBps: feeBps ?? 0n, creatorTaxBps: creatorTaxBps ?? 0n,
     snipeStartBps: snipeStart ?? 0n, snipeSeconds: snipeSecs ?? 0n,
     threshold: threshold ?? 0n, raised: realQuote ?? 0n,
     fee: Number((feeBps ?? 0n) + (creatorTaxBps ?? 0n)) * 100, // bps -> the 1e6 scale feeLabel expects
-    liquidity: reserves[0],
+    liquidity: quoteRes,
   }];
 }
 
