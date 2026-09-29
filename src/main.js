@@ -250,6 +250,11 @@ const V4CURVE_ABI = [
   },
   { type: 'function', name: 'launchFee', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
 ];
+// Pricing the launch shape into whatever quote is selected - the Robinhood
+// half of what PUMP ECONOMICS does on the Meteora pad. There is no Jupiter on
+// this chain, so the rate is read off Uniswap v4 itself.
+import { rhEconomicsFor, RH_ECONOMICS } from './rhPrice.js';
+
 const V4CURVE_BUY_ABI = [
   { type: 'function', name: 'buy', stateMutability: 'payable', inputs: [
     { name: 'quoteIn', type: 'uint256' }, { name: 'minTokensOut', type: 'uint256' }, { name: 'recipient', type: 'address' },
@@ -4652,6 +4657,47 @@ function updatePonsUI(pad) {
   $('ponsDevSym').textContent = isCustom ? 'pair' : q.symbol;
 }
 
+/// Fill the threshold and opening cap with the ETH-denominated shape, converted
+/// into the selected quote at the live on-chain rate.
+///
+/// The same idea as PUMP ECONOMICS on the Meteora pad: state the economics once
+/// in one asset so they mean the same thing whatever the curve is priced in.
+/// Pairing against a memecoin otherwise means working out by hand how many of
+/// it are worth 4.2 ETH, which is the sort of arithmetic that gets a zero wrong.
+async function applyRhEconomics(pad) {
+  const hint = $('v4curveShape');
+  const btn = $('v4curveEconBtn');
+  const q = pad.quotes.find((x) => x.symbol === $('v4curveQuoteSelect').value) || pad.quotes[0];
+  const isCustom = q.address === 'custom';
+  const quoteToken = isCustom ? $('v4curveQuoteCustom').value.trim() : q.address;
+  if (!/^0x[a-fA-F0-9]{40}$/.test(quoteToken)) {
+    hint.innerHTML = '<span style="color:var(--danger)">pick a quote, or paste a valid token address, first</span>';
+    return;
+  }
+  btn.disabled = true;
+  hint.textContent = 'reading the ETH rate off Uniswap v4…';
+  try {
+    const r = await rhEconomicsFor({
+      quoteToken,
+      decimals: isCustom ? undefined : q.decimals,
+    });
+    const show = (raw) => formatUnits(BigInt(raw), r.decimals);
+    $('v4curveThreshold').value = show(r.graduationThreshold);
+    $('v4curveOpen').value = show(r.startMarketCap);
+    paintV4CurveShape(pad);
+    const sym = isCustom ? 'quote' : q.symbol;
+    if (r.source !== 'native' && r.source !== 'wrapped') {
+      hint.innerHTML = hint.innerHTML
+        + `<br><span style="opacity:.75">1 ETH = ${esc(Number(formatUnits(BigInt(r.perEth), r.decimals)).toLocaleString(undefined, { maximumFractionDigits: 6 }))} ${esc(sym)}, `
+        + `off the deepest v4 pool pairing it with ETH</span>`;
+    }
+  } catch (e) {
+    hint.innerHTML = `<span style="color:var(--danger)">${esc(e.shortMessage || e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // our v4 curve: quote dropdown -> custom field + threshold/dev-buy unit labels
 function updateV4CurveUI(pad) {
   const qs = $('v4curveQuoteSelect');
@@ -4852,6 +4898,7 @@ function init() {
     activePad.quoteToken = $('quoteSelect').value;
     updateRialtoHint(activePad);
   });
+  $('v4curveEconBtn').addEventListener('click', () => { if (activePad.family === 'v4curve') applyRhEconomics(activePad); });
   for (const id of ['v4curveThreshold', 'v4curveOpen']) {
     $(id).addEventListener('input', () => { if (activePad.family === 'v4curve') paintV4CurveShape(activePad); });
   }
