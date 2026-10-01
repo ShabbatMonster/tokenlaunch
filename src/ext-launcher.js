@@ -11,7 +11,7 @@
 
 import {
   launchPump, pumpStatus, pumpWarmup, launchRaydium, solAddressFromSecret,
-  BONK_PLATFORM_ID, STONK_PLATFORM_ID, RAYDIUM_PLATFORM_ID,
+  BONK_PLATFORM_ID, STONK_PLATFORM_ID_ALT, STONK_CC_PLATFORM_ID, RAYDIUM_PLATFORM_ID,
 } from './solana.js';
 
 export { launchPump, pumpStatus, pumpWarmup, launchRaydium, solAddressFromSecret };
@@ -35,7 +35,13 @@ export const WSOL = 'So11111111111111111111111111111111111111112';
 export const VENUES = {
   pump: { label: 'Pump', kind: 'pump' },
   bonk: { label: 'BONK', kind: 'launchlab', platformId: BONK_PLATFORM_ID },
-  stonk: { label: 'Stonk', kind: 'launchlab', platformId: STONK_PLATFORM_ID },
+  // Two StonkFun entries, because the platform id is the difference between a
+  // launch that shows up as a community coin and one that does not: a badged
+  // PlatformConfig carries a flag byte the ordinary storefront lacks. Naming
+  // both makes that a choice rather than a thing you discover afterwards from
+  // the website. See STONK_CC_PLATFORM_ID in solana.js.
+  stonk: { label: 'Stonk · CC', kind: 'launchlab', platformId: STONK_CC_PLATFORM_ID },
+  'stonk-standard': { label: 'Stonk', kind: 'launchlab', platformId: STONK_PLATFORM_ID_ALT },
   raydium: { label: 'Raydium', kind: 'launchlab', platformId: RAYDIUM_PLATFORM_ID },
 };
 
