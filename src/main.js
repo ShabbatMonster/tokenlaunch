@@ -1200,12 +1200,16 @@ const PADS = [
     token2022: true, transferFeeBps: 100, transferFeeChoices: [100, 300],
   },
   {
-    // StonkFun's "community coin" shape, copied from a live one
-    // (8svf3G1X..., "Commie Coin", quoted in AMC) rather than invented. It is
-    // the same program, same curve and same configs as the pad above; what
-    // differs is the platform id, a 300 bps transfer fee on the mint, and a
-    // TOKEN-2022 quote - which is why the launcher patches the quote's token
-    // program slot before sending. See STONK_CC_PLATFORM_ID in solana.js.
+    // StonkFun's "community coin" shape. Same program, same curve, same
+    // configs as the pad above; the ONLY thing that earns the badge is the
+    // platform id, because a badged PlatformConfig has a flag byte set at
+    // offset 832. See STONK_CC_PLATFORM_ID in solana.js for the byte-diff.
+    //
+    // This pad used to also force a Token-2022 mint with a 300 bps transfer
+    // fee, copied off the one badged coin that was examined first. That was
+    // over-fitted: the other two badged platforms (FALKLANDS, VISIONARY) quote
+    // plain WSOL with classic-SPL, zero-fee mints and are badged just the same.
+    // So the fee is offered, not required - 0 bps gives a plain SPL mint.
     id: 'stonk-cc-sol', label: 'StonkFun · CC (community coin)', vm: 'sol', enabled: true, family: 'raydium',
     rpc: SOL_RPC,
     explorer: 'https://solscan.io',
@@ -1213,10 +1217,7 @@ const PADS = [
     nativeSymbol: 'SOL',
     quotes: STONK_QUOTES,
     platformId: 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi', // StonkFun, community coins
-    // the live CC carries 300 bps; the typical coin carries no transfer fee at
-    // all, so this is the one field where CC is not merely "the same but
-    // elsewhere"
-    token2022: true, transferFeeBps: 300, transferFeeChoices: [100, 300],
+    token2022: true, transferFeeBps: 300, transferFeeChoices: [0, 100, 300],
   },
   {
     // bonk.fun — the SAME LaunchLab program + configs as raydium-sol above (bonk.fun
@@ -2826,9 +2827,14 @@ async function launchSol(pad, inp) {
       rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint,
       name: inp.name, symbol: inp.symbol, uri, buyAmountUi,
       migrateType: 'cpmm', platformId: pad.platformId,
-      // pads whose platform pins a Token-2022 transfer fee (StonkFun) declare it
-      token2022: !!pad.token2022,
-      transferFeeBps: pad.token2022 ? +($('raydiumFeeBps')?.value || pad.transferFeeBps || 100) : undefined,
+      // pads whose platform pins a Token-2022 transfer fee (StonkFun's ordinary
+      // storefronts) declare it. A tier of 0 means no extension at all, so the
+      // mint goes out as plain SPL - only reachable where no curve rule pins
+      // the tier, which on StonkFun means the CC platforms. See
+      // STONK_CC_PLATFORM_ID in solana.js.
+      ...(((pad.token2022 ? +($('raydiumFeeBps')?.value || pad.transferFeeBps || 100) : 0) || 0) > 0
+        ? { token2022: true, transferFeeBps: +($('raydiumFeeBps')?.value || pad.transferFeeBps || 100) }
+        : { token2022: false }),
       raiseTargetUi: $('raydiumRaise')?.value.trim() || undefined,
       onStatus: (m) => setStatus(m),
     });
@@ -4518,7 +4524,58 @@ function updateRaydiumUI(pad) {
   $('raydiumQuoteCustom').classList.toggle('hidden', !isCustom);
   $('raydiumDevSym').textContent = isCustom ? 'quote' : q.symbol;
   if ($('raydiumRaiseSym')) $('raydiumRaiseSym').textContent = isCustom ? 'quote' : q.symbol;
+  // the fee tiers a pad actually offers. The CC pad offers 0, which means a
+  // plain SPL mint rather than a Token-2022 one with a zero fee - see
+  // raydiumFeeBps below, where 0 turns the extension off entirely.
+  const fsel = $('raydiumFeeBps');
+  if (fsel && fsel.dataset.padId !== pad.id) {
+    const choices = pad.transferFeeChoices || [100, 300];
+    fsel.innerHTML = choices.map((b) => `<option value="${b}">`
+      + (b === 0 ? 'none (plain SPL mint)' : `${b / 100}% (${b} bps)`) + '</option>').join('');
+    fsel.value = String(pad.transferFeeBps ?? choices[0]);
+    fsel.dataset.padId = pad.id;
+  }
   paintRaydiumShape(pad);
+  paintRaydiumPlatform(pad);
+}
+
+/// Say whether a launch on this pad will be badged a community coin, BEFORE it
+/// is signed.
+///
+/// This exists because a launch went out unbadged and nothing on the page said
+/// why: the pad had been switched to the ordinary StonkFun platform and the
+/// only visible difference was on stonkfun's own website afterwards. The badge
+/// is one flag byte in the PlatformConfig, so it can simply be read and shown.
+const platformCache = new Map();
+async function paintRaydiumPlatform(pad) {
+  const el = $('raydiumPlatform');
+  if (!el) return;
+  if (pad.family !== 'raydium' || !pad.platformId) { el.textContent = ''; return; }
+  const key = pad.rpc + ':' + pad.platformId;
+  if (!platformCache.has(key)) {
+    el.textContent = 'reading the platform config…';
+    try {
+      const { readPlatformConfig } = await import('./solana.js');
+      platformCache.set(key, await readPlatformConfig(pad.rpc, pad.platformId));
+    } catch (e) {
+      platformCache.set(key, { error: e.message });
+    }
+    // the pad may have been switched while that was in flight
+    if (activePad?.id !== pad.id) return;
+  }
+  const p = platformCache.get(key);
+  if (!p || p.error) {
+    el.innerHTML = `<span style="color:var(--warn,#c90)">could not read the platform config</span>`
+      + ` — <code>${esc(pad.platformId.slice(0, 8))}…</code>${p?.error ? ' · ' + esc(p.error) : ''}`;
+    return;
+  }
+  el.innerHTML = p.community
+    ? `<span style="color:var(--accent)">COMMUNITY COIN ✓</span> platform <code>${esc(p.platformId.slice(0, 8))}…</code>`
+      + ` "${esc(p.name)}" — this one carries the CC flag, so the launch gets the badge.`
+      + ` No curve rule exists for it either, so the raise and the transfer fee are free to set.`
+    : `<span style="color:var(--muted,#888)">standard coin</span> — platform <code>${esc(p.platformId.slice(0, 8))}…</code>`
+      + ` "${esc(p.name)}" has the CC flag clear, so this launch will NOT be badged.`
+      + ` Pick the CC pad for that.`;
 }
 
 /// Pull every LaunchLab config that exists on chain and fold the ones this pad

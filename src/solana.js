@@ -1055,41 +1055,116 @@ import { pumpTrade, pumpCurve } from './pump.js';
 export const RAYDIUM_PLATFORM_ID = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
 export const BONK_PLATFORM_ID = 'FfYek5vEz23cMkWsdJwG2oa6EphsvXSHrGpdALN4g6W1';
 
-// stonkfun.xyz runs THREE platform ids against the same program and configs.
-// All three decode to a PlatformConfig named "StonkFun" and are identical field
-// for field - same fee wallets, same 10000 feeRate, same cpConfigId - differing
-// only in `epoch`, which is just when each was last written.
+// stonkfun.xyz runs 134 platform ids against the same program and configs, not
+// three. Two of them carry essentially all the volume - 6BwHHDg3 with 115,545
+// pools and 4E876qZT with 36,626 - and the remaining 132 hold between 0 and 25
+// each. They all decode to a PlatformConfig pointing at stonkfun.xyz, and the
+// big two are identical field for field (same fee wallets, same 10000 feeRate,
+// same cpConfigId) differing only in `epoch`, which is just when each was last
+// written. So the platform id is which storefront a launch is attributed to
+// rather than a different set of economics - with ONE exception, the community
+// flag at offset 832, which is what STONK_CC_PLATFORM_ID below is about.
 //
-// The default is the one stonkfun's community-coin launches use: the coin at
-// 8svf3G1X... was launched under CUqSiwPs, while the ordinary one at
-// 2uBW1oWE... used 6BwHHDg3. Both land on the same LaunchpadConfig
-// (7j4zuEkW...) with the same curve - 1B supply, 793.1M on the curve - so the
-// platform id is which storefront the launch is attributed to rather than a
-// different set of economics.
-export const STONK_PLATFORM_ID = 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi';
+// This constant is the ORDINARY storefront, deliberately. It briefly pointed at
+// the community platform, which was an attempt to get the CC badge by swapping
+// the id here - and it could not work, because nothing reads this for the
+// stonkfun pads: they carry their own platformId inline. Worse, a constant
+// called STONK_PLATFORM_ID that quietly produced community coins would make
+// every ordinary launch a community one. The badge now has its own name,
+// STONK_CC_PLATFORM_ID, and its own pad, which is the honest way to pick it.
+export const STONK_PLATFORM_ID = '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt';
 export const STONK_PLATFORM_ID_ALT = '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt';
 export const STONK_PLATFORM_ID_ALT2 = '4E876qZTE9FJMrBzgVtBrSrzz2TLivB5Y5QXPjB4gZL7';
 
 // --- the CC (community coin) shape -----------------------------------------
 //
-// stonkfun shows some launches as "community coins" and they are a genuinely
-// different animal. Decoded from a live pair - CC 8svf3G1X... against typical
-// 5Mv6c7ta... - the differences are exactly three, and the rest is identical
-// (1B supply, 793.1M on the curve, curveType 0, tradeFeeRate 2500):
+// What actually earns the "community coin" badge is ONE BYTE in the
+// PlatformConfig, and nothing about the launch itself.
 //
-//   platform   CUqSiwPs...        vs 4E876qZT.../6BwHHDg3...
-//   quote      a TOKEN-2022 asset vs a classic SPL one. The CC quotes
-//              AMC1qwR9..., a Backpack tokenised stock, so BOTH token-program
-//              slots are Token-2022; the SDK writes the classic program into
-//              the quote slot and has to be patched (see launchRaydium).
-//   transfer   300 bps on the base mint vs NONE AT ALL - the typical coin's
-//     fee      mint carries no TransferFeeConfig extension, the CC's carries
-//              one at 300 bps with a 1e15 cap.
+// The first read of this was over-fitted. Comparing the badged coin
+// (8svf3G1X..., quoted in the Token-2022 stock AMC1qwR9..., 300 bps transfer
+// fee) against a typical one (5Mv6c7ta..., classic SPL quote, no fee) made it
+// look like CC meant "Token-2022 quote + a 300 bps fee". It does not. Two more
+// badged platforms exist and both quote plain WSOL with a classic-SPL,
+// zero-fee mint, so every one of those traits was a coincidence of the one
+// coin first examined.
 //
-// The config is not a separate thing to choose: it is the per-quote PDA, so
-// picking the quote picks it (AMC resolves to 7j4zuEkW...).
+// Byte-diffing the two PlatformConfigs is what settles it. They are 944 bytes
+// each and differ in exactly TWO places:
+//
+//   offset 8    `epoch` - just when each was last written, carries no meaning
+//   offset 832  1 on the CC platform, 0 on the regular one
+//
+// Everything else - fee wallets, feeRate, cpConfigId, the curve - is
+// byte-identical. Offset 832 is the first byte of what the SDK's layout still
+// calls 108 bytes of padding, so this is a field the deployed program grew and
+// the bundled layout has not caught up with. The usual shape of things here:
+// the IDL is behind the program.
+//
+// The separation is total. Of 134 PlatformConfigs pointing at stonkfun.xyz,
+// exactly three have the byte set, and they hold one pool each:
+//
+//   BFYnA6ou...  1 pool   named "FALKLANDS"   quote WSOL, classic SPL, no fee
+//   CUqSiwPs...  1 pool   named "StonkFun"    quote AMC, Token-2022, 300 bps
+//   ChxAAGsQ...  1 pool   named "VISIONARY"   quote WSOL, classic SPL, no fee
+//
+// against 131 platforms holding 152,697 pools with the byte clear. The names
+// of the other two say what the field is for: one platform per community.
+//
+// Two things follow, and they are the whole reason this matters:
+//
+//   1. The badge cannot be reached by changing the quote, the curve, the raise
+//      or the transfer fee. It is a property of the platform you launch under.
+//   2. Launching under a badged platform IS permissionless. Replaying each of
+//      the three `initialize` transactions shows the signers were the creator
+//      and the new mint keypair only - no platform admin - and no
+//      `platform_curve_rule` PDA exists for any of them, so nothing gates it.
+//
+// The config is not a separate thing to choose either: it is the per-quote PDA,
+// so picking the quote picks it (AMC resolves to 7j4zuEkW..., WSOL to
+// 6s1xP3hp...).
 export const STONK_CC_PLATFORM_ID = 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi';
+
+/// The badged platforms, with the two that prove CC is not about the quote.
+export const STONK_CC_PLATFORM_IDS = [
+  'BFYnA6ouETD2m9tGEjtyU6TV6BmqdVT2YDUMmgp9Yjv3', // "FALKLANDS"
+  'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi', // "StonkFun"
+  'ChxAAGsQoXTPVzwk5beARJM7hXVcqr3VENUxXgVmC6aH', // "VISIONARY"
+];
+
+/// What the reference CC carried. Kept because it is the default the pad
+/// offers, NOT because the badge depends on it - FALKLANDS and VISIONARY carry
+/// no transfer fee at all and are badged just the same.
 export const STONK_CC_TRANSFER_FEE_BPS = 300;
+
+/// The undocumented community flag: first byte of the SDK layout's trailing
+/// padding in a 944-byte PlatformConfig.
+export const PLATFORM_COMMUNITY_FLAG_OFFSET = 832;
+export const PLATFORM_CONFIG_SIZE = 944;
+
+/// Read a platform config and say whether launches under it get the CC badge.
+///
+/// This exists so the launcher can answer the question BEFORE you sign rather
+/// than after you look at the website - the only way the last launch went out
+/// unbadged was that nothing on the page said which platform it was using.
+export async function readPlatformConfig(rpcUrl, platformId) {
+  const connection = typeof rpcUrl === 'string' ? new Connection(rpcUrl, 'confirmed') : rpcUrl;
+  const info = await connection.getAccountInfo(new PublicKey(platformId));
+  if (!info) return null;
+  const d = info.data;
+  if (d.length !== PLATFORM_CONFIG_SIZE) return null;
+  const str = (a, b) => d.slice(a, b).toString('utf8').replace(/\0+$/, '').trim();
+  return {
+    platformId: String(platformId),
+    // the flag is a byte the bundled layout does not name; read it positionally
+    community: d[PLATFORM_COMMUNITY_FLAG_OFFSET] === 1,
+    name: str(112, 176),
+    web: str(176, 432),
+    feeRate: Number(d.readBigUInt64LE(104)),
+    creatorFeeRate: Number(d.readBigUInt64LE(720)),
+    claimFeeWallet: new PublicKey(d.slice(16, 48)).toBase58(),
+  };
+}
 
 /// Every quote mint that LaunchLab will actually accept, read from the chain
 /// rather than from any launchpad's allowlist.
@@ -1319,11 +1394,16 @@ export async function launchRaydium(opts) {
       migrateType: migrateType || 'cpmm',
       // Some platforms mint the launched token as Token-2022 with a transfer-fee
       // extension, and their curve rule (below) *requires* it — the fee tier is
-      // one of the fields the rule pins. StonkFun is one: decoding a live launch
-      // of theirs shows initialize_with_token_2022 carrying
-      // Some(transferFeeBasePoints: 100, maxinumFee: 1e15), and their rule has two
-      // groups differing only in that tier (100 or 300 bps). Launching without it
-      // is rejected with CurveParamNotMatchPlatformRule.
+      // one of the fields the rule pins. StonkFun's ordinary storefronts are
+      // such a platform: decoding a live launch shows initialize_with_token_2022
+      // carrying Some(transferFeeBasePoints: 100, maxinumFee: 1e15), and their
+      // rule has two groups differing only in that tier (100 or 300 bps).
+      // Launching without it is rejected with CurveParamNotMatchPlatformRule.
+      //
+      // That is NOT true of every StonkFun platform. The three community-coin
+      // platforms have no platform_curve_rule account at all, so nothing is
+      // pinned there and the mint may be plain SPL - which is what FALKLANDS and
+      // VISIONARY actually are. Pass token2022: false for that.
       ...(token2022 ? {
         token2022: true,
         transferFeeExtensionParams: {
