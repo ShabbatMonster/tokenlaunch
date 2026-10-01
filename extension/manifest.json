@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "pump migrate",
+  "name": "curve migrate",
   "version": "2.0.0",
-  "description": "Adds a MIGRATE button to a coin page on Axiom. Migrates a stuck pump.fun or Meteora DBC bonding curve into its pool, and on pump.fun takes the first buy in the same transaction.",
+  "description": "Migrates a stuck bonding curve into its pool — pump.fun, Meteora DBC, or Pons v2 — with the first buy in the same transaction where the venue allows it. Works from a coin page or from a pasted address.",
   "permissions": [
     "storage",
     "notifications",
@@ -23,7 +23,17 @@
     "https://lite-api.jup.ag/*",
     "https://quote-api.jup.ag/*",
     "https://rpc.mainnet.chain.robinhood.com/*",
-    "https://robinhoodchain.blockscout.com/*"
+    "https://robinhoodchain.blockscout.com/*",
+    "https://solscan.io/*",
+    "https://dexscreener.com/*",
+    "https://*.dexscreener.com/*",
+    "https://birdeye.so/*",
+    "https://jup.ag/*",
+    "https://gmgn.ai/*",
+    "https://*.gmgn.ai/*",
+    "https://photon-sol.tinyastro.io/*",
+    "https://explorer.solana.com/*",
+    "https://solana.fm/*"
   ],
   "optional_host_permissions": [
     "*://*/*"
@@ -36,7 +46,17 @@
     {
       "matches": [
         "https://axiom.trade/*",
-        "https://*.axiom.trade/*"
+        "https://*.axiom.trade/*",
+        "https://solscan.io/*",
+        "https://dexscreener.com/*",
+        "https://*.dexscreener.com/*",
+        "https://birdeye.so/*",
+        "https://jup.ag/*",
+        "https://gmgn.ai/*",
+        "https://*.gmgn.ai/*",
+        "https://photon-sol.tinyastro.io/*",
+        "https://explorer.solana.com/*",
+        "https://solana.fm/*"
       ],
       "js": [
         "axiom.js"
@@ -51,7 +71,7 @@
   "options_page": "options.html",
   "action": {
     "default_popup": "popup.html",
-    "default_title": "pump migrate",
+    "default_title": "curve migrate",
     "default_icon": {
       "16": "icon16.png",
       "32": "icon32.png",
@@ -66,7 +86,17 @@
       ],
       "matches": [
         "https://axiom.trade/*",
-        "https://*.axiom.trade/*"
+        "https://*.axiom.trade/*",
+        "https://solscan.io/*",
+        "https://dexscreener.com/*",
+        "https://*.dexscreener.com/*",
+        "https://birdeye.so/*",
+        "https://jup.ag/*",
+        "https://gmgn.ai/*",
+        "https://*.gmgn.ai/*",
+        "https://photon-sol.tinyastro.io/*",
+        "https://explorer.solana.com/*",
+        "https://solana.fm/*"
       ]
     }
   ],
