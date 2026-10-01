@@ -1217,6 +1217,10 @@ const PADS = [
     nativeSymbol: 'SOL',
     quotes: STONK_QUOTES,
     platformId: 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi', // StonkFun, community coins
+    // community: the platform id is a starting point, not a fixture. SCAN finds
+    // whichever community platform has an allow window open and the launch goes
+    // out under that one instead - see ccPlatformId().
+    community: true,
     token2022: true, transferFeeBps: 300, transferFeeChoices: [0, 100, 300],
   },
   {
@@ -2826,7 +2830,7 @@ async function launchSol(pad, inp) {
     const res = await launchRaydium({
       rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint,
       name: inp.name, symbol: inp.symbol, uri, buyAmountUi,
-      migrateType: 'cpmm', platformId: pad.platformId,
+      migrateType: 'cpmm', platformId: ccPlatformId(pad),
       // pads whose platform pins a Token-2022 transfer fee (StonkFun's ordinary
       // storefronts) declare it. A tier of 0 means no extension at all, so the
       // mint goes out as plain SPL - only reachable where no curve rule pins
@@ -4417,6 +4421,7 @@ function applyPadUI(pad) {
   if (meteora) updateSolQuoteUI(pad);
   if (raydium) updateRaydiumUI(pad);
   $('raydiumFeeRow').classList.toggle('hidden', !(raydium && pad.token2022));
+  $('raydiumCcRow').classList.toggle('hidden', !(raydium && pad.community));
   if (clmm) updateClmmUI(pad);
   updateWalletChip(pad);
 }
@@ -4597,6 +4602,208 @@ async function paintRaydiumPlatform(pad) {
       + ' also requires a <code>platform_allow_config</code> account, and none exists for this quote. Only the'
       + ' platform admin can create one (the platform id is a PDA of their key), so a launch here fails until'
       + ' they open a window. Use the ordinary pad unless you know one is open.';
+}
+
+// --- community launch windows ----------------------------------------------
+//
+// A community launch is only possible while the platform's admin has an allow
+// window open, and the platform is never reused: each community coin so far has
+// its own PlatformConfig, created shortly before the launch. So there is nothing
+// useful to hardcode — the pad has to find the window that is open now, and the
+// platform id it launches under comes from that window rather than from the pad.
+//
+// WATCH exists because a window is a window. The one StonkFun opened for their
+// community coin lasted about 70 minutes, and the launch that missed it missed
+// by twelve. Polling costs one getProgramAccounts call per tick and fires the
+// real launch the moment a window appears.
+
+/// The window the pad is pointed at, or null for the pad's own platform.
+let ccSelected = null;
+let ccWatcher = null;
+const CC_WATCH_MS = 15000;
+
+/// Which platform a Raydium launch should actually go out under.
+const ccPlatformId = (pad) => (pad.community && ccSelected ? ccSelected.platformId : pad.platformId);
+
+function ccSetStatus(msg, warn = false) {
+  const el = $('raydiumCcStatus');
+  if (el) el.innerHTML = warn ? `<span style="color:var(--warn,#c90)">${esc(msg)}</span>` : esc(msg);
+}
+
+/// Fold a window's quote into the dropdown and select it, so the pairing cannot
+/// silently disagree with the window the launch is aimed at.
+function ccPointAtQuote(pad, win) {
+  if (!win.quoteMint) return;
+  const list = raydiumQuoteList(pad);
+  const known = list.find((q) => q.mint === win.quoteMint);
+  if (known) {
+    $('raydiumQuoteSelect').value = known.symbol;
+  } else {
+    const symbol = win.quoteMint.slice(0, 4) + '…';
+    const extra = scannedQuotes.get(pad.id) || [];
+    if (!extra.some((q) => q.mint === win.quoteMint)) {
+      extra.push({
+        symbol, name: 'from the open window', mint: win.quoteMint,
+        decimals: win.quoteDecimals, kind: 'window',
+      });
+      scannedQuotes.set(pad.id, extra);
+    }
+    updateRaydiumUI(pad);
+    $('raydiumQuoteSelect').value = symbol;
+  }
+  updateRaydiumUI(pad);
+}
+
+function ccSelect(pad, win) {
+  ccSelected = win;
+  ccPointAtQuote(pad, win);
+  ccRenderList(pad, ccLastScan);
+  ccSetStatus(`armed at "${win.platform.name}" ${win.platformId.slice(0, 8)}… — the launch will go out under this platform`);
+  paintRaydiumPlatform(pad);
+}
+
+let ccLastScan = null;
+
+function ccRenderList(pad, windows) {
+  const box = $('raydiumCcList');
+  if (!box) return;
+  if (!windows) { box.innerHTML = ''; return; }
+  if (!windows.length) {
+    box.innerHTML = '<div class="hint" style="font-size:11px">no community platform has an open window right now.'
+      + ' A launch under one would fail with 3012 until its admin opens one.</div>';
+    return;
+  }
+  // the pad's own platform first when it happens to be open, then the rest
+  const sorted = [...windows].sort((a, b) => (
+    (b.platformId === pad.platformId ? 1 : 0) - (a.platformId === pad.platformId ? 1 : 0)
+  ));
+  box.innerHTML = sorted.slice(0, 40).map((w, i) => {
+    const on = ccSelected && ccSelected.allowConfig === w.allowConfig;
+    const mine = w.platformId === pad.platformId;
+    return '<div style="display:flex;gap:8px;align-items:center;margin:3px 0;font-size:12px">'
+      + `<button class="btn secondary" data-cc="${i}" style="margin:0;padding:2px 8px;font-size:11px">`
+      + (on ? 'ARMED' : 'USE') + '</button>'
+      + `<span style="color:${on ? 'var(--accent)' : 'inherit'}">${esc(w.platform.name || '(unnamed)')}</span>`
+      + `<code style="font-size:11px">${esc(w.platformId.slice(0, 8))}…</code>`
+      + `<span class="hint" style="font-size:11px">quote ${esc(w.quoteSymbol || (w.quoteMint || '?').slice(0, 8) + '…')}`
+      + (mine ? ' · this pad&rsquo;s platform' : '') + '</span></div>';
+  }).join('') + (sorted.length > 40 ? `<div class="hint" style="font-size:11px">…and ${sorted.length - 40} more</div>` : '');
+  box.querySelectorAll('button[data-cc]').forEach((b) => {
+    b.onclick = () => ccSelect(pad, sorted[+b.dataset.cc]);
+  });
+}
+
+async function ccScan(pad) {
+  const btn = $('raydiumCcScanBtn');
+  if (btn) btn.disabled = true;
+  ccSetStatus('reading every open allow window off the chain…');
+  try {
+    const { findCommunityLaunchWindows } = await import('./solana.js');
+    const { platforms, windows } = await findCommunityLaunchWindows(pad.rpc);
+    // label the quote where the pad already knows it
+    const byMint = new Map(raydiumQuoteList(pad).map((q) => [q.mint, q.symbol]));
+    for (const w of windows) w.quoteSymbol = byMint.get(w.quoteMint) || null;
+    ccLastScan = windows;
+    ccRenderList(pad, windows);
+    ccSetStatus(`${platforms.length} community platform(s) exist, ${windows.length} with a window open right now`);
+    return windows;
+  } catch (e) {
+    ccSetStatus('scan failed: ' + (e?.message || String(e)), true);
+    return null;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/// Build the real launch and simulate it, without signing anything.
+///
+/// Checking that a window exists is not the same as checking the launch works:
+/// the window can shut between the read and the send, and a platform with a
+/// curve rule rejects the whole thing with 6025 unless the params match the
+/// rule exactly. Only the chain can answer that, so ask it.
+async function ccDryRun(pad) {
+  if (!solKeyB58) { ccSetStatus('no SOL key loaded', true); return null; }
+  let quoteMint;
+  try { quoteMint = raydiumQuoteMint(pad); } catch (e) { ccSetStatus(e.message, true); return null; }
+  const { launchRaydium } = await import('./solana.js');
+  const feeBps = pad.token2022 ? +($('raydiumFeeBps')?.value || pad.transferFeeBps || 0) : 0;
+  return launchRaydium({
+    rpcUrl: pad.rpc, dryRun: true, ownerPubkey: solPubkeyFromSecret(solKeyB58),
+    quoteMint, platformId: ccPlatformId(pad),
+    name: $('name')?.value.trim() || 'Dry Run',
+    symbol: $('symbol')?.value.trim() || 'DRY',
+    uri: 'https://example.com/dry-run.json',
+    buyAmountUi: '0', migrateType: 'cpmm',
+    ...(feeBps > 0 ? { token2022: true, transferFeeBps: feeBps } : { token2022: false }),
+    raiseTargetUi: $('raydiumRaise')?.value.trim() || undefined,
+  });
+}
+
+async function ccDryRunClicked(pad) {
+  const btn = $('raydiumCcDryBtn');
+  if (btn) btn.disabled = true;
+  ccSetStatus('building the real launch and simulating it…');
+  try {
+    const r = await ccDryRun(pad);
+    if (!r) return;
+    ccSetStatus(r.ok
+      ? `DRY RUN OK — this launch would go through right now (${r.unitsConsumed} CU, mint would be ${r.mint.slice(0, 8)}…)`
+      : `DRY RUN FAILED — ${r.anchorError ? r.anchorError.replace(/^Program log: /, '') : JSON.stringify(r.err)}`,
+      !r.ok);
+  } catch (e) {
+    ccSetStatus('dry run failed: ' + (e?.message || String(e)), true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/// Poll for a window and fire the launch when one opens.
+function ccToggleWatch(pad) {
+  const btn = $('raydiumCcWatchBtn');
+  if (ccWatcher) {
+    clearInterval(ccWatcher);
+    ccWatcher = null;
+    if (btn) { btn.textContent = 'WATCH FOR A WINDOW'; btn.classList.remove('active'); }
+    ccSetStatus('watch stopped');
+    return;
+  }
+  if (!solKeyB58) { ccSetStatus('no SOL key loaded', true); return; }
+  // Only the platform the pad is aimed at. Firing on whatever window happens to
+  // open would launch the coin on a stranger's launchpad.
+  const target = ccSelected ? ccSelected.platformId : pad.platformId;
+  const tick = async () => {
+    try {
+      const { findCommunityLaunchWindows } = await import('./solana.js');
+      const { windows } = await findCommunityLaunchWindows(pad.rpc);
+      const at = new Date().toLocaleTimeString();
+      const hit = windows.find((w) => w.platformId === target);
+      if (!hit) { ccSetStatus(`${at} · still shut for ${target.slice(0, 8)}… — watching`); return; }
+      // A window being open is necessary, not sufficient — a curve rule can
+      // still reject the launch. Simulate the real thing before firing, the way
+      // the pump pad does, so WATCH never spends a signature on a launch the
+      // chain has already said no to.
+      ccSelected = hit;
+      ccPointAtQuote(pad, hit);
+      const dry = await ccDryRun(pad);
+      if (!dry || !dry.ok) {
+        ccSetStatus(`${at} · window open but the launch would fail — `
+          + (dry?.anchorError ? dry.anchorError.replace(/^Program log: /, '') : JSON.stringify(dry?.err)), true);
+        return;
+      }
+      // stop before launching so a slow launch cannot be fired twice
+      clearInterval(ccWatcher);
+      ccWatcher = null;
+      if (btn) { btn.textContent = 'WATCH FOR A WINDOW'; btn.classList.remove('active'); }
+      ccSetStatus(`${at} · WINDOW OPEN at ${target.slice(0, 8)}… and it simulates clean — launching`);
+      await launch();
+    } catch (e) {
+      ccSetStatus('watch tick failed: ' + (e?.message || String(e)), true);
+    }
+  };
+  ccWatcher = setInterval(tick, CC_WATCH_MS);
+  if (btn) { btn.textContent = 'STOP WATCHING'; btn.classList.add('active'); }
+  ccSetStatus(`watching ${target.slice(0, 8)}… every ${CC_WATCH_MS / 1000}s — will launch as soon as a window opens`);
+  tick();
 }
 
 /// Pull every LaunchLab config that exists on chain and fold the ones this pad
@@ -5194,6 +5401,10 @@ function init() {
       if (item.type.startsWith('image/')) { setImage(item.getAsFile()); break; }
     }
   });
+
+  $('raydiumCcScanBtn').addEventListener('click', () => { if (activePad.community) ccScan(activePad); });
+  $('raydiumCcWatchBtn').addEventListener('click', () => { if (activePad.community) ccToggleWatch(activePad); });
+  $('raydiumCcDryBtn').addEventListener('click', () => { if (activePad.community) ccDryRunClicked(activePad); });
 
   $('launchBtn').onclick = async () => {
     const btn = $('launchBtn');

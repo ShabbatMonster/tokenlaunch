@@ -298,6 +298,21 @@
         </select></div>
       </div>
       <div class="hint" id="raydiumPlatform" style="font-size:11px;margin-top:6px"></div>
+      <div id="raydiumCcRow" class="hidden" style="margin-top:8px">
+        <div class="row">
+          <div><button class="btn secondary" id="raydiumCcScanBtn" style="margin-top:0">SCAN FOR OPEN CC WINDOWS</button></div>
+          <div><button class="btn secondary" id="raydiumCcWatchBtn" style="margin-top:0">WATCH FOR A WINDOW</button></div>
+          <div><button class="btn secondary" id="raydiumCcDryBtn" style="margin-top:0">DRY RUN</button></div>
+        </div>
+        <div class="status" id="raydiumCcStatus" style="font-size:11px"></div>
+        <div id="raydiumCcList" style="margin-top:4px"></div>
+        <div class="hint" style="font-size:11px;margin-top:4px">A community launch only works while the platform&rsquo;s admin
+        has an allow window open, and the platform is never reused &mdash; each community coin gets its own. SCAN lists every
+        window open right now and USE points the launch at that platform instead of this pad&rsquo;s. WATCH polls for a window
+        on the selected platform and <b>fires the launch</b> the moment one opens, so a window that lasts an hour is not missed
+        by twelve minutes. DRY RUN builds the real launch and simulates it &mdash; a window being open is necessary but not
+        sufficient, since a platform curve rule rejects any curve but its own.</div>
+      </div>
       <div class="row" style="margin-top:8px">
         <div style="flex:0 0 190px"><label style="margin-top:0">RAISE TO MIGRATE (<span id="raydiumRaiseSym">SOL</span>)</label>
           <input type="text" id="raydiumRaise" value="" spellcheck="false" placeholder="blank = platform default"></div>
