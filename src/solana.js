@@ -1154,6 +1154,166 @@ export const STONK_CC_TRANSFER_FEE_BPS = 300;
 export const PLATFORM_COMMUNITY_FLAG_OFFSET = 832;
 export const PLATFORM_CONFIG_SIZE = 944;
 
+// --- finding a community launch window -------------------------------------
+//
+// Hardcoding CUqSiwPs would be useless in practice, because StonkFun does not
+// reuse a community platform: each community coin so far has its own
+// PlatformConfig, created shortly before the launch (FALKLANDS and VISIONARY
+// are named after theirs). The next one will be a platform id that does not
+// exist yet, so the only thing worth shipping is discovery.
+//
+// Both halves are a single getProgramAccounts call:
+//
+//   flagged platforms  944 bytes, flag byte 1 at offset 832
+//   open windows       137 bytes, PlatformAllowConfig discriminator
+//
+// The discriminator and the layout come from simulating a CreatePlatformAllowConfig
+// into existence and asking the simulator to hand the account back, which costs
+// nothing and does not need one to exist on chain - as of writing none does.
+// It is sha256("account:PlatformAllowConfig")[..8], and the account is
+// disc(8) + bump(1) + platform(32) + config(32) + 64 reserved.
+//
+// Worth noting what is NOT in there: no wallet, no allowlist, no expiry. An
+// open window is open to anybody, which is why the live community launches were
+// signed by their creator and the new mint alone.
+export const PLATFORM_ALLOW_CONFIG_DISC = Buffer.from('f839228adeeeba4b', 'hex');
+export const PLATFORM_ALLOW_CONFIG_SIZE = 137;
+const ALLOW_PLATFORM_OFFSET = 9;
+const ALLOW_CONFIG_OFFSET = 41;
+
+/// Every PlatformConfig whose community flag is set.
+export async function listCommunityPlatforms(rpcUrl) {
+  const connection = typeof rpcUrl === 'string' ? new Connection(rpcUrl, 'confirmed') : rpcUrl;
+  const accounts = await connection.getProgramAccounts(LAUNCHPAD_PROGRAM, {
+    filters: [
+      { dataSize: PLATFORM_CONFIG_SIZE },
+      { memcmp: { offset: 0, bytes: bs58.encode(Buffer.from('a04e8000f853e6a0', 'hex')) } },
+      { memcmp: { offset: PLATFORM_COMMUNITY_FLAG_OFFSET, bytes: bs58.encode(Buffer.from([1])) } },
+    ],
+  });
+  const str = (d, a, b) => d.slice(a, b).toString('utf8').replace(/\0+$/, '').trim();
+  return accounts.map(({ pubkey, account }) => ({
+    platformId: pubkey.toBase58(),
+    name: str(account.data, 112, 176),
+    web: str(account.data, 176, 432),
+    feeRate: Number(account.data.readBigUInt64LE(104)),
+    creatorFeeRate: Number(account.data.readBigUInt64LE(720)),
+  }));
+}
+
+/// Every allow window currently open, on any platform.
+export async function listOpenAllowWindows(rpcUrl) {
+  const connection = typeof rpcUrl === 'string' ? new Connection(rpcUrl, 'confirmed') : rpcUrl;
+  const accounts = await connection.getProgramAccounts(LAUNCHPAD_PROGRAM, {
+    filters: [
+      { dataSize: PLATFORM_ALLOW_CONFIG_SIZE },
+      { memcmp: { offset: 0, bytes: bs58.encode(PLATFORM_ALLOW_CONFIG_DISC) } },
+    ],
+  });
+  return accounts.map(({ pubkey, account }) => ({
+    allowConfig: pubkey.toBase58(),
+    platformId: new PublicKey(account.data.slice(ALLOW_PLATFORM_OFFSET, ALLOW_PLATFORM_OFFSET + 32)).toBase58(),
+    configId: new PublicKey(account.data.slice(ALLOW_CONFIG_OFFSET, ALLOW_CONFIG_OFFSET + 32)).toBase58(),
+  }));
+}
+
+/// Every community launch that is actually possible right now: a platform with
+/// the flag set AND an open window, resolved down to the quote you would pair
+/// against.
+///
+/// A window on an unflagged platform is deliberately dropped. The program only
+/// consults the allow config when the flag is set, so such a window grants
+/// nothing - reporting it as a launch opportunity would be a lie.
+export async function findCommunityLaunchWindows(rpcUrl) {
+  const connection = typeof rpcUrl === 'string' ? new Connection(rpcUrl, 'confirmed') : rpcUrl;
+  const [platforms, windows] = await Promise.all([
+    listCommunityPlatforms(connection),
+    listOpenAllowWindows(connection),
+  ]);
+  const byId = new Map(platforms.map((p) => [p.platformId, p]));
+  const open = windows.filter((w) => byId.has(w.platformId));
+  if (!open.length) return { platforms, windows: [] };
+
+  // the config names the quote, and the quote is what the launcher has to pick.
+  // LaunchpadConfig carries mintB but NO decimals for it, so those come off the
+  // mint - byte 44 of a Mint account either way, classic or Token-2022.
+  const configs = await connection.getMultipleAccountsInfo(open.map((w) => new PublicKey(w.configId)));
+  const quotes = open.map((w, i) => (configs[i] ? LaunchpadConfig.decode(configs[i].data).mintB : null));
+  const uniq = [...new Set(quotes.filter(Boolean).map((m) => m.toBase58()))];
+  const mints = await connection.getMultipleAccountsInfo(uniq.map((m) => new PublicKey(m)));
+  const decimals = new Map(uniq.map((m, i) => [m, mints[i] ? mints[i].data.readUInt8(44) : null]));
+
+  const resolved = open.map((w, i) => ({
+    ...w,
+    platform: byId.get(w.platformId),
+    quoteMint: quotes[i] ? quotes[i].toBase58() : null,
+    quoteDecimals: quotes[i] ? decimals.get(quotes[i].toBase58()) : null,
+  }));
+  return { platforms, windows: resolved };
+}
+
+// --- what a platform curve rule demands ------------------------------------
+//
+// A rule pins the curve, and a launch whose params differ is rejected with 6025
+// CurveParamNotMatchPlatformRule. So on a platform that has one, the raise is
+// not a choice - it has to be read off the rule and matched exactly.
+//
+// The rule stores a list of constraints, 18 bytes each: a field index, an
+// operator, and a u128 value. The field indices are the BondingCurveParam
+// fields in order, which is what makes them identifiable - a run of 1..12 with
+// canonical LaunchLab values (supply 1e15, totalSellA 793.1e12) is
+// unmistakable.
+//
+// Rather than assume where that run starts, the groups are FOUND: scan for an
+// offset whose field bytes read 1,2,3..12 at stride 18. That is self-validating,
+// so a header change cannot silently produce garbage - it produces no groups,
+// which the caller can report honestly. The rules on StonkFun's two ordinary
+// storefronts (610 and 344 bytes) do NOT match this shape and come back with
+// zero groups rather than a plausible lie; they constrain a sparser set of
+// fields in some other arrangement. That costs nothing here, because the three
+// community platforms have no rule at all.
+const CURVE_RULE_STRIDE = 18;
+const CURVE_RULE_FIELDS = [
+  'migrateType', 'migrateCpmmFeeOn', 'supply', 'totalSellA',
+  'totalFundRaisingB', 'totalLockedAmount', 'cliffPeriod', 'unlockPeriod',
+  'field9', 'field10', 'field11', 'field12',
+];
+
+function decodeCurveRuleGroups(data) {
+  const span = CURVE_RULE_STRIDE * CURVE_RULE_FIELDS.length;
+  const groups = [];
+  for (let o = 0; o + span <= data.length; o++) {
+    let sequential = true;
+    for (let k = 0; k < CURVE_RULE_FIELDS.length; k++) {
+      if (data[o + k * CURVE_RULE_STRIDE] !== k + 1) { sequential = false; break; }
+    }
+    if (!sequential) continue;
+    const group = { offset: o };
+    CURVE_RULE_FIELDS.forEach((name, k) => {
+      const e = o + k * CURVE_RULE_STRIDE;
+      const lo = data.readBigUInt64LE(e + 2);
+      const hi = data.readBigUInt64LE(e + 10);
+      group[name] = { op: data[e + 1], value: ((hi << 64n) | lo).toString() };
+    });
+    groups.push(group);
+    o += span - 1;
+  }
+  return groups;
+}
+
+/// The curve a platform's rule will accept, or null when it has no rule.
+export async function readPlatformCurveRule(rpcUrl, platformId, configId) {
+  const connection = typeof rpcUrl === 'string' ? new Connection(rpcUrl, 'confirmed') : rpcUrl;
+  const address = PublicKey.findProgramAddressSync(
+    [Buffer.from('platform_curve_rule'), new PublicKey(platformId).toBuffer(), new PublicKey(configId).toBuffer()],
+    LAUNCHPAD_PROGRAM,
+  )[0];
+  const info = await connection.getAccountInfo(address).catch(() => null);
+  if (!info) return null;
+  const groups = decodeCurveRuleGroups(info.data);
+  return { address: address.toBase58(), size: info.data.length, groups };
+}
+
 /// Whether a community platform will accept a launch against `quoteMint` right
 /// now.
 ///
@@ -1342,10 +1502,17 @@ export async function launchRaydium(opts) {
   const {
     rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId,
     token2022, transferFeeBps, maxTransferFee, raiseTargetUi, onStatus,
+    // Build and SIMULATE, then stop. The pad uses this to prove a community
+    // window will actually accept the launch before anything is signed - an
+    // allow window is somebody else's to close, so "it was open a moment ago"
+    // is not the same as "it will work". ownerPubkey stands in for secretKey
+    // when dry running, so a simulation never needs the key at all.
+    dryRun, ownerPubkey,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
-  const owner = keypairFromSecret(secretKey);
+  if (!secretKey && !(dryRun && ownerPubkey)) throw new Error('launchRaydium needs a secret key (or ownerPubkey with dryRun)');
+  const owner = secretKey ? keypairFromSecret(secretKey) : new PublicKey(ownerPubkey);
 
   say('loading Raydium SDK…');
   const raydium = await Raydium.load({
@@ -1412,6 +1579,9 @@ export async function launchRaydium(opts) {
   // explicit target also forces the override on, because the whole point of
   // asking for one is that the platform default is not what is wanted.
   let curveOverride = {};
+  // set only when a platform rule pins it; spread order means this cannot ride
+  // along inside curveOverride, which the explicit migrateType below overwrites
+  let ruleMigrateType = null;
   if (raiseTargetUi || curveRuleInfo || !PLATFORM_DEFAULT_QUOTES.has(configInfo.mintB.toBase58())) {
     let raiseB = raiseTargetUi
       ? uiRaiseToRaw(raiseTargetUi, mintBInfo.decimals)
@@ -1423,6 +1593,34 @@ export async function launchRaydium(opts) {
       say(`raise ${raiseTargetUi} — opens at a ${(raiseTargetUi * r.startMcapPerRaise).toPrecision(4)} market cap `
         + `(virtual reserve ${(raiseTargetUi * r.virtualPerRaise).toPrecision(4)}), migrates around `
         + `${(raiseTargetUi * r.finalMcapPerRaise).toPrecision(4)}`);
+    }
+  }
+
+  // Where the platform's rule states the curve outright, the rule wins - a
+  // launch that differs by one lamport is rejected with 6025, so there is
+  // nothing to choose. Only equality constraints (op 0) are honoured; anything
+  // else is left alone rather than guessed at, and the dry run will say so.
+  if (curveRuleInfo) {
+    const rule = decodeCurveRuleGroups(curveRuleInfo.data);
+    const g = rule[0];
+    if (g && [g.supply, g.totalSellA, g.totalFundRaisingB].every((f) => f.op === 0)) {
+      const required = {
+        supply: new BN(g.supply.value),
+        totalSellA: new BN(g.totalSellA.value),
+        totalFundRaisingB: new BN(g.totalFundRaisingB.value),
+      };
+      const asked = curveOverride.totalFundRaisingB;
+      if (raiseTargetUi && asked && !asked.eq(required.totalFundRaisingB)) {
+        say(`this platform's curve rule pins the raise at `
+          + `${Number(required.totalFundRaisingB.toString()) / 10 ** mintBInfo.decimals} — ignoring the `
+          + `${raiseTargetUi} that was asked for, because anything else is rejected`);
+      }
+      curveOverride = { ...curveOverride, ...required };
+      // the rule can pin the migrate target too, and 1 is cpmm
+      if (g.migrateType.op === 0) ruleMigrateType = g.migrateType.value === '0' ? 'amm' : 'cpmm';
+    } else if (!rule.length) {
+      say(`this platform has a curve rule (${curveRuleInfo.data.length} bytes) in a shape this tool cannot read — `
+        + 'dry run first, because a mismatch is rejected with 6025');
     }
   }
 
@@ -1452,7 +1650,7 @@ export async function launchRaydium(opts) {
       // any pair and matches what live LaunchLab pools actually migrate to (verified
       // on-chain: both the letsbonk.fun/TRUMP and raydium.io/NVDAx example pools
       // migrated with migrateType=1/cpmm, not 0/amm).
-      migrateType: migrateType || 'cpmm',
+      migrateType: ruleMigrateType || migrateType || 'cpmm',
       // Some platforms mint the launched token as Token-2022 with a transfer-fee
       // extension, and their curve rule (below) *requires* it — the fee tier is
       // one of the fields the rule pins. StonkFun's ordinary storefronts are
@@ -1588,6 +1786,33 @@ export async function launchRaydium(opts) {
   // rejects with a bare `undefined` on timeout/failure — no message, no logs).
   // We send here, then confirm ourselves over plain HTTP polling below, which
   // is slower per call but gives real, attributable errors.
+  // A dry run stops here, having built exactly what a real launch would send.
+  // Simulating rather than sending is what makes the window check meaningful:
+  // the allow config has to exist AT THE MOMENT the program runs, and only the
+  // chain can confirm that.
+  if (dryRun) {
+    say('simulating the launch…');
+    const txs = builder ? [(await builder.buildV0()).transaction] : [];
+    if (!txs.length) throw new Error('nothing was built to simulate');
+    const sim = await connection.simulateTransaction(txs[0], {
+      sigVerify: false, replaceRecentBlockhash: true,
+    });
+    const logs = sim.value.logs || [];
+    const anchorErr = logs.find((l) => /AnchorError|Error Code:/.test(l)) || null;
+    return {
+      dryRun: true,
+      ok: !sim.value.err,
+      err: sim.value.err || null,
+      mint: pair.publicKey.toBase58(),
+      platformId: platformId ? String(platformId) : null,
+      allowConfig: allowConfigId ? allowConfigId.toBase58() : null,
+      curveRule: curveRuleId ? curveRuleId.toBase58() : null,
+      unitsConsumed: sim.value.unitsConsumed ?? null,
+      anchorError: anchorErr,
+      logs,
+    };
+  }
+
   say('sending launch tx…');
   let sent;
   try {
