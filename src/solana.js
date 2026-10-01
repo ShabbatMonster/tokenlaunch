@@ -1334,6 +1334,13 @@ export async function launchRaydium(opts) {
       configId, configInfo,
       mintBDecimals: mintBInfo.decimals,
       txVersion: TxVersion.V0,
+      // Spend the quote from WHEREVER it is held, not only from an associated
+      // account. The SDK defaults associatedOnly to true, which means a wallet
+      // holding the quote in a non-ATA - common for anything received from an
+      // exchange or an airdrop - fails with "cannot found mintB(...) buy token
+      // accounts" even though the balance is right there. Seen with 4,721 of
+      // 6GmAFSYs... sitting in EqvKTd3r... while its ATA did not exist at all.
+      associatedOnly: false,
       slippage: new BN(100), // 1%
       buyAmount: doBuy ? buyRaw : new BN(1),
       createOnly: !doBuy, // no dev buy -> create the mint only
