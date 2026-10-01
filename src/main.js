@@ -4551,12 +4551,22 @@ async function paintRaydiumPlatform(pad) {
   const el = $('raydiumPlatform');
   if (!el) return;
   if (pad.family !== 'raydium' || !pad.platformId) { el.textContent = ''; return; }
-  const key = pad.rpc + ':' + pad.platformId;
+  // raydiumQuoteMint throws on a half-typed custom mint; here that just means
+  // "no quote chosen yet", not an error worth showing
+  let quote = null;
+  try { quote = raydiumQuoteMint(pad); } catch { quote = null; }
+  const key = pad.rpc + ':' + pad.platformId + ':' + (quote || '');
   if (!platformCache.has(key)) {
     el.textContent = 'reading the platform config…';
     try {
-      const { readPlatformConfig } = await import('./solana.js');
-      platformCache.set(key, await readPlatformConfig(pad.rpc, pad.platformId));
+      const { readPlatformConfig, platformAllowWindow } = await import('./solana.js');
+      const p = await readPlatformConfig(pad.rpc, pad.platformId);
+      // only a flagged platform has a window to check, and the window is per
+      // quote, so it cannot be answered without one
+      const w = p?.community && quote
+        ? await platformAllowWindow(pad.rpc, pad.platformId, quote).catch(() => null)
+        : null;
+      platformCache.set(key, { ...p, window: w });
     } catch (e) {
       platformCache.set(key, { error: e.message });
     }
@@ -4565,17 +4575,28 @@ async function paintRaydiumPlatform(pad) {
   }
   const p = platformCache.get(key);
   if (!p || p.error) {
-    el.innerHTML = `<span style="color:var(--warn,#c90)">could not read the platform config</span>`
+    el.innerHTML = '<span style="color:var(--warn,#c90)">could not read the platform config</span>'
       + ` — <code>${esc(pad.platformId.slice(0, 8))}…</code>${p?.error ? ' · ' + esc(p.error) : ''}`;
     return;
   }
-  el.innerHTML = p.community
-    ? `<span style="color:var(--accent)">COMMUNITY COIN ✓</span> platform <code>${esc(p.platformId.slice(0, 8))}…</code>`
-      + ` "${esc(p.name)}" — this one carries the CC flag, so the launch gets the badge.`
-      + ` No curve rule exists for it either, so the raise and the transfer fee are free to set.`
-    : `<span style="color:var(--muted,#888)">standard coin</span> — platform <code>${esc(p.platformId.slice(0, 8))}…</code>`
-      + ` "${esc(p.name)}" has the CC flag clear, so this launch will NOT be badged.`
-      + ` Pick the CC pad for that.`;
+  if (!p.community) {
+    el.innerHTML = '<span style="color:var(--muted,#888)">standard coin</span>'
+      + ` — platform <code>${esc(p.platformId.slice(0, 8))}…</code> "${esc(p.name)}" has the CC flag clear,`
+      + ' so this launch will NOT be badged.';
+    return;
+  }
+  // A flagged platform is the only one that can be badged, and also the only
+  // one that can refuse the launch outright. Say which, because the difference
+  // is the whole question.
+  el.innerHTML = p.window && p.window.open
+    ? '<span style="color:var(--accent)">COMMUNITY COIN ✓</span>'
+      + ` platform <code>${esc(p.platformId.slice(0, 8))}…</code> "${esc(p.name)}" carries the CC flag and its`
+      + ' admin has an allow window OPEN for this quote, so the launch will go through and be badged.'
+    : '<span style="color:var(--warn,#c90)">CC platform, but CLOSED</span>'
+      + ` — <code>${esc(p.platformId.slice(0, 8))}…</code> "${esc(p.name)}" carries the CC flag, which means it`
+      + ' also requires a <code>platform_allow_config</code> account, and none exists for this quote. Only the'
+      + ' platform admin can create one (the platform id is a PDA of their key), so a launch here fails until'
+      + ' they open a window. Use the ordinary pad unless you know one is open.';
 }
 
 /// Pull every LaunchLab config that exists on chain and fold the ones this pad

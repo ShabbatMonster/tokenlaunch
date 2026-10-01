@@ -1115,10 +1115,22 @@ export const STONK_PLATFORM_ID_ALT2 = '4E876qZTE9FJMrBzgVtBrSrzz2TLivB5Y5QXPjB4g
 //
 //   1. The badge cannot be reached by changing the quote, the curve, the raise
 //      or the transfer fee. It is a property of the platform you launch under.
-//   2. Launching under a badged platform IS permissionless. Replaying each of
-//      the three `initialize` transactions shows the signers were the creator
-//      and the new mint keypair only - no platform admin - and no
-//      `platform_curve_rule` PDA exists for any of them, so nothing gates it.
+//   2. It is GATED, and an earlier version of this comment had that wrong. The
+//      three initialize transactions are signed by the creator and the new mint
+//      keypair only, with no platform admin among the signers, which looked like
+//      proof that anyone could launch there. It is not. What the flag byte
+//      actually switches on is a second trailing account,
+//      platform_allow_config, which the program requires to EXIST - and only
+//      the platform admin can create it, because a platform id is a PDA of its
+//      admin's key: pda(['platform_config', admin]). CUqSiwPs is
+//      pda(['platform_config', 8sLEFiHR...]).
+//
+//      So the admin opens a window, someone launches inside it, and the admin
+//      closes it. For the CC coin that window was open for about 70 minutes on
+//      2026-10-01: CreatePlatformAllowConfig at 17:51, the launch at 18:47,
+//      ClosePlatformAllowConfig at 19:00. No allow config exists for ANY
+//      (platform, config) pairing on chain as of now, so no launch under any of
+//      the three is currently possible. See platformAllowWindow().
 //
 // The config is not a separate thing to choose either: it is the per-quote PDA,
 // so picking the quote picks it (AMC resolves to 7j4zuEkW..., WSOL to
@@ -1141,6 +1153,26 @@ export const STONK_CC_TRANSFER_FEE_BPS = 300;
 /// padding in a 944-byte PlatformConfig.
 export const PLATFORM_COMMUNITY_FLAG_OFFSET = 832;
 export const PLATFORM_CONFIG_SIZE = 944;
+
+/// Whether a community platform will accept a launch against `quoteMint` right
+/// now.
+///
+/// A flagged platform needs a platform_allow_config account for the exact
+/// (platform, config) pairing, and that account has to exist - unlike the curve
+/// rule, an empty one is rejected. Only the platform's admin can create it,
+/// because the platform id is itself a PDA of the admin's key
+/// (pda(['platform_config', admin])), so this is a window someone else opens
+/// and closes rather than anything a launcher can arrange.
+export async function platformAllowWindow(rpcUrl, platformId, quoteMint) {
+  const connection = typeof rpcUrl === 'string' ? new Connection(rpcUrl, 'confirmed') : rpcUrl;
+  const configId = getPdaLaunchpadConfigId(LAUNCHPAD_PROGRAM, new PublicKey(quoteMint), 0, 0).publicKey;
+  const allowConfig = PublicKey.findProgramAddressSync(
+    [Buffer.from('platform_allow_config'), new PublicKey(platformId).toBuffer(), configId.toBuffer()],
+    LAUNCHPAD_PROGRAM,
+  )[0];
+  const info = await connection.getAccountInfo(allowConfig).catch(() => null);
+  return { configId: configId.toBase58(), allowConfig: allowConfig.toBase58(), open: !!info };
+}
 
 /// Read a platform config and say whether launches under it get the CC badge.
 ///
@@ -1347,6 +1379,35 @@ export async function launchRaydium(opts) {
     : null;
   const curveRuleInfo = curveRuleId ? await connection.getAccountInfo(curveRuleId).catch(() => null) : null;
 
+  // Platforms with the flag byte set also want a platform_allow_config, and the
+  // program requires that one to EXIST - an empty account is accepted for the
+  // curve rule but not for this. Checked up front because the alternative is
+  // paying for a transaction that cannot succeed: the last CC attempt failed on
+  // chain with 6018, and with the account order corrected it would have failed
+  // with 3012 instead. Neither is worth a signature.
+  const platformInfo = platformId ? await connection.getAccountInfo(new PublicKey(platformId)) : null;
+  const wantsAllowConfig = platformInfo?.data?.[PLATFORM_COMMUNITY_FLAG_OFFSET] === 1;
+  const allowConfigId = wantsAllowConfig
+    ? PublicKey.findProgramAddressSync(
+      [Buffer.from('platform_allow_config'), new PublicKey(platformId).toBuffer(), configId.toBuffer()],
+      programId,
+    )[0]
+    : null;
+  if (allowConfigId && !(await connection.getAccountInfo(allowConfigId).catch(() => null))) {
+    // The platform admin opens and closes this window per launch. StonkFun's CC
+    // platform had one open for about 70 minutes on 2026-10-01 - created 17:51,
+    // used by their one community coin at 18:47, closed at 19:00 - and the
+    // launch that failed went out at 19:12, twelve minutes after it shut.
+    const admin = new PublicKey(platformInfo.data.slice(16, 48)).toBase58();
+    throw new Error(
+      `this platform (${String(platformId).slice(0, 8)}…) only accepts launches while its admin has an allow `
+      + `window open, and none is open for this quote right now. The window is a platform_allow_config account `
+      + `at ${allowConfigId.toBase58().slice(0, 8)}… which does not exist; only the platform admin can create it, `
+      + `because the platform id is a PDA of that admin's key. Launch on the ordinary pad instead, or pair against `
+      + `a quote whose window is open. (admin fee wallet ${admin.slice(0, 8)}…)`,
+    );
+  }
+
   // A raise target stated by the caller wins; otherwise the old constant. An
   // explicit target also forces the override on, because the whole point of
   // asking for one is that the platform default is not what is wanted.
@@ -1468,20 +1529,45 @@ export async function launchRaydium(opts) {
     }
   }
 
+  // --- the trailing accounts the program pops, in the order it pops them ----
+  //
+  // initialize reads its optional accounts positionally off the end of the
+  // account list, and it advances the cursor ONLY for the ones the platform
+  // actually uses. From the program binary there are two such utils,
+  // platform_allow_config.rs and platform_curve_rule.rs, in that order:
+  //
+  //   let mut i = 0;
+  //   if <platform wants an allow config> { allow = remaining[i]; i += 1 }
+  //   if <platform wants a curve rule>    { rule  = remaining[i]; i += 1 }
+  //
+  // which is why the count is not fixed and why passing a spare account is not
+  // harmless. On an ordinary platform exactly one is expected and it is the
+  // curve rule; on a platform that wants an allow config, the allow config
+  // comes FIRST and the curve rule moves to the second slot.
+  //
+  // Getting that wrong is how a CC launch failed with 6018
+  // NotEnoughRemainingAccounts: we passed the curve rule alone, the program
+  // took it as the allow config, then looked for a second account that was not
+  // there. Pushing both unconditionally fails the other way round - an ordinary
+  // platform would read the allow config as its curve rule and reject it with
+  // 6024 InvalidPlatformCurveRule - so this has to follow the platform, and the
+  // platform says so in the flag byte at PLATFORM_COMMUNITY_FLAG_OFFSET.
   {
-    const curveRule = curveRuleId;
-    // Pass it whether or not it exists. The program reads this slot to decide
-    // if the platform restricts curve params, so an absent rule still has to be
-    // handed over as an empty account — StonkFun/DOUBLEZERO has no rule and 34
-    // live pools on it, yet omitting the slot still fails with 6018. Harmless
-    // for platforms that never use rules: raydium.io and letsbonk.fun both
-    // simulate fine with the extra account attached.
-    if (curveRule && builder) {
-      say(curveRuleInfo ? 'platform has a curve rule — attaching it…' : 'attaching the curve-rule slot…');
+    // The curve rule is passed whether or not it exists: the program reads the
+    // slot to decide whether the platform restricts curve params, so an absent
+    // rule still has to be handed over as an empty account — StonkFun/DOUBLEZERO
+    // has no rule and 34 live pools on it, yet omitting the slot still fails
+    // with 6018. The allow config is different; it has to exist, which is why
+    // it is checked above rather than here.
+    const extra = [allowConfigId, curveRuleId].filter(Boolean);
+    if (extra.length && builder) {
+      say(allowConfigId
+        ? 'platform wants an allow config — attaching it ahead of the curve-rule slot…'
+        : (curveRuleInfo ? 'platform has a curve rule — attaching it…' : 'attaching the curve-rule slot…'));
       let patched = 0;
       for (const ix of builder.instructions) {
         if (!ix.programId.equals(programId)) continue;
-        ix.keys.push({ pubkey: curveRule, isSigner: false, isWritable: false });
+        for (const pubkey of extra) ix.keys.push({ pubkey, isSigner: false, isWritable: false });
         patched++;
       }
       if (patched) {
