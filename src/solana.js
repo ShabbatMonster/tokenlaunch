@@ -1055,12 +1055,20 @@ import { pumpTrade, pumpCurve } from './pump.js';
 export const RAYDIUM_PLATFORM_ID = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
 export const BONK_PLATFORM_ID = 'FfYek5vEz23cMkWsdJwG2oa6EphsvXSHrGpdALN4g6W1';
 
-// stonkfun.xyz runs two platform ids against the same program and configs. Both
-// decode to a PlatformConfig named "StonkFun" with the same fee wallet; the
-// first is the busier of the two (10,665 pools vs 3,071) and is what a launch
-// paired against a community token used, so it is the default here.
-export const STONK_PLATFORM_ID = '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt';
-export const STONK_PLATFORM_ID_ALT = '4E876qZTE9FJMrBzgVtBrSrzz2TLivB5Y5QXPjB4gZL7';
+// stonkfun.xyz runs THREE platform ids against the same program and configs.
+// All three decode to a PlatformConfig named "StonkFun" and are identical field
+// for field - same fee wallets, same 10000 feeRate, same cpConfigId - differing
+// only in `epoch`, which is just when each was last written.
+//
+// The default is the one stonkfun's community-coin launches use: the coin at
+// 8svf3G1X... was launched under CUqSiwPs, while the ordinary one at
+// 2uBW1oWE... used 6BwHHDg3. Both land on the same LaunchpadConfig
+// (7j4zuEkW...) with the same curve - 1B supply, 793.1M on the curve - so the
+// platform id is which storefront the launch is attributed to rather than a
+// different set of economics.
+export const STONK_PLATFORM_ID = 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi';
+export const STONK_PLATFORM_ID_ALT = '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt';
+export const STONK_PLATFORM_ID_ALT2 = '4E876qZTE9FJMrBzgVtBrSrzz2TLivB5Y5QXPjB4gZL7';
 
 /// Every quote mint that LaunchLab will actually accept, read from the chain
 /// rather than from any launchpad's allowlist.
