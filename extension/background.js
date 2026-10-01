@@ -246,9 +246,29 @@ function trimMeteora(info) {
   };
 }
 
+/// Where progress goes.
+///
+/// The panel lives in a tab and the popup does not, so a migration driven from
+/// the popup had nowhere to report to. Both are fed here, and the last line is
+/// persisted as well: the popup closes the moment it loses focus, while the
+/// worker keeps going, so reopening it has to be able to say what happened
+/// rather than show a blank box.
+///
+/// Every send is fire-and-forget. A closed popup or a navigated tab makes
+/// sendMessage reject, and that must never interrupt a migration in flight.
+function statusSink(tabId) {
+  return (text) => {
+    if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'pm:status', text }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'pm:status', text }).catch(() => {});
+    chrome.storage.local.set({ lastStatus: { text, at: Date.now() } }).catch(() => {});
+  };
+}
+
 // --- messages ----------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // our own status broadcast, which the popup listens for - not a request
+  if (msg?.type === 'pm:status') return false;
   (async () => {
     switch (msg?.type) {
       case 'pm:getSettings': {
@@ -278,11 +298,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // asking the chain. Being wrong about a site's DOM is then cheap.
         const rpcUrl = await healthyRpc(await getSettings());
         const user = await addressOrNull();
-        for (const mint of (msg.candidates || []).slice(0, 8)) {
+        for (const mint of (msg.candidates || []).slice(0, 24)) {
           const info = await identify(rpcUrl, mint, user);
           if (info) { sendResponse({ ok: true, mint, info }); return; }
         }
-        sendResponse({ ok: false, error: 'nothing on this page is a coin on pump.fun, Meteora or Raydium' });
+        sendResponse({ ok: false, error: (msg.candidates || []).length
+          ? 'none of the ' + (msg.candidates || []).length + ' addresses here is a bonding curve on pump.fun, Meteora DBC, Raydium LaunchLab or Pons'
+          : 'no address found — open the popup and paste the mint' });
         return;
       }
       case 'pm:preview': {
@@ -332,7 +354,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const secretKey = await getKey();
           if (!secretKey) { sendResponse({ ok: false, error: 'no key imported yet' }); return; }
           const tabId = sender.tab?.id ?? null;
-          const say = (m) => { if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'pm:status', text: m }).catch(() => {}); };
+          const say = statusSink(tabId);
           sendResponse({ ok: true, result: await swapIntoQuote({
             rpcUrl, secretKey, quoteMint: msg.quoteMint, lamports: msg.lamports,
             slippageBps: msg.slippageBps ?? 100, onStatus: say,
@@ -351,7 +373,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const secretKey = await getKey();
           if (!secretKey) { sendResponse({ ok: false, error: 'no key imported yet' }); return; }
           const tabId = sender.tab?.id ?? null;
-          const say = (m) => { if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'pm:status', text: m }).catch(() => {}); };
+          const say = statusSink(tabId);
 
           if (msg.venue === 'pons') {
             const privateKey = await getEvmKey();
@@ -363,7 +385,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             return;
           }
           if (msg.venue === 'meteora') {
-            sendResponse({ ok: true, result: await migrateMeteora({ rpcUrl, secretKey, mint: msg.mint, onStatus: say }) });
+            const result = await migrateMeteora({ rpcUrl, secretKey, mint: msg.mint, onStatus: say });
+            await chrome.storage.local.set({ lastResult: { ok: true, ...result, at: Date.now() } }).catch(() => {});
+            sendResponse({ ok: true, result });
             return;
           }
           if (msg.venue === 'raydium') {
@@ -379,9 +403,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               route: msg.route || settings.route,
               tipLamports: msg.tipLamports ?? settings.tipLamports, onStatus: say,
             }) };
+          await chrome.storage.local.set({ lastResult: { ok: true, ...res, at: Date.now() } }).catch(() => {});
           sendResponse({ ok: true, result: res });
         } catch (e) {
-          sendResponse({ ok: false, error: e?.message || String(e) });
+          const error = e?.message || String(e);
+          await chrome.storage.local.set({ lastResult: { ok: false, error, at: Date.now() } }).catch(() => {});
+          sendResponse({ ok: false, error });
         } finally {
           migrateInFlight = false;
         }

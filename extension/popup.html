@@ -3,27 +3,63 @@
 <head>
 <meta charset="utf-8">
 <style>
-  body { width: 260px; margin: 0; padding: 14px; background: #0b0d10; color: #e6e9ee;
+  body { width: 320px; margin: 0; padding: 14px; background: #0b0d10; color: #e6e9ee;
          font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; }
   h1 { font-size: 11px; letter-spacing: 2px; margin: 0 0 10px; }
-  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; }
   .kv dt { color: #8a93a1; } .kv dd { margin: 0; word-break: break-all; }
-  .ok { color: #4ade80; } .warn { color: #fbbf24; }
-  button { margin-top: 12px; width: 100%; padding: 9px; border: none; border-radius: 8px;
+  .ok { color: #4ade80; } .warn { color: #fbbf24; } .bad { color: #f87171; }
+  .muted { color: #8a93a1; }
+  button { margin-top: 10px; width: 100%; padding: 9px; border-radius: 8px;
            background: #1a1e24; color: #e6e9ee; border: 1px solid #262b33;
            font: inherit; letter-spacing: 1px; cursor: pointer; }
-  button:hover { border-color: #3b4453; }
-  p { color: #8a93a1; margin: 10px 0 0; font-size: 11px; line-height: 1.5; }
+  button:hover:not(:disabled) { border-color: #3b4453; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.go { background: #16281c; border-color: #2a5338; }
+  input { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 7px 8px;
+          background: #0f1216; color: #e6e9ee; border: 1px solid #262b33;
+          border-radius: 6px; font: inherit; }
+  input:focus { outline: none; border-color: #3b4453; }
+  hr { border: none; border-top: 1px solid #1b1f26; margin: 12px 0; }
+  p { color: #8a93a1; margin: 8px 0 0; font-size: 11px; line-height: 1.5; }
+  .row { display: flex; gap: 6px; }
+  .row button { flex: 1; }
+  #info { margin-top: 10px; display: none; }
+  #status { margin-top: 8px; font-size: 11px; min-height: 1.5em; word-break: break-word; }
+  a { color: #7dd3fc; }
 </style>
 </head>
 <body>
-  <h1>PUMP MIGRATE</h1>
+  <h1>MIGRATE</h1>
   <dl class="kv">
     <dt>wallet</dt><dd id="who">…</dd>
     <dt>rpc</dt><dd id="rpc">…</dd>
   </dl>
+
+  <hr>
+
+  <!-- A coin that has bonded but not migrated has no pool, so no DEX lists it
+       and there is no page for the content script to read. Pasting the address
+       is the only way to reach one. -->
+  <input id="ca" placeholder="paste a mint (or 0x address)" spellcheck="false" autocomplete="off">
+  <button id="resolve">LOOK IT UP</button>
+
+  <div id="info">
+    <dl class="kv">
+      <dt>venue</dt><dd id="venue">—</dd>
+      <dt>state</dt><dd id="state">—</dd>
+      <dt>quote</dt><dd id="quote">—</dd>
+      <dt>raised</dt><dd id="raised">—</dd>
+    </dl>
+    <input id="spend" placeholder="first buy amount (optional)" spellcheck="false" autocomplete="off">
+    <button id="migrate" class="go">MIGRATE</button>
+  </div>
+
+  <div id="status"></div>
+
   <button id="options">OPTIONS</button>
-  <p>Open a coin on axiom.trade and use the MIGRATE button next to VAMP.</p>
+  <p id="foot">On a coin page at axiom.trade the MIGRATE button appears next to VAMP.
+  Paste an address here for anything with no page yet.</p>
 </body>
 <script src="popup.js"></script>
 </html>

@@ -1,13 +1,39 @@
-# pump migrate
+# curve migrate
 
-A Chrome extension that puts a **MIGRATE** button on a coin's page on
-[axiom.trade](https://axiom.trade). Click it, and a panel tells you what state the
-coin is in — read off the chain, not off the page. On pump.fun you can also type a
-buy amount and take the **first buy off the migration, in the same transaction**.
+A Chrome extension that puts a **MIGRATE** button on a coin's page, and a paste-box
+in its toolbar popup. Either way a panel tells you what state the coin is in — read
+off the chain, not off the page. On pump.fun you can also type a buy amount and take
+the **first buy off the migration, in the same transaction**.
 
 A bonding curve that fills does not migrate itself. The venue's own keeper normally
 cranks it within seconds; when it doesn't, the coin sits there untradeable with
 everything it raised locked in the curve. This is for those.
+
+## Which venue
+
+The venue is never assumed from the site you are on; the worker asks the chain and
+takes the first that answers.
+
+| venue | migrate | first buy in the same tx |
+| --- | --- | --- |
+| pump.fun → PumpSwap | yes | **yes** |
+| Meteora DBC → DAMM v2 | yes | no — a different program from PumpSwap |
+| Pons v2 → Uniswap v4 | yes | **yes** |
+| Raydium LaunchLab | no — permissioned, only Raydium can call it | — |
+
+Where there is no same-tx buy, you are still the only one who can open the pool, so
+nothing can trade ahead of your migration; the exposure is the slot after it, not
+the slot it lands in.
+
+## Reaching a coin with no page
+
+The button needs a page, and **a curve that has bonded but not migrated has no AMM
+pool — so the DEX trackers often do not list it at all.** That is exactly the coin
+this tool is for, which made the button useless in the case that mattered most.
+
+So the popup takes a pasted address and runs the whole thing itself, with no page
+involved. The content script also runs on solscan, dexscreener, birdeye, jup.ag,
+gmgn, photon, explorer and solana.fm, not only axiom.trade.
 
 > The j7tracker deploy fallback that used to live here has been removed. The
 > extension now does one job.

@@ -33,7 +33,13 @@ const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 /// Pons lives on Robinhood Chain, so a coin can be an 0x address as easily as a
 /// base58 one. The worker tells them apart by shape and asks the right chain.
 const EVM_ADDR = /^0x[0-9a-fA-F]{40}$/;
-const MINT_IN_URL = /(?:solscan\.io\/token\/|pump\.fun\/(?:coin\/)?|dexscreener\.com\/solana\/|birdeye\.so\/(?:solana\/)?token\/|explorer\.solana\.com\/address\/|solana\.fm\/address\/)([1-9A-HJ-NP-Za-km-z]{32,44})/;
+/// Where a coin's address sits in a link, per site.
+///
+/// The second half matters more than it looks. A curve that has bonded but not
+/// migrated has no AMM pool, so the DEX trackers in the first half often do not
+/// list it at all - which is exactly the coin this tool is for. These are the
+/// places it still shows up.
+const MINT_IN_URL = /(?:solscan\.io\/token\/|pump\.fun\/(?:coin\/)?|dexscreener\.com\/solana\/|birdeye\.so\/(?:solana\/)?token\/|explorer\.solana\.com\/address\/|solana\.fm\/address\/|axiom\.trade\/(?:meme|t|token)\/|jup\.ag\/(?:tokens|swap)\/|gmgn\.ai\/sol\/token\/|photon-sol\.tinyastro\.io\/en\/[^/]+\/|met\.fun\/(?:token\/)?|meteora\.ag\/[^/]*\/)([1-9A-HJ-NP-Za-km-z]{32,44})/;
 
 /// Buttons Axiom already puts in the coin header. Ours goes next to the first
 /// one found; VAMP is the one in the screenshot this was built from.
@@ -87,7 +93,12 @@ function candidateMints() {
   for (const node of document.querySelectorAll('[data-mint],[data-address],[data-token],[data-token-address]')) {
     for (const attr of ['data-mint', 'data-address', 'data-token', 'data-token-address']) add(node.getAttribute(attr));
   }
-  return out.slice(0, 8);
+  // Capped because each candidate costs the worker a round of chain reads, but
+  // NOT at 8: a Meteora or LaunchLab mint has no 'pump' suffix to sort it to
+  // the front, and a busy page carries plenty of other base58 (wallets, other
+  // tokens in a list). At 8 the real mint could be cut off the end, which read
+  // exactly like the venue being unsupported.
+  return out.slice(0, 24);
 }
 
 // --- mounting ----------------------------------------------------------------
@@ -371,7 +382,16 @@ async function preview() {
   paintButton();
   if (!state.mint || state.info?.state !== 'migratable') { setText('hint', ''); return; }
   if (!state.info?.canBuy) {
-    setText('hint', 'Meteora migrations open a DAMM v2 pool; the first buy is not wired for that venue yet.');
+    // Say which venue and why, rather than naming Meteora whatever the coin is.
+    // The reason differs: a DBC migration opens a DAMM v2 pool, a different
+    // program from PumpSwap, so the same-tx buy does not carry over; LaunchLab
+    // cannot be migrated by us at all.
+    setText('hint', {
+      meteora: 'Migrating opens a DAMM v2 pool — a different program from PumpSwap, so the same-tx first buy '
+        + 'does not carry over. You are still the only one who can open the pool, so nothing can trade it before '
+        + 'this lands; buy straight after.',
+      raydium: 'Raydium LaunchLab migration is permissioned — only Raydium can call it.',
+    }[state.info.venue] || 'This venue can be migrated but not bought in the same transaction.');
     return;
   }
   const spend = spendRaw();
