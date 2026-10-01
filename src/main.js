@@ -1200,6 +1200,25 @@ const PADS = [
     token2022: true, transferFeeBps: 100, transferFeeChoices: [100, 300],
   },
   {
+    // StonkFun's "community coin" shape, copied from a live one
+    // (8svf3G1X..., "Commie Coin", quoted in AMC) rather than invented. It is
+    // the same program, same curve and same configs as the pad above; what
+    // differs is the platform id, a 300 bps transfer fee on the mint, and a
+    // TOKEN-2022 quote - which is why the launcher patches the quote's token
+    // program slot before sending. See STONK_CC_PLATFORM_ID in solana.js.
+    id: 'stonk-cc-sol', label: 'StonkFun · CC (community coin)', vm: 'sol', enabled: true, family: 'raydium',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://www.stonkfun.xyz/token/${t}`,
+    nativeSymbol: 'SOL',
+    quotes: STONK_QUOTES,
+    platformId: 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi', // StonkFun, community coins
+    // the live CC carries 300 bps; the typical coin carries no transfer fee at
+    // all, so this is the one field where CC is not merely "the same but
+    // elsewhere"
+    token2022: true, transferFeeBps: 300, transferFeeChoices: [100, 300],
+  },
+  {
     // bonk.fun — the SAME LaunchLab program + configs as raydium-sol above (bonk.fun
     // is just a LaunchLab frontend), launched with letsbonk.fun's platformId instead
     // of Raydium's. That's why stock pairing (xStocks quotes) landed here too the
@@ -2810,6 +2829,7 @@ async function launchSol(pad, inp) {
       // pads whose platform pins a Token-2022 transfer fee (StonkFun) declare it
       token2022: !!pad.token2022,
       transferFeeBps: pad.token2022 ? +($('raydiumFeeBps')?.value || pad.transferFeeBps || 100) : undefined,
+      raiseTargetUi: $('raydiumRaise')?.value.trim() || undefined,
       onStatus: (m) => setStatus(m),
     });
     rememberLaunch(pad, res.mint, inp.symbol);
@@ -4410,6 +4430,54 @@ function updateClmmUI(pad) {
   $('clmmSeedSym').textContent = sym;
 }
 
+// LaunchLab's curve is pump.fun's, measured off live pools rather than assumed:
+// the virtual quote reserve is 0.352951x the raise (pump: 30/85 = 0.352941), the
+// opening market cap 0.328931x, and migration lands at 4.8333x. The raise is the
+// only dial; everything else follows from it.
+const LAUNCHLAB_RATIOS = { virtual: 0.352951, startMcap: 0.328931, finalMcap: 4.8333 };
+
+/// Say what a raise target actually produces. The "30" and the opening market
+/// cap are not the same number, and quoting one as the other is the easiest way
+/// to be wrong about where a coin opens.
+function paintRaydiumShape(pad) {
+  const hint = $('raydiumShape');
+  if (!hint) return;
+  const sym = $('raydiumRaiseSym')?.textContent || 'quote';
+  const raise = +($('raydiumRaise')?.value.trim() || '');
+  if (!(raise > 0)) {
+    hint.textContent = 'blank uses the platform default raise. Set one, or press PUMP ECONOMICS for 85 SOL worth of the quote.';
+    return;
+  }
+  const r = LAUNCHLAB_RATIOS;
+  hint.innerHTML = `virtual reserve <b>${(raise * r.virtual).toPrecision(4)}</b> ${esc(sym)} `
+    + `(the "30" in pump's 30/85) · opens at a <b>${(raise * r.startMcap).toPrecision(4)}</b> ${esc(sym)} market cap `
+    + `· migrates around <b>${(raise * r.finalMcap).toPrecision(4)}</b> (${(r.finalMcap / r.startMcap).toFixed(1)}x the open)`;
+}
+
+/// Fill the raise with 85 SOL worth of the selected quote, priced live through
+/// Jupiter - the same thing PUMP ECONOMICS does on the Meteora pad.
+async function applyRaydiumPumpEconomics(pad) {
+  const hint = $('raydiumShape');
+  const btn = $('raydiumPumpEconBtn');
+  const list = raydiumQuoteList(pad);
+  const q = list.find((x) => x.symbol === $('raydiumQuoteSelect').value) || list[0];
+  const isCustom = q.mint === 'custom';
+  const mint = isCustom ? $('raydiumQuoteCustom').value.trim() : q.mint;
+  if (!isSolAddress(mint)) { hint.innerHTML = '<span class="err">pick a quote first</span>'; return; }
+  btn.disabled = true;
+  hint.textContent = 'pricing 85 SOL in that quote…';
+  try {
+    const { solEquivalent } = await import('./solana.js');
+    const amount = await solEquivalent(pad.rpc, mint, 85);
+    $('raydiumRaise').value = String(+amount.toPrecision(10));
+    paintRaydiumShape(pad);
+  } catch (e) {
+    hint.innerHTML = `<span class="err">${esc(e?.message || String(e))}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // Raydium: populate the quote dropdown, toggle the custom-mint field + dev-buy symbol
 // Quote mints discovered by SCAN, keyed by pad id. These are appended to the
 // dropdown so a config that no launchpad website lists is still one click away.
@@ -4449,6 +4517,8 @@ function updateRaydiumUI(pad) {
   const isCustom = q.mint === 'custom';
   $('raydiumQuoteCustom').classList.toggle('hidden', !isCustom);
   $('raydiumDevSym').textContent = isCustom ? 'quote' : q.symbol;
+  if ($('raydiumRaiseSym')) $('raydiumRaiseSym').textContent = isCustom ? 'quote' : q.symbol;
+  paintRaydiumShape(pad);
 }
 
 /// Pull every LaunchLab config that exists on chain and fold the ones this pad
@@ -4899,6 +4969,8 @@ function init() {
     updateRialtoHint(activePad);
   });
   $('v4curveEconBtn').addEventListener('click', () => { if (activePad.family === 'v4curve') applyRhEconomics(activePad); });
+  $('raydiumPumpEconBtn').addEventListener('click', () => { if (activePad.family === 'raydium') applyRaydiumPumpEconomics(activePad); });
+  $('raydiumRaise').addEventListener('input', () => { if (activePad.family === 'raydium') paintRaydiumShape(activePad); });
   for (const id of ['v4curveThreshold', 'v4curveOpen']) {
     $(id).addEventListener('input', () => { if (activePad.family === 'v4curve') paintV4CurveShape(activePad); });
   }

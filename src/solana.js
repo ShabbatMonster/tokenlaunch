@@ -1070,6 +1070,27 @@ export const STONK_PLATFORM_ID = 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi';
 export const STONK_PLATFORM_ID_ALT = '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt';
 export const STONK_PLATFORM_ID_ALT2 = '4E876qZTE9FJMrBzgVtBrSrzz2TLivB5Y5QXPjB4gZL7';
 
+// --- the CC (community coin) shape -----------------------------------------
+//
+// stonkfun shows some launches as "community coins" and they are a genuinely
+// different animal. Decoded from a live pair - CC 8svf3G1X... against typical
+// 5Mv6c7ta... - the differences are exactly three, and the rest is identical
+// (1B supply, 793.1M on the curve, curveType 0, tradeFeeRate 2500):
+//
+//   platform   CUqSiwPs...        vs 4E876qZT.../6BwHHDg3...
+//   quote      a TOKEN-2022 asset vs a classic SPL one. The CC quotes
+//              AMC1qwR9..., a Backpack tokenised stock, so BOTH token-program
+//              slots are Token-2022; the SDK writes the classic program into
+//              the quote slot and has to be patched (see launchRaydium).
+//   transfer   300 bps on the base mint vs NONE AT ALL - the typical coin's
+//     fee      mint carries no TransferFeeConfig extension, the CC's carries
+//              one at 300 bps with a 1e15 cap.
+//
+// The config is not a separate thing to choose: it is the per-quote PDA, so
+// picking the quote picks it (AMC resolves to 7j4zuEkW...).
+export const STONK_CC_PLATFORM_ID = 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi';
+export const STONK_CC_TRANSFER_FEE_BPS = 300;
+
 /// Every quote mint that LaunchLab will actually accept, read from the chain
 /// rather than from any launchpad's allowlist.
 ///
@@ -1147,6 +1168,39 @@ function curveRaiseTargetRaw(quoteDecimals) {
     : CURVE_RAISE_B_MICRO.div(new BN(10).pow(new BN(6 - quoteDecimals)));
 }
 
+/// Human quote amount -> raw, without going through a float.
+function uiRaiseToRaw(ui, quoteDecimals) {
+  const [whole, frac = ''] = String(ui).trim().split('.');
+  const f = (frac + '0'.repeat(quoteDecimals)).slice(0, quoteDecimals);
+  return new BN((whole || '0') + f);
+}
+
+// --- what the raise target actually buys -----------------------------------
+//
+// LaunchLab's curve is pump.fun's, exactly. Measured off two live pools
+// (8svf3G1X... and 5Mv6c7ta..., different quotes and different decimals):
+//
+//   virtualB   = 0.352951 x raise      pump: 30/85 = 0.352941
+//   startMcap  = 0.328931 x raise
+//   finalMcap  = 4.8333  x raise       = 14.69x the open
+//
+// with virtualA pinned at 1,073,025,605 tokens and 793.1M of 1B sold on the
+// curve. So the ONLY dial is the raise: everything else follows from it, and
+// "spawns at 30, migrates at 85" is just a raise of 85.
+//
+// Worth stating plainly because the two numbers are not the same kind of thing:
+// the 30 is the VIRTUAL QUOTE RESERVE, which is what people quote, while the
+// starting market cap is 0.328931 x 85 = 27.96. A raise of 85 gives both.
+export const LAUNCHLAB_CURVE_RATIOS = {
+  virtualPerRaise: 0.352951,
+  startMcapPerRaise: 0.328931,
+  finalMcapPerRaise: 4.8333,
+};
+
+/// The pump.fun shape, in whatever the quote is. 85 is the raise; the 30 and
+/// the 27.96 both fall out of it.
+export const PUMP_RAISE_SOL = 85;
+
 // Poll getSignatureStatuses over plain HTTP instead of trusting a websocket
 // onSignature subscription — proven reliable even in bursts, unlike the SDK's
 // internal wait (see launchRaydium below for why that one gets bypassed).
@@ -1180,7 +1234,7 @@ function asErrorShared(e, fallback) {
 export async function launchRaydium(opts) {
   const {
     rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId,
-    token2022, transferFeeBps, maxTransferFee, onStatus,
+    token2022, transferFeeBps, maxTransferFee, raiseTargetUi, onStatus,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
@@ -1218,11 +1272,22 @@ export async function launchRaydium(opts) {
     : null;
   const curveRuleInfo = curveRuleId ? await connection.getAccountInfo(curveRuleId).catch(() => null) : null;
 
+  // A raise target stated by the caller wins; otherwise the old constant. An
+  // explicit target also forces the override on, because the whole point of
+  // asking for one is that the platform default is not what is wanted.
   let curveOverride = {};
-  if (curveRuleInfo || !PLATFORM_DEFAULT_QUOTES.has(configInfo.mintB.toBase58())) {
-    let raiseB = curveRaiseTargetRaw(mintBInfo.decimals);
+  if (raiseTargetUi || curveRuleInfo || !PLATFORM_DEFAULT_QUOTES.has(configInfo.mintB.toBase58())) {
+    let raiseB = raiseTargetUi
+      ? uiRaiseToRaw(raiseTargetUi, mintBInfo.decimals)
+      : curveRaiseTargetRaw(mintBInfo.decimals);
     if (configInfo.minFundRaisingB && raiseB.lt(configInfo.minFundRaisingB)) raiseB = configInfo.minFundRaisingB;
     curveOverride = { supply: CURVE_SUPPLY, totalSellA: CURVE_SELL_A, totalFundRaisingB: raiseB };
+    if (raiseTargetUi) {
+      const r = LAUNCHLAB_CURVE_RATIOS;
+      say(`raise ${raiseTargetUi} — opens at a ${(raiseTargetUi * r.startMcapPerRaise).toPrecision(4)} market cap `
+        + `(virtual reserve ${(raiseTargetUi * r.virtualPerRaise).toPrecision(4)}), migrates around `
+        + `${(raiseTargetUi * r.finalMcapPerRaise).toPrecision(4)}`);
+    }
   }
 
   // Raydium's own confirm-wait can reject with a bare `undefined` (no Error, no
@@ -1292,6 +1357,30 @@ export async function launchRaydium(opts) {
   //
   // So: derive it, and if it exists append it to the launch instruction and
   // rebuild the transaction.
+  // A Token-2022 QUOTE needs its own program in the tokenProgramB slot, and the
+  // SDK always writes the classic one there. stonkfun's "community coin"
+  // launches pair against Token-2022 assets (the live one at 8svf3G1X... quotes
+  // AMC1qwR9..., a Backpack tokenised stock) and their real launch carries
+  // Token-2022 in BOTH program slots - decoded off the chain, not guessed.
+  //
+  // Patched by value rather than by index: the slot is only replaced when it
+  // currently holds the classic program AND the quote mint really is owned by
+  // Token-2022, so a normal launch is untouched and a layout change cannot
+  // silently rewrite the wrong account.
+  {
+    const quoteOwner = (await connection.getAccountInfo(configInfo.mintB))?.owner;
+    if (quoteOwner && quoteOwner.equals(TOKEN_2022_PROGRAM_ID) && builder) {
+      let swapped = 0;
+      for (const ix of builder.instructions) {
+        if (!ix.programId.equals(programId)) continue;
+        for (const k of ix.keys) {
+          if (k.pubkey.equals(TOKEN_PROGRAM_ID)) { k.pubkey = TOKEN_2022_PROGRAM_ID; swapped++; }
+        }
+      }
+      if (swapped) say(`quote is Token-2022 — pointed ${swapped} token-program slot(s) at it`);
+    }
+  }
+
   {
     const curveRule = curveRuleId;
     // Pass it whether or not it exists. The program reads this slot to decide
