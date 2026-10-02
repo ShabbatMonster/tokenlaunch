@@ -444,8 +444,11 @@ const SOL_CUSTOM_THRESHOLD = 1000000; // default migration threshold for custom 
 // stonkfun.xyz pair tokens (their categorised quotes; the 361 community
 // "custom" ones are reachable via SCAN or by pasting a mint).
 const STONK_QUOTES = [
-  { symbol: 'SKR', mint: 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3', decimals: 6, kind: 'solana', name: "Seeker" },
+  // SOL first, because it is the pairing StonkFun now defaults to and the pad's
+  // default is the first entry. Their earlier launches paired against a
+  // stablecoin or a tokenised stock; 9bHxUoXs... pairs WSOL and raises 85.
   { symbol: 'SOL', mint: 'So11111111111111111111111111111111111111112', decimals: 9, kind: 'solana', name: "Wrapped SOL" },
+  { symbol: 'SKR', mint: 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3', decimals: 6, kind: 'solana', name: "Seeker" },
   { symbol: 'EURC', mint: 'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', decimals: 6, kind: 'currency', name: "EURC" },
   { symbol: 'JLUSDC', mint: '9BEcn9aPEmhSPbPQeFGjidRiEKki46fVQDyPpSQXPA2D', decimals: 6, kind: 'currency', name: "JLUSDC" },
   { symbol: 'ONYC', mint: '5Y8NV33Vv7WbnLfq3zBcKSdYPrk7g2KoiQoe7M2tcxp5', decimals: 9, kind: 'currency', name: "ONYC" },
@@ -1194,6 +1197,7 @@ const PADS = [
     site: (t) => `https://www.stonkfun.xyz/token/${t}`,
     nativeSymbol: 'SOL',
     quotes: STONK_QUOTES,
+    defaultQuote: 'SOL',
     platformId: '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt', // StonkFun
     // StonkFun mints Token-2022 with a transfer fee and its curve rule pins the
     // tier: exactly 100 or 300 bps, max fee 1e15. Anything else is rejected.
@@ -4521,6 +4525,7 @@ function updateRaydiumUI(pad) {
       qs.innerHTML = list.map(opt).join('');
     }
     if (prev && list.some((q) => q.symbol === prev)) qs.value = prev;
+    else if (pad.defaultQuote && list.some((q) => q.symbol === pad.defaultQuote)) qs.value = pad.defaultQuote;
     qs.dataset.padStamp = stamp;
     qs.dataset.padId = pad.id;
   }

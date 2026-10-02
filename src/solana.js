@@ -1273,30 +1273,66 @@ export async function findCommunityLaunchWindows(rpcUrl) {
 // fields in some other arrangement. That costs nothing here, because the three
 // community platforms have no rule at all.
 const CURVE_RULE_STRIDE = 18;
-const CURVE_RULE_FIELDS = [
-  'migrateType', 'migrateCpmmFeeOn', 'supply', 'totalSellA',
-  'totalFundRaisingB', 'totalLockedAmount', 'cliffPeriod', 'unlockPeriod',
-  'field9', 'field10', 'field11', 'field12',
-];
+/// Field index -> what it constrains, 1-based as the rule stores it.
+///
+/// 1..8 are the BondingCurveParam fields in declaration order, which is how the
+/// layout was identified in the first place: a run of them carrying canonical
+/// LaunchLab values (supply 1e15, totalSellA 793.1e12) is unmistakable. 9..12
+/// are the Token-2022 requirement, read off StonkFun's own rule, whose two
+/// groups are byte-identical except for field 11 at 100 and 300 - exactly the
+/// two transfer-fee tiers their launches use.
+const CURVE_RULE_FIELD_NAMES = {
+  1: 'migrateType',
+  2: 'migrateCpmmFeeOn',
+  3: 'supply',
+  4: 'totalSellA',
+  5: 'totalFundRaisingB',
+  6: 'totalLockedAmount',
+  7: 'cliffPeriod',
+  8: 'unlockPeriod',
+  9: 'requiresToken2022',
+  10: 'requiresTransferFee',
+  11: 'transferFeeBps',
+  12: 'maxTransferFee',
+};
 
+/// Decode the constraint groups a rule holds.
+///
+/// A group is a run of 18-byte entries - field index, operator, u128 value -
+/// whose field indices ASCEND but need not be complete. That last part was got
+/// wrong at first: requiring a full 1..12 run read StonkFun's own rule as zero
+/// groups, because it omits field 5 entirely. Which is the most interesting
+/// thing in it - an omitted field is an UNCONSTRAINED field, so the raise is
+/// free on that platform and only the shape around it is pinned.
+///
+/// Still self-validating: an ascending run of at least six known field indices
+/// is specific enough that a header change produces no groups rather than a
+/// confident wrong answer.
 function decodeCurveRuleGroups(data) {
-  const span = CURVE_RULE_STRIDE * CURVE_RULE_FIELDS.length;
+  const MIN_FIELDS = 6;
   const groups = [];
-  for (let o = 0; o + span <= data.length; o++) {
-    let sequential = true;
-    for (let k = 0; k < CURVE_RULE_FIELDS.length; k++) {
-      if (data[o + k * CURVE_RULE_STRIDE] !== k + 1) { sequential = false; break; }
+  for (let start = 0; start + CURVE_RULE_STRIDE * MIN_FIELDS <= data.length; start++) {
+    const run = [];
+    let last = 0;
+    for (let o = start; o + CURVE_RULE_STRIDE <= data.length; o += CURVE_RULE_STRIDE) {
+      const field = data[o];
+      // ascending, within range, and never repeating - a repeat means the next
+      // group has started
+      if (!CURVE_RULE_FIELD_NAMES[field] || field <= last) break;
+      run.push({ offset: o, field });
+      last = field;
     }
-    if (!sequential) continue;
-    const group = { offset: o };
-    CURVE_RULE_FIELDS.forEach((name, k) => {
-      const e = o + k * CURVE_RULE_STRIDE;
-      const lo = data.readBigUInt64LE(e + 2);
-      const hi = data.readBigUInt64LE(e + 10);
-      group[name] = { op: data[e + 1], value: ((hi << 64n) | lo).toString() };
-    });
+    if (run.length < MIN_FIELDS) continue;
+    const group = { offset: start, fields: run.map((r) => r.field) };
+    for (const { offset, field } of run) {
+      const lo = data.readBigUInt64LE(offset + 2);
+      const hi = data.readBigUInt64LE(offset + 10);
+      group[CURVE_RULE_FIELD_NAMES[field]] = {
+        op: data[offset + 1], value: ((hi << 64n) | lo).toString(),
+      };
+    }
     groups.push(group);
-    o += span - 1;
+    start = run[run.length - 1].offset + CURVE_RULE_STRIDE - 1;
   }
   return groups;
 }
@@ -1429,7 +1465,26 @@ const PLATFORM_DEFAULT_QUOTES = new Set([
 const CURVE_SUPPLY = new BN('1000000000000000');  // 1B tokens @ 6 decimals
 const CURVE_SELL_A = new BN('793100000000000');   // 79.31% of supply
 const CURVE_RAISE_B_MICRO = new BN('3274601594'); // human raise amount * 1e6
-function curveRaiseTargetRaw(quoteDecimals) {
+
+export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+
+/// StonkFun's default raise, after they changed it: 85 SOL against a WSOL pair.
+///
+/// Read off 9bHxUoXs..., a launch made under their new defaults. Its pool
+/// carries totalFundRaisingB = 85e9 against config 6s1xP3hp (WSOL), with a
+/// virtual quote reserve of 30.000852951 - pump's 30/85 shape exactly. Their
+/// older launches paired against a stablecoin or a tokenised stock instead and
+/// raised a few thousand units of it, which is what the constant above was
+/// fitted to.
+const CURVE_RAISE_SOL = new BN('85000000000');    // 85 SOL @ 9dp
+
+function curveRaiseTargetRaw(quoteDecimals, quoteMint) {
+  // Against SOL the default is 85 SOL exactly. A quote-agnostic unit count
+  // cannot be right across assets worth $1 and assets worth $200: scaled to 9
+  // decimals the constant below comes out at 3,274 SOL, which is not a launch
+  // anyone intends. For any other quote the pad's ECONOMICS button converts 85
+  // SOL through Jupiter, and this stays the fallback when no raise is typed.
+  if (quoteMint === WSOL_MINT) return CURVE_RAISE_SOL;
   return quoteDecimals >= 6
     ? CURVE_RAISE_B_MICRO.mul(new BN(10).pow(new BN(quoteDecimals - 6)))
     : CURVE_RAISE_B_MICRO.div(new BN(10).pow(new BN(6 - quoteDecimals)));
@@ -1585,7 +1640,7 @@ export async function launchRaydium(opts) {
   if (raiseTargetUi || curveRuleInfo || !PLATFORM_DEFAULT_QUOTES.has(configInfo.mintB.toBase58())) {
     let raiseB = raiseTargetUi
       ? uiRaiseToRaw(raiseTargetUi, mintBInfo.decimals)
-      : curveRaiseTargetRaw(mintBInfo.decimals);
+      : curveRaiseTargetRaw(mintBInfo.decimals, configInfo.mintB.toBase58());
     if (configInfo.minFundRaisingB && raiseB.lt(configInfo.minFundRaisingB)) raiseB = configInfo.minFundRaisingB;
     curveOverride = { supply: CURVE_SUPPLY, totalSellA: CURVE_SELL_A, totalFundRaisingB: raiseB };
     if (raiseTargetUi) {
@@ -1601,26 +1656,68 @@ export async function launchRaydium(opts) {
   // nothing to choose. Only equality constraints (op 0) are honoured; anything
   // else is left alone rather than guessed at, and the dry run will say so.
   if (curveRuleInfo) {
-    const rule = decodeCurveRuleGroups(curveRuleInfo.data);
-    const g = rule[0];
-    if (g && [g.supply, g.totalSellA, g.totalFundRaisingB].every((f) => f.op === 0)) {
-      const required = {
-        supply: new BN(g.supply.value),
-        totalSellA: new BN(g.totalSellA.value),
-        totalFundRaisingB: new BN(g.totalFundRaisingB.value),
+    const groups = decodeCurveRuleGroups(curveRuleInfo.data);
+    if (!groups.length) {
+      say(`this platform has a curve rule (${curveRuleInfo.data.length} bytes) in a shape this tool cannot read — `
+        + 'dry run first, because a mismatch is rejected with 6025');
+    } else {
+      // A rule holds one or more groups and a launch has to satisfy ONE of
+      // them, so the group to obey is the one this launch's mint shape can
+      // actually meet. The three live StonkFun rules are each a different
+      // shape, which is why this cannot be a tier comparison:
+      //
+      //   6BwHHDg3  two groups, Token-2022 + a fee of 100 or 300 bps
+      //   4E876qZT  one group,  Token-2022 and NO transfer fee at all
+      //   community no rule,    so anything goes
+      //
+      // and 4E876qZT is why: a launch carrying a fee is rejected there, which a
+      // tier check would never have noticed.
+      const feeBps = token2022 ? Number(transferFeeBps ?? 100) : 0;
+      const fits = (x) => {
+        if (x.requiresToken2022?.op === 0 && (x.requiresToken2022.value === '1') !== !!token2022) return false;
+        if (x.requiresTransferFee?.op === 0 && (x.requiresTransferFee.value === '1') !== (feeBps > 0)) return false;
+        if (x.transferFeeBps?.op === 0 && x.transferFeeBps.value !== String(feeBps)) return false;
+        return true;
       };
-      const asked = curveOverride.totalFundRaisingB;
-      if (raiseTargetUi && asked && !asked.eq(required.totalFundRaisingB)) {
-        say(`this platform's curve rule pins the raise at `
-          + `${Number(required.totalFundRaisingB.toString()) / 10 ** mintBInfo.decimals} — ignoring the `
-          + `${raiseTargetUi} that was asked for, because anything else is rejected`);
+      const describe = (x) => {
+        if (x.requiresToken2022?.value === '0') return 'a plain SPL mint';
+        if (x.requiresTransferFee?.value === '0') return 'a Token-2022 mint with no transfer fee';
+        if (x.transferFeeBps) return `a Token-2022 mint at ${x.transferFeeBps.value} bps`;
+        return 'a Token-2022 mint with a transfer fee';
+      };
+      const g = groups.find(fits);
+      if (!g) {
+        const mine = token2022
+          ? (feeBps > 0 ? `a Token-2022 mint at ${feeBps} bps` : 'a Token-2022 mint with no transfer fee')
+          : 'a plain SPL mint';
+        const tiers = groups.map((x) => x.transferFeeBps?.value).filter(Boolean);
+        throw new Error(
+          `this platform's curve rule only accepts ${groups.map(describe).join(', or ')}`
+          + `${tiers.length ? ` (${tiers.join(' or ')} bps)` : ''}, and this launch is ${mine}. `
+          + 'Anything else is rejected on chain with 6025.',
+        );
+      }
+
+      // Only equality constraints, and only fields the group actually carries.
+      // An ABSENT field is an unconstrained one - field 5 is missing from
+      // StonkFun's rule, which is exactly why the raise is still ours to pick.
+      const eq = (f) => g[f] && g[f].op === 0;
+      const required = {};
+      if (eq('supply')) required.supply = new BN(g.supply.value);
+      if (eq('totalSellA')) required.totalSellA = new BN(g.totalSellA.value);
+      if (eq('totalFundRaisingB')) {
+        required.totalFundRaisingB = new BN(g.totalFundRaisingB.value);
+        const asked = curveOverride.totalFundRaisingB;
+        if (raiseTargetUi && asked && !asked.eq(required.totalFundRaisingB)) {
+          say(`this platform's curve rule pins the raise at `
+            + `${Number(required.totalFundRaisingB.toString()) / 10 ** mintBInfo.decimals} — ignoring the `
+            + `${raiseTargetUi} that was asked for, because anything else is rejected`);
+        }
       }
       curveOverride = { ...curveOverride, ...required };
       // the rule can pin the migrate target too, and 1 is cpmm
-      if (g.migrateType.op === 0) ruleMigrateType = g.migrateType.value === '0' ? 'amm' : 'cpmm';
-    } else if (!rule.length) {
-      say(`this platform has a curve rule (${curveRuleInfo.data.length} bytes) in a shape this tool cannot read — `
-        + 'dry run first, because a mismatch is rejected with 6025');
+      if (eq('migrateType')) ruleMigrateType = g.migrateType.value === '0' ? 'amm' : 'cpmm';
+
     }
   }
 
@@ -1804,6 +1901,19 @@ export async function launchRaydium(opts) {
       ok: !sim.value.err,
       err: sim.value.err || null,
       mint: pair.publicKey.toBase58(),
+      // what the launch would actually write to the pool, so a dry run can be
+      // diffed against a reference launch instead of eyeballed
+      curve: {
+        supply: (curveOverride.supply ?? null)?.toString() ?? null,
+        totalSellA: (curveOverride.totalSellA ?? null)?.toString() ?? null,
+        totalFundRaisingB: (curveOverride.totalFundRaisingB ?? null)?.toString() ?? null,
+        migrateType: ruleMigrateType || migrateType || 'cpmm',
+        quoteMint: configInfo.mintB.toBase58(),
+        quoteDecimals: mintBInfo.decimals,
+        configId: configId.toBase58(),
+        token2022: !!token2022,
+        transferFeeBps: token2022 ? (transferFeeBps ?? 100) : null,
+      },
       platformId: platformId ? String(platformId) : null,
       allowConfig: allowConfigId ? allowConfigId.toBase58() : null,
       curveRule: curveRuleId ? curveRuleId.toBase58() : null,
