@@ -14,9 +14,10 @@
 // only honest proof is to build the launch the pad would build and simulate it
 // against a window that is open right now, which is what this does.
 //
-// The windows are discovered rather than hardcoded, because a community
-// platform is never reused - every community coin so far has its own, created
-// shortly before the launch. Anything pinned here would be stale within a day.
+// The windows are discovered rather than hardcoded because a window is opened
+// and closed per launch - one was seen open for USELESS and gone within minutes
+// of the next read. The PLATFORM is reused (CUqSiwPs carries 59 community pools),
+// so it is the window, not the platform id, that would be stale if pinned here.
 //
 // Run: node test/js/community-launch-window.test.mjs
 
