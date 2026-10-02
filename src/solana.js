@@ -1156,11 +1156,17 @@ export const PLATFORM_CONFIG_SIZE = 944;
 
 // --- finding a community launch window -------------------------------------
 //
-// Hardcoding CUqSiwPs would be useless in practice, because StonkFun does not
-// reuse a community platform: each community coin so far has its own
-// PlatformConfig, created shortly before the launch (FALKLANDS and VISIONARY
-// are named after theirs). The next one will be a platform id that does not
-// exist yet, so the only thing worth shipping is discovery.
+// What has to be discovered is the WINDOW, not the platform. An earlier version
+// of this comment had that backwards - it claimed StonkFun never reuses a
+// community platform and that each coin gets its own. CUqSiwPs carried one pool
+// when that was written and carries 59 now, so it is reused heavily; FALKLANDS
+// and VISIONARY are separate communities running their own, not the pattern.
+//
+// The window is what moves. StonkFun opens an allow config, launches, and closes
+// it again, per coin and per quote: one was observed open for USELESS and gone
+// within minutes of the next read. So a launch here is a race against something
+// that appears and vanishes, which is why this is discovery plus WATCH rather
+// than a constant.
 //
 // Both halves are a single getProgramAccounts call:
 //

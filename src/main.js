@@ -4612,10 +4612,11 @@ async function paintRaydiumPlatform(pad) {
 // --- community launch windows ----------------------------------------------
 //
 // A community launch is only possible while the platform's admin has an allow
-// window open, and the platform is never reused: each community coin so far has
-// its own PlatformConfig, created shortly before the launch. So there is nothing
-// useful to hardcode — the pad has to find the window that is open now, and the
-// platform id it launches under comes from that window rather than from the pad.
+// window open. The platform itself IS reused — CUqSiwPs carries 59 community
+// pools — so what has to be found is the window, which StonkFun opens and closes
+// per coin and per quote. One was seen open for USELESS and gone within minutes.
+// So the pad has to find the window that is open now, and the platform id it
+// launches under comes from that window rather than from the pad.
 //
 // WATCH exists because a window is a window. The one StonkFun opened for their
 // community coin lasted about 70 minutes, and the launch that missed it missed
