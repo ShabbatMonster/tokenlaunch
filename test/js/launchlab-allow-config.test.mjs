@@ -34,16 +34,21 @@ import {
   Connection, PublicKey, VersionedTransaction, TransactionMessage,
 } from '@solana/web3.js';
 import { LAUNCHPAD_PROGRAM } from '@raydium-io/raydium-sdk-v2';
-import { PLATFORM_COMMUNITY_FLAG_OFFSET, STONK_CC_PLATFORM_IDS } from '../../src/solana.js';
+import { PLATFORM_COMMUNITY_FLAG_OFFSET, STONK_CC_PLATFORM_IDS, platformAllowWindow, readPlatformCurveRule } from '../../src/solana.js';
+import { healthyRpc } from '../../src/rpc.js';
 
-const RPC = 'https://mainnet.helius-rpc.com/?api-key=ae11f74a-b518-408b-bc88-524c277da375';
+// Chosen rather than hardcoded. Every suite in this repo pinned the same key,
+// so when it hit its quota they all died at once on "429 max usage reached" -
+// a test failure that said nothing about the code. scanning: true keeps this
+// off the public endpoint, which cannot serve getProgramAccounts.
+const RPC = await healthyRpc({ scanning: true });
 const c = new Connection(RPC, 'confirmed');
 
 // the launch that failed, and the two live ones that did not
 const FAILED = 'kGvfSr2t8cgayQxZBzA1TtpVPNzj9D8WfdLae9rS8qZgLwZv87kNVeTrCX9agzdqd6h2PxZqwvD9WJvCYjgYvph';
 const LIVE = [
-  { name: 'CC', platform: 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi', config: '7j4zuEkWm3QWPS1qhZfcFvwCALvMmrpN5xy9NweDEiZU', allow: 'GGJG5qQSMEaQL548fBU1KaT36KLetY7P4BqGveB5JFqC' },
-  { name: 'FALKLANDS', platform: 'BFYnA6ouETD2m9tGEjtyU6TV6BmqdVT2YDUMmgp9Yjv3', config: '6s1xP3hpbAfFoNtUNF8mfHsjr2Bd97JxFJRWLbL6aHuX', allow: '5AfEcZtLkM1eh24ommS4YhRo5EfiLGsXFdTB87KPE94k' },
+  { name: 'CC', platform: 'CUqSiwPs6C4WyntMgaFazLp7wYQfaLp5URbjUP9V7SNi', config: '7j4zuEkWm3QWPS1qhZfcFvwCALvMmrpN5xy9NweDEiZU', allow: 'GGJG5qQSMEaQL548fBU1KaT36KLetY7P4BqGveB5JFqC', quote: 'AMC1qwR9KhiyrQBRPrxnfo4JfMeMZqEBvt5tgTytNNoc' },
+  { name: 'FALKLANDS', platform: 'BFYnA6ouETD2m9tGEjtyU6TV6BmqdVT2YDUMmgp9Yjv3', config: '6s1xP3hpbAfFoNtUNF8mfHsjr2Bd97JxFJRWLbL6aHuX', allow: '5AfEcZtLkM1eh24ommS4YhRo5EfiLGsXFdTB87KPE94k', quote: 'So11111111111111111111111111111111111111112' },
 ];
 const REGULAR = '6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt';
 
@@ -72,16 +77,21 @@ check(STONK_CC_PLATFORM_IDS.every((p) => cfgData[p][PLATFORM_COMMUNITY_FLAG_OFFS
   && cfgData[REGULAR][PLATFORM_COMMUNITY_FLAG_OFFSET] === 0,
   'the allow-config platforms are exactly the ones with the flag byte set');
 
-// Neither PDA exists any more, and for the allow config that is decisive in the
-// opposite direction to what it first looks like. An empty curve-rule slot is
-// accepted; an empty allow config is NOT. So a flagged platform only accepts a
-// launch while its admin has a window open, and none is open now.
-const existence = await Promise.all(LIVE.flatMap((l) => [
-  c.getAccountInfo(new PublicKey(l.allow)),
-  c.getAccountInfo(pda('platform_curve_rule', l.platform, l.config)),
-]));
-check(existence.every((i) => i === null),
-  'neither PDA exists on chain any more, for either live launch');
+// Both of these PDAs come and go - StonkFun opens and closes allow configs per
+// launch, and has since added a curve rule to the community platform that was
+// not there at all when this was written. So what gets pinned is the RULE, not
+// the state: the launcher's view of a window must agree with the chain, both
+// ways round. An earlier version asserted "neither exists", which was a true
+// observation and a worthless test - it failed the moment they opened a window.
+const windows = [];
+for (const l of LIVE) {
+  const live = !!(await c.getAccountInfo(new PublicKey(l.allow)));
+  const seen = await platformAllowWindow(RPC, l.platform, l.quote);
+  windows.push({ ...l, live, seen: seen.open });
+  check(seen.allowConfig === l.allow && seen.open === live,
+    `platformAllowWindow agrees with the chain for ${l.name}`,
+    live ? 'window OPEN' : 'window shut');
+}
 
 // --- replay the failed launch with the account it was missing ------------------
 //
@@ -142,17 +152,27 @@ const notEnough = logs.some((l) => /NotEnoughRemainingAccounts/.test(l));
 check(ranInit && !notEnough,
   'the initialize no longer reports NotEnoughRemainingAccounts',
   err ? `now fails later with ${JSON.stringify(err)}` : 'whole transaction simulates clean');
-// It gets further and then stops, which is the real answer: fixing the account
-// order was necessary but not sufficient, because the allow config has to EXIST.
-check(err?.InstructionError?.[1]?.Custom === 3012,
-  'it now fails with 3012 AccountNotInitialized instead - the allow config does not exist',
-  JSON.stringify(err));
+// What happens AFTER the initialize is not this test's business, and pinning it
+// was a mistake. This replays a transaction from a day ago: the wallet's balances
+// have moved, the window has opened and shut, and a curve rule has appeared that
+// was not there at all when it was written. At one point the assertion below read
+// "3012 because the allow config does not exist" and passed for the wrong reason
+// entirely - the 3012 had moved to instruction 4, a later instruction failing for
+// an unrelated reason. So: assert only that the initialize itself got past the
+// trailing-account problem, and report the rest.
+const initFailed = err && err.InstructionError && err.InstructionError[0] === labIx;
+check(!initFailed,
+  'the initialize instruction itself no longer fails at all',
+  err ? `a later instruction (${err.InstructionError?.[0]}) stops it instead, which is not what this pins`
+    : 'whole transaction simulates clean');
 
-// An empty curve-rule slot is fine; an empty allow config is not. That
-// asymmetry is the entire gate, so pin it.
+// The asymmetry that IS the gate: an empty curve-rule slot is accepted, an empty
+// allow config is not. Stated against whatever exists now rather than assuming.
 const ruleExists = !!(await c.getAccountInfo(curveRule));
-check(!ruleExists,
-  'the curve-rule slot is accepted empty - the program got past it to reach the allow config');
+const allowExists = !!(await c.getAccountInfo(allowConfig));
+console.log(`   rule ${ruleExists ? 'exists' : 'absent'} · allow config ${allowExists ? 'exists' : 'absent'}`);
+check(allowExists === (await platformAllowWindow(RPC, platform, LIVE[0].quote)).open,
+  'and the window the launcher reports is the existence of that allow config, nothing else');
 
 // --- who can open the window --------------------------------------------------
 //
@@ -189,7 +209,6 @@ check(/platform_allow_config/.test(pre) && /PLATFORM_COMMUNITY_FLAG_OFFSET\]\s*=
 check(/throw new Error\(/.test(pre) && /only the platform admin can create it/.test(pre),
   'and throws before building when no window is open, instead of paying for a doomed transaction');
 
-const { platformAllowWindow } = await import('../../src/solana.js');
 const w = await platformAllowWindow(RPC, LIVE[0].platform, 'So11111111111111111111111111111111111111112');
 check(w.open === false && w.allowConfig,
   'platformAllowWindow reports the window shut, which is what the pad shows before you sign',

@@ -16,6 +16,9 @@ import {
 
 export { launchPump, pumpStatus, pumpWarmup, launchRaydium, solAddressFromSecret };
 
+// The endpoint list, so the worker does not keep its own copy of the keys.
+export { SOL_RPC, SOL_RPC_FALLBACKS, SOL_RPCS, probeRpc, healthyRpc, rpcLabel } from './rpc.js';
+
 // The Axiom side of the extension: reading a pump coin's migration state, and
 // migrating it with a first buy attached. Re-exported through this one entry so
 // the service worker keeps a single bundle and a single copy of web3.js.

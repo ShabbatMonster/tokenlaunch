@@ -18,8 +18,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Connection, PublicKey } from '@solana/web3.js';
+import { healthyRpc } from '../../src/rpc.js';
 
-const RPC = 'https://mainnet.helius-rpc.com/?api-key=ae11f74a-b518-408b-bc88-524c277da375';
+// Chosen rather than hardcoded. Every suite in this repo pinned the same key,
+// so when it hit its quota they all died at once on "429 max usage reached" -
+// a test failure that said nothing about the code. scanning: true keeps this
+// off the public endpoint, which cannot serve getProgramAccounts.
+const RPC = await healthyRpc({ scanning: true });
 const c = new Connection(RPC, 'confirmed');
 
 const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');

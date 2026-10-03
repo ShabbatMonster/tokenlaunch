@@ -3,7 +3,8 @@
 // no password: the SOL key is read from the plaintext local store (keys.v1,
 // shared with the launcher). The heavy web3.js + SDK come from the lazily-
 // imported solana.js bundle.
-const SOL_RPC = 'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea';
+// one shared list of endpoints rather than a key pasted per file
+import { SOL_RPC } from './rpc.js';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 

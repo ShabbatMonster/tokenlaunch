@@ -4,6 +4,10 @@ import {
   encodeAbiParameters, encodeFunctionData, encodePacked, concat, parseUnits, formatUnits,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import {
+  SOL_RPC as SHARED_SOL_RPC, SOL_RPC_FALLBACKS as SHARED_SOL_RPC_FALLBACKS,
+  SOL_RPCS, healthyRpc, rpcStatus, rpcLabel,
+} from './rpc.js';
 import { FAIRTOKEN_BYTECODE, FAIRTOKEN_ABI, FAIRTOKEN_TAX_BYTECODE, FAIRTOKEN_TAX_ABI } from './fairtoken.js';
 import { buildPoolsLaunch, buildPoolsTokenData, selfTestPoolsLaunch, POOLS_LAUNCHER, POOLS_POOL_STRATEGY } from './poolsAtomic.js';
 selfTestPoolsLaunch(); // fail fast if the launch recipe ever drifts
@@ -419,13 +423,10 @@ const OUR_FACTORY_ABI = (() => {
 
 // Solana / Meteora DBC config (chain logic lives in the lazy-loaded solana.js).
 // Defined before PADS because the meteora pad references SOL_RPC.
-// primary Helius RPC + fallbacks (the first key was maxed, so the backup leads).
-// A public RPC is the last resort for plain reads (getAccountInfo, etc.).
-const SOL_RPC = 'https://mainnet.helius-rpc.com/?api-key=ae11f74a-b518-408b-bc88-524c277da375';
-const SOL_RPC_FALLBACKS = [
-  'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea',
-  'https://api.mainnet-beta.solana.com',
-];
+// Three Helius keys plus a public endpoint, from one shared list so there is
+// nothing to keep in sync. See src/rpc.js for why probing beats retrying.
+const SOL_RPC = SHARED_SOL_RPC;
+const SOL_RPC_FALLBACKS = SHARED_SOL_RPC_FALLBACKS;
 const SOL_QUOTES = {
   SOL:  { mint: 'So11111111111111111111111111111111111111112', symbol: 'SOL',  decimals: 9, defaultThreshold: 85 },
   USDC: { mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', symbol: 'USDC', decimals: 6, defaultThreshold: 17000 },
@@ -4637,6 +4638,31 @@ async function paintRaydiumPlatform(pad) {
       + ' they open a window. Use the ordinary pad unless you know one is open.';
 }
 
+// --- which RPC is actually up ----------------------------------------------
+//
+// Three Helius keys, and two of them have been maxed at once before. When that
+// happened every chain read in the app failed with a 429 that said nothing
+// about which endpoint was at fault, so this says it out loud and lets you
+// re-check with a click.
+//
+// It does not silently repoint the pads: they carry `rpc` by value and a pad
+// quietly launching through a different endpoint than the one shown would be
+// worse than a warning. Switching is a deliberate act.
+async function paintRpcLine() {
+  const el = $('rpcLine');
+  if (!el) return;
+  el.textContent = 'checking the RPC endpoints…';
+  const status = await rpcStatus(SOL_RPCS);
+  const up = status.filter((s) => s.ok);
+  const live = status.find((s) => s.url === SOL_RPC)?.ok;
+  const parts = status.map((s) => (s.ok ? '' : '<s>') + esc(rpcLabel(s.url)) + (s.ok ? '' : '</s>'));
+  el.innerHTML = (live
+    ? `<span style="color:var(--accent)">RPC ok</span> `
+    : `<span style="color:var(--warn,#c90)">the primary RPC is down</span> — `
+      + (up.length ? `switch to <b>${esc(rpcLabel(up[0].url))}</b>; ` : 'nothing is answering; '))
+    + `${up.length}/${status.length} up · ${parts.join(' · ')}`;
+}
+
 // --- the Agency mind --------------------------------------------------------
 //
 // The prompt and the model, which is everything Agency adds on top of a pump
@@ -5499,6 +5525,9 @@ function init() {
       if (item.type.startsWith('image/')) { setImage(item.getAsFile()); break; }
     }
   });
+
+  $('rpcLine').addEventListener('click', paintRpcLine);
+  paintRpcLine().catch(() => {});
 
   $('agencyModel').addEventListener('change', paintAgencyCost);
 
