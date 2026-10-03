@@ -1181,6 +1181,26 @@ const PADS = [
     nativeSymbol: 'SOL',
   },
   {
+    // agencypad.fun — a pump.fun launch with a mind attached.
+    //
+    // family: 'pump' is the whole point. Agency's own NETWORK section names
+    // Pump and PumpSwap, so this IS a pump launch and every option on that pad
+    // applies unchanged: the dev buy, the creator-fee split, fees-to-holders,
+    // the live quote list. What this pad adds is the mind - a prompt and one of
+    // their 25 models - which goes into the token metadata.
+    //
+    // Their site has no backend to register it with: nine static chunks, no
+    // async chunks, no program id, and an /api/auth that returns HTML. So the
+    // mind is recorded where it is permanent and public rather than posted to
+    // a service that does not answer yet. See src/agency.js.
+    id: 'agency-sol', label: 'Agency · pump.fun + a mind', vm: 'sol', enabled: true, family: 'pump',
+    agency: true,
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://pump.fun/coin/${t}`,
+    nativeSymbol: 'SOL',
+  },
+  {
     // stonkfun.xyz — another LaunchLab frontend, same program and same configs as
     // raydium-sol / bonk-sol, launched with StonkFun's platformId. Verified on
     // chain: that id decodes to a PlatformConfig named "StonkFun" pointing at
@@ -2799,6 +2819,10 @@ async function launchSol(pad, inp) {
     name: inp.name, symbol: inp.symbol, description: inp.description,
     image: IPFS_GW(imgHash),
     ...(inp.twitter || inp.website ? { extensions: { twitter: inp.twitter, website: inp.website } } : {}),
+    // An Agency launch carries its mind in the token's own metadata. Built
+    // before the upload so a bad model or an empty prompt fails here, with the
+    // reason, rather than after the coin exists.
+    ...(pad.agency ? { agency: await agencyMind() } : {}),
   });
   const uri = IPFS_GW(metaHash);
 
@@ -4426,6 +4450,10 @@ function applyPadUI(pad) {
   if (raydium) updateRaydiumUI(pad);
   $('raydiumFeeRow').classList.toggle('hidden', !(raydium && pad.token2022));
   $('raydiumCcRow').classList.toggle('hidden', !(raydium && pad.community));
+  $('agencyRow').classList.toggle('hidden', !pad.agency);
+  // fire and forget, but never silently: the catalogue is a dynamic import and
+  // a failed one would otherwise leave an empty model picker with no reason given
+  if (pad.agency) updateAgencyUI().catch((e) => { $('agencyCost').textContent = 'could not load the model list: ' + (e?.message || e); });
   if (clmm) updateClmmUI(pad);
   updateWalletChip(pad);
 }
@@ -4607,6 +4635,70 @@ async function paintRaydiumPlatform(pad) {
       + ' also requires a <code>platform_allow_config</code> account, and none exists for this quote. Only the'
       + ' platform admin can create one (the platform id is a PDA of their key), so a launch here fails until'
       + ' they open a window. Use the ordinary pad unless you know one is open.';
+}
+
+// --- the Agency mind --------------------------------------------------------
+//
+// The prompt and the model, which is everything Agency adds on top of a pump
+// launch. Both are lazily imported with the catalogue so the pad costs nothing
+// until it is selected.
+
+let agencyCatalogue = null;
+
+async function agencyLoad() {
+  if (!agencyCatalogue) agencyCatalogue = await import('./agency.js');
+  return agencyCatalogue;
+}
+
+/// Build and validate the mind. Throws with the reason, which is what the
+/// launch path wants: better here than after the coin exists.
+async function agencyMind() {
+  const a = await agencyLoad();
+  return a.agencyMindSpec({
+    model: $('agencyModel').value,
+    prompt: $('agencyPrompt').value,
+    influencer: $('agencyInfluencer')?.checked,
+  });
+}
+
+async function updateAgencyUI() {
+  const a = await agencyLoad();
+  const sel = $('agencyModel');
+  if (!sel.dataset.filled) {
+    // grouped by provider, because 25 flat options is a wall
+    const byProvider = new Map();
+    for (const m of a.AGENCY_MODELS) {
+      if (!byProvider.has(m.provider)) byProvider.set(m.provider, []);
+      byProvider.get(m.provider).push(m);
+    }
+    sel.innerHTML = [...byProvider.entries()].map(([provider, list]) => (
+      `<optgroup label="${esc(provider)}">`
+      + list.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('')
+      + '</optgroup>'
+    )).join('');
+    sel.value = a.AGENCY_DEFAULT_MODEL;
+    sel.dataset.filled = '1';
+  }
+  paintAgencyCost();
+}
+
+/// What the model choice actually costs. Their page says the mind wakes at the
+/// first fees and runs from them, so this is a burn rate rather than a spec
+/// line - the spread across their catalogue is 53x.
+async function paintAgencyCost() {
+  const a = await agencyLoad();
+  const id = $('agencyModel').value;
+  const m = a.agencyModel(id);
+  const hint = $('agencyCost');
+  if (!m || !hint) return;
+  const perTurn = a.agencyTurnCost(id);
+  const per100 = a.agencyTurnsFor(id, 100);
+  const cheapest = Math.min(...a.AGENCY_MODELS.map((x) => x.turnMicros));
+  hint.innerHTML = `<b>${esc(m.name)}</b> · ${perTurn.toFixed(4)} per turn · `
+    + `${per100.toLocaleString()} turns per $100 of fees · ${(m.context / 1000).toLocaleString()}k context`
+    + (m.turnMicros > cheapest * 4
+      ? ` · <span style="color:var(--warn,#c90)">${(m.turnMicros / cheapest).toFixed(0)}x the cheapest model here</span>`
+      : '');
 }
 
 // --- community launch windows ----------------------------------------------
@@ -5407,6 +5499,8 @@ function init() {
       if (item.type.startsWith('image/')) { setImage(item.getAsFile()); break; }
     }
   });
+
+  $('agencyModel').addEventListener('change', paintAgencyCost);
 
   $('raydiumCcScanBtn').addEventListener('click', () => { if (activePad.community) ccScan(activePad); });
   $('raydiumCcWatchBtn').addEventListener('click', () => { if (activePad.community) ccToggleWatch(activePad); });

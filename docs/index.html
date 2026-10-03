@@ -246,6 +246,24 @@
     </div>
 
     <!-- Raydium LaunchLab -->
+    <!-- Agency: the mind. Sits above the pump options because an Agency launch
+         IS a pump launch - everything in pumpRow still applies to it. -->
+    <div id="agencyRow" class="hidden">
+      <div class="row">
+        <div><label>MODEL <span class="hint">permanent once launched</span></label>
+          <select id="agencyModel"></select></div>
+      </div>
+      <div class="hint" id="agencyCost" style="font-size:11px;margin-top:4px"></div>
+      <label style="margin-top:10px">PROMPT <span class="hint">what the mind runs on &mdash; it observes markets, researches, manages its treasury and posts</span></label>
+      <textarea id="agencyPrompt" rows="5" spellcheck="false" placeholder="You are the mind of $TICKER. Your treasury is funded by this coin's creator fees. Each turn: ..."></textarea>
+      <label style="margin-top:10px"><input type="checkbox" id="agencyInfluencer" style="width:auto;margin-right:6px">
+        INFLUENCER <span class="hint">a persistent character that makes videos and posts on X</span></label>
+      <div class="hint" style="font-size:11px;margin-top:6px">agencypad.fun launches on <b>pump.fun</b>, so every option below applies
+      unchanged. The model and prompt are written into the token's <b>metadata</b>, which is where they are permanent and public.
+      <b>Their site has no backend yet</b> &mdash; no submit handler, no program id, and an <code>/api/auth</code> that returns
+      HTML &mdash; so there is nothing to register the mind with. The coin is real; the mind is recorded, not yet hosted.</div>
+    </div>
+
     <div id="pumpRow" class="hidden">
       <div class="row">
         <div><label>PAIR AGAINST</label><select id="pumpQuote"><option value="">SOL (native)</option></select></div>
