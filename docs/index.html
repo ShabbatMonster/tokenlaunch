@@ -258,10 +258,14 @@
       <textarea id="agencyPrompt" rows="5" spellcheck="false" placeholder="You are the mind of $TICKER. Your treasury is funded by this coin's creator fees. Each turn: ..."></textarea>
       <label style="margin-top:10px"><input type="checkbox" id="agencyInfluencer" style="width:auto;margin-right:6px">
         INFLUENCER <span class="hint">a persistent character that makes videos and posts on X</span></label>
-      <div class="hint" style="font-size:11px;margin-top:6px">agencypad.fun launches on <b>pump.fun</b>, so every option below applies
-      unchanged. The model and prompt are written into the token's <b>metadata</b>, which is where they are permanent and public.
-      <b>Their site has no backend yet</b> &mdash; no submit handler, no program id, and an <code>/api/auth</code> that returns
-      HTML &mdash; so there is nothing to register the mind with. The coin is real; the mind is recorded, not yet hosted.</div>
+      <div class="hint" style="font-size:11px;margin-top:6px"><b style="color:var(--warn,#c90)">This does not make an AGENCY coin.</b>
+      AGENCY's registry only lists coins launched through <b>agencypad.fun</b> itself, and their site says so outright: a coin made
+      elsewhere that merely links to an AGENCY address is not an AGENCY coin. Read off their live launches, what they do that we
+      cannot is set the pump <code>creator</code> to a <b>fresh wallet they generate and hold the key to</b> &mdash; that wallet is
+      the coin's treasury, and it is what funds the mind. We cannot mint a key they custody, and we cannot write to their database.
+      <br><br>What this pad does give you: a real pump.fun launch with every option below, the model and prompt recorded permanently
+      in the token's <b>metadata</b>, and the CREATOR FEE RECIPIENT field above if you want the fees going to a treasury of your own
+      rather than your launch wallet. To get a coin with an actual AGENCY mind, launch it on their site.</div>
     </div>
 
     <div id="pumpRow" class="hidden">
@@ -282,6 +286,8 @@
       </div>
       <label style="margin-top:10px" title="pump.fun removed this"><input type="checkbox" id="pumpCashback" disabled style="width:auto;margin-right:6px">
         CASHBACK COIN <span class="hint">removed by pump.fun &mdash; <code>create_v2</code> now fails when this is set. Holder rewards above is the replacement.</span></label>
+      <label style="margin-top:10px">CREATOR FEE RECIPIENT <span class="hint">blank = your wallet · pump takes this as an argument, so it can be any address &mdash; whoever holds that key collects the fees, permanently</span></label>
+      <input type="text" id="pumpCreatorAddress" spellcheck="false" placeholder="treasury wallet (default: you)">
       <label style="margin-top:10px">CUSTOM PAIR CONTRACT <span class="hint">overrides the dropdown · works for launching and arming, listed or not</span></label>
       <input type="text" id="pumpQuoteCustom" spellcheck="false"
              placeholder="paste any mint address to pair against">

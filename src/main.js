@@ -1194,7 +1194,7 @@ const PADS = [
     // async chunks, no program id, and an /api/auth that returns HTML. So the
     // mind is recorded where it is permanent and public rather than posted to
     // a service that does not answer yet. See src/agency.js.
-    id: 'agency-sol', label: 'Agency · pump.fun + a mind', vm: 'sol', enabled: true, family: 'pump',
+    id: 'agency-sol', label: 'Agency-style · pump.fun + a mind', vm: 'sol', enabled: true, family: 'pump',
     agency: true,
     rpc: SOL_RPC,
     explorer: 'https://solscan.io',
@@ -2595,7 +2595,7 @@ async function pumpArm(pad) {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
       name, symbol, uri: IPFS_GW(metaHash),
       devBuy: $('pumpDevBuy').value.trim() || '0',
-      creatorFeeBps: pumpCreatorFeeBps(),
+      creatorAddress: pumpCreatorAddress(),
       // pump.fun removed cashback - create_v2 fails when it is set
       cashback: false,
       feesToHolders: $('pumpFeesToHolders').checked,
@@ -2619,6 +2619,21 @@ async function pumpArm(pad) {
 /// charge (top band 0.95%). A number is only allowed up to the chain's own
 /// max_configurable_creator_fee_bps, which launchPump re-checks against Global
 /// before it builds anything - this is just the early, friendlier complaint.
+/// Who collects the creator fees. Blank means the launching wallet, which is
+/// pump's own default.
+///
+/// Worth being blunt in the validation: create_v2 takes this as an argument and
+/// the address never signs, so nothing stops you handing the fees to a wallet
+/// you do not control, permanently. That is the mechanism agencypad.fun uses on
+/// purpose - a fresh wallet they custody becomes the coin's treasury - and it is
+/// also how you would give your fees away by accident.
+function pumpCreatorAddress() {
+  const raw = ($('pumpCreatorAddress')?.value || '').trim();
+  if (!raw) return undefined;
+  if (!isSolAddress(raw)) throw new Error('the creator fee recipient must be a valid Solana address, or blank for your own wallet');
+  return raw;
+}
+
 function pumpCreatorFeeBps() {
   const raw = ($('pumpCreatorFeePct')?.value || '').trim();
   if (!raw) return 0;
@@ -2736,6 +2751,7 @@ async function pumpFire(index) {
       name: a.name, symbol: a.symbol, uri: a.uri,
       devBuySol: a.devBuy, cashback: false,
       feesToHolders: !!a.feesToHolders, creatorFeeBps: a.creatorFeeBps || 0,
+      creatorAddress: a.creatorAddress || undefined,
       quoteMint: a.quoteMint || undefined,
       onStatus: (m) => setStatus(m),
     });
@@ -2837,6 +2853,7 @@ async function launchSol(pad, inp) {
       cashback: false,
       feesToHolders: $('pumpFeesToHolders').checked,
       creatorFeeBps: pumpCreatorFeeBps(),
+      creatorAddress: pumpCreatorAddress(),
       quoteMint: pumpQuoteMint() || undefined,
       onStatus: (m) => setStatus(m),
     });
@@ -4722,6 +4739,10 @@ async function paintAgencyCost() {
   const cheapest = Math.min(...a.AGENCY_MODELS.map((x) => x.turnMicros));
   hint.innerHTML = `<b>${esc(m.name)}</b> · ${perTurn.toFixed(4)} per turn · `
     + `${per100.toLocaleString()} turns per $100 of fees · ${(m.context / 1000).toLocaleString()}k context`
+    // Said out loud because it is a snapshot: Agency reprices (two models moved
+    // within a day of being copied) and their page sends no CORS header, so this
+    // cannot refresh itself from the browser.
+    + ` · <span title="Agency reprices and their page blocks cross-origin reads, so this cannot refresh itself">priced ${esc(a.AGENCY_CATALOGUE_READ)}</span>`
     + (m.turnMicros > cheapest * 4
       ? ` · <span style="color:var(--warn,#c90)">${(m.turnMicros / cheapest).toFixed(0)}x the cheapest model here</span>`
       : '');
