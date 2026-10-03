@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  AGENCY_MODELS, AGENCY_PROVIDERS, AGENCY_DEFAULT_MODEL, AGENCY_PROMPT_MAX,
+  AGENCY_MODELS, AGENCY_PROVIDERS, AGENCY_DEFAULT_MODEL, AGENCY_PROMPT_MAX, AGENCY_CATALOGUE_READ,
   agencyModel, agencyTurnCost, agencyTurnsFor, agencyMindSpec,
 } from '../../src/agency.js';
 
@@ -55,16 +55,39 @@ if (theirs) {
     'the catalogue has the same number of models as their live page',
     `${AGENCY_MODELS.length} ours / ${theirs.length} theirs`);
 
-  const key = (m) => `${m.id}|${m.name}|${m.provider}|${m.context}|${m.turnMicros}`;
-  const ours = new Set(AGENCY_MODELS.map(key));
-  const live = new Set(theirs.map(key));
+  // The STRUCTURE has to match exactly. A model added, dropped, renamed or moved
+  // between providers changes what the pad can offer, and a prompt pinned to a
+  // model their runtime does not know is a coin with nothing running it.
+  const shape = (m) => `${m.id}|${m.name}|${m.provider}|${m.context}`;
+  const ours = new Set(AGENCY_MODELS.map(shape));
+  const live = new Set(theirs.map(shape));
   const missing = [...live].filter((k) => !ours.has(k)).map((k) => k.split('|')[0]);
   const extra = [...ours].filter((k) => !live.has(k)).map((k) => k.split('|')[0]);
   check(missing.length === 0 && extra.length === 0,
-    'and every model matches on id, name, provider, context AND per-turn cost',
+    'every model matches on id, name, provider and context',
     missing.length || extra.length
       ? `missing ${missing.join(',') || 'none'} / stale ${extra.join(',') || 'none'}`
       : `${ours.size} exact`);
+
+  // The PRICE is a different kind of fact. turnMicros moves on their side -
+  // Kimi K3 went 10334 -> 9494 and GLM 5.3 3015 -> 2355 within a day of being
+  // copied - and their page sends no Access-Control-Allow-Origin, so the pad
+  // cannot refresh it from the browser. Failing the suite on their pricing
+  // decisions would make it cry wolf, so drift is REPORTED and the thing
+  // actually asserted is that the pad admits the number is a snapshot.
+  const mine = new Map(AGENCY_MODELS.map((m) => [m.id, m]));
+  const drift = theirs
+    .filter((t) => mine.has(t.id) && mine.get(t.id).turnMicros !== t.turnMicros)
+    .map((t) => `${t.id} ${mine.get(t.id).turnMicros}->${t.turnMicros}`);
+  if (drift.length) {
+    console.log(`NOTE  ${drift.length} model(s) repriced since ${AGENCY_CATALOGUE_READ}: ${drift.join(', ')}`);
+    console.log('      update AGENCY_MODELS and AGENCY_CATALOGUE_READ when convenient — not a code fault');
+  } else {
+    console.log(`NOTE  no price drift since ${AGENCY_CATALOGUE_READ}`);
+  }
+  check(/priced \$\{esc\(a\.AGENCY_CATALOGUE_READ\)\}/.test(
+    fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'main.js'), 'utf8')),
+  'the pad shows when the price was read, rather than presenting a snapshot as live');
   check(theirs.some((m) => m.id === AGENCY_DEFAULT_MODEL),
     'the default model is one they actually offer', AGENCY_DEFAULT_MODEL);
 }
@@ -147,13 +170,93 @@ check(/addEventListener\('change', paintAgencyCost\)/.test(MAIN),
   'changing the model repaints the cost, so the burn rate is never stale');
 
 // --- and it does not overclaim --------------------------------------------------
+//
+// A launch from this pad is NOT an AGENCY coin, and both the module and the page
+// have to say so. An earlier version of this test asserted the opposite mistake:
+// that Agency has no backend. That was the wrong conclusion from a real
+// observation - their /launch chunks ship no submit handler, but /coins and
+// /coin/<mint> are server-rendered with live market cap and fee totals for 200
+// coins, so the backend plainly exists.
 const AGENCY = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'agency.js'), 'utf8');
-check(/no backend/i.test(AGENCY) && /api\/auth/.test(AGENCY),
-  'the module records that their site has no backend, which is why nothing is posted to it');
+check(/CANNOT MAKE AN AGENCY COIN/.test(AGENCY),
+  'the module states plainly that it cannot produce an AGENCY coin');
+check(/the backend plainly/.test(AGENCY) && !/there is no backend/.test(AGENCY),
+  'and records that their backend does exist, correcting the earlier claim');
 check(!/fetch\(/.test(AGENCY),
-  'and it calls nothing, rather than pretending an endpoint exists');
-check(/has no backend yet/i.test(HTML),
-  'the pad tells you the mind is recorded and not yet hosted');
+  'it still calls nothing, rather than inventing an endpoint');
+check(/does not make an AGENCY coin/i.test(HTML),
+  'and the pad says the same on its face');
+check(/CREATOR FEE RECIPIENT/.test(HTML) && /treasury/i.test(HTML),
+  'naming the mechanism it cannot reproduce: a creator wallet Agency custodies');
+
+// --- the creator argument, which is the whole mechanism -------------------------
+const PUMP = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'pump.js'), 'utf8');
+check(/creatorAddress,/.test(PUMP),
+  'launchPump accepts a creator address, since create_v2 takes one as an argument');
+check(/creator: creatorAddress \? new PublicKey\(creatorAddress\) : payer\.publicKey/.test(PUMP),
+  'defaulting to the payer, which is what every launch here did before');
+const calls = (MAIN.match(/creatorAddress: /g) || []).length;
+check(calls >= 3,
+  'and it is threaded through the launch, the armed preset and the firing of one',
+  `${calls} sites`);
+check(/function pumpCreatorAddress\(\)/.test(MAIN) && /isSolAddress\(raw\)/.test(MAIN),
+  'the address is validated, because a bad one would hand the fees nowhere');
+
+
+// --- and the override really changes the instruction ----------------------------
+//
+// Source greps prove the plumbing, not the behaviour. This builds the same launch
+// twice and reads the `creator` out of create_v2's own argument bytes, which is
+// the only thing that decides where the fees go.
+//
+// The layout: 8-byte discriminator, then name / symbol / uri as length-prefixed
+// strings, then the 32-byte creator. Walking the strings is how the creator is
+// located without assuming their lengths.
+const { pumpWarmup, buildPumpLaunch, PUMP_PROGRAM } = await import('../../src/pump.js');
+const { Connection, Keypair, PublicKey } = await import('@solana/web3.js');
+const { healthyRpc } = await import('../../src/rpc.js');
+
+const rpc = await healthyRpc();
+const conn = new Connection(rpc, 'confirmed');
+const CREATE_DISC = Buffer.from('d6904cec5f8b31b4', 'hex');
+const TREASURY = 'AgEnCy1111111111111111111111111111111111111';
+
+async function creatorOf(creatorAddress) {
+  const warm = await pumpWarmup({ rpcUrl: rpc });
+  const tx = await buildPumpLaunch({
+    connection: conn, payer: Keypair.generate(), mint: Keypair.generate(),
+    name: 'Mind', symbol: 'MIND', uri: 'https://x/m.json',
+    devBuySol: 0, slippageBps: 1000,
+    global: warm.global, quote: warm.quote, lookupTable: warm.lookupTable,
+    ...(creatorAddress ? { creatorAddress } : {}),
+  });
+  const keys = tx.message.getAccountKeys({
+    addressLookupTableAccounts: warm.lookupTable?.value ? [warm.lookupTable.value] : [],
+  });
+  for (const ix of tx.message.compiledInstructions) {
+    const d = Buffer.from(ix.data);
+    if (!keys.get(ix.programIdIndex)?.equals(PUMP_PROGRAM) || !d.subarray(0, 8).equals(CREATE_DISC)) continue;
+    let o = 8;
+    for (let i = 0; i < 3; i++) { o += 4 + d.readUInt32LE(o); }   // name, symbol, uri
+    return new PublicKey(d.subarray(o, o + 32)).toBase58();
+  }
+  return null;
+}
+
+let treasuryValid = true;
+try { new PublicKey(TREASURY); } catch { treasuryValid = false; }
+if (!treasuryValid) {
+  console.log('SKIP  the sample treasury address is not valid base58');
+} else {
+  const overridden = await creatorOf(TREASURY);
+  check(overridden === TREASURY,
+    'setting creatorAddress puts THAT wallet in create_v2, which is where the fees go',
+    overridden);
+  const defaulted = await creatorOf(null);
+  check(defaulted !== TREASURY && !!defaulted,
+    'and leaving it unset keeps the payer as creator, exactly as before',
+    defaulted?.slice(0, 10) + '…');
+}
 
 console.log('');
 process.exit(fails.length ? 1 : 0);

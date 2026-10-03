@@ -363,6 +363,9 @@ export async function buildPumpLaunch(opts) {
     connection, payer, mint, name, symbol, uri,
     devBuySol = 0, slippageBps = 1000, priorityMicroLamports = 200000, computeUnits = 600000,
     global, quote = null, cashback = false, feesToHolders = false, creatorFeeBps = 0,
+    // see launchPump: create_v2 takes `creator` as an argument and that address
+    // never signs, so the fees can be routed anywhere. Unset it is the payer.
+    creatorAddress,
   } = opts;
   const g = global ?? await pumpStatus(connection.rpcEndpoint);
   const ixs = [
@@ -370,7 +373,8 @@ export async function buildPumpLaunch(opts) {
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityMicroLamports }),
     createV2Ix({
       mint: mint.publicKey, user: payer.publicKey, name, symbol, uri,
-      creator: payer.publicKey, quote, cashback, feesToHolders, creatorFeeBps,
+      creator: creatorAddress ? new PublicKey(creatorAddress) : payer.publicKey,
+      quote, cashback, feesToHolders, creatorFeeBps,
     }),
   ];
 
@@ -701,6 +705,18 @@ export async function launchPump(opts) {
     rpcUrl, secretKey, name, symbol, uri, devBuySol = 0,
     slippageBps = 1000, quoteMint, cashback = false, feesToHolders = false, creatorFeeBps = 0,
     simulateOnly = false, onStatus,
+    // Who receives the creator fees, which need not be the wallet launching.
+    //
+    // create_v2 takes `creator` as an ARGUMENT and that address never signs, so
+    // it can be any wallet. That is exactly how agencypad.fun works: the human
+    // pays and signs, while `creator` is a fresh wallet Agency generates and
+    // custodies, and that wallet IS the coin's treasury - which is what their
+    // "creator fees -> its own treasury" and "keys never reachable" describe.
+    //
+    // Unset it stays the payer, which is pump's default and what every launch
+    // here did before. Setting it gives the fees away: whoever holds that key
+    // collects them, and it cannot be changed afterwards.
+    creatorAddress,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
@@ -772,7 +788,7 @@ export async function launchPump(opts) {
   say('simulating…');
   const dry = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-    feesToHolders, creatorFeeBps: wantBps, lookupTable,
+    feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable,
   });
   const sim = await connection.simulateTransaction(dry, { commitment: 'confirmed' });
   if (sim.value.err) {
@@ -802,7 +818,7 @@ export async function launchPump(opts) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const tx = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-    feesToHolders, creatorFeeBps: wantBps, lookupTable, blockhash, computeUnits,
+    feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable, blockhash, computeUnits,
   });
   const raw = tx.serialize();
 

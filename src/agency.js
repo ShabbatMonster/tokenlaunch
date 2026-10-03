@@ -9,18 +9,33 @@
 // "Dev buy SOL · optional", "One signature" - and ships the model catalogue
 // as server-rendered props.
 //
-// WHAT IS NOT THERE, and this is the part that decides the shape of this pad:
-// there is no backend. The whole site is nine static chunks with no async
-// chunks behind them, no Solana program id anywhere, no submit handler, and a
-// single /api/auth route that answers with the HTML page rather than JSON. The
-// launch form renders and has nothing to post to. So there is no service to
-// register a mind with, and this pad does not pretend otherwise.
+// THIS PAD CANNOT MAKE AN AGENCY COIN, and the reason is worth stating exactly,
+// because an earlier version of this comment got it wrong. It said Agency had
+// no backend - reasoning from a /launch page whose nine chunks carry no submit
+// handler and no program id. That was the wrong conclusion from a real
+// observation: /coins and /coin/<mint> are server-rendered with live market
+// cap, fee totals and an AWAKE flag for 200 coins, so the backend plainly
+// exists. The launch form just does not ship its handler in those chunks.
 //
-// What it does instead: launch the real coin on pump.fun - the same path the
-// pump pad uses, so every pump option still applies - and write the mind's
-// configuration into the token's own metadata, which is the one place it is
-// permanent, public and readable by whoever ends up running it. If Agency
-// later exposes an endpoint, the spec built here is what gets posted to it.
+// What they do that cannot be reproduced, read off their live launches rather
+// than their copy: the human pays and signs the pump create from their own
+// wallet - every payer is a different ordinary wallet, one of them months old -
+// but the `creator` ARGUMENT is set to a fresh wallet Agency generates and
+// holds the key to. create_v2 takes creator as an argument and that address
+// never signs, so it can be anything. That wallet receives the creator fees and
+// IS the coin's treasury; it is what their "creator fees -> its own treasury"
+// and "keys never reachable" describe, and what funds the mind.
+//
+// So two things are out of reach: a key Agency custodies, and a row in their
+// database. Their own site says as much - a coin made elsewhere that merely
+// links to an AGENCY address is not an AGENCY coin, and every real one is on
+// the coins page.
+//
+// What this pad is, then: a real pump.fun launch with every pump option intact,
+// the mind recorded permanently in the token's metadata, and the creator fees
+// routable to a treasury of your choosing through the same argument Agency
+// uses. An AGENCY-registered coin with an actual mind has to be launched on
+// their site.
 //
 // The model list below is theirs, copied exactly: 25 models across 10
 // providers, with the context window and per-turn cost they publish. Nothing
@@ -28,6 +43,15 @@
 // mind configured against a model their runtime has never heard of is just a
 // broken coin.
 // ---------------------------------------------------------------------------
+
+/// When this catalogue was read off their page.
+///
+/// It matters because turnMicros is a PRICE and prices move: Kimi K3 went
+/// 10334 -> 9494 and GLM 5.3 3015 -> 2355 within a day of being copied. Their
+/// page sends no Access-Control-Allow-Origin, so the launcher cannot refresh
+/// these from the browser - a snapshot is the only option, and calling it one
+/// is the difference between a stale number and a lie.
+export const AGENCY_CATALOGUE_READ = '2026-10-03';
 
 /// Agency's model catalogue, from the `models` prop on agencypad.fun/launch.
 ///
@@ -48,7 +72,7 @@ export const AGENCY_MODELS = [
   { id: "google/gemini-3.8-flash", name: "Google: Gemini 3.8 Flash", provider: "google", context: 1048576, turnMicros: 6375 },
   { id: "minimax/minimax-m3", name: "MiniMax: MiniMax M3", provider: "minimax", context: 1048576, turnMicros: 2400 },
   { id: "mistralai/mistral-medium-3-5", name: "Mistral: Mistral Medium 3.5", provider: "mistralai", context: 262144, turnMicros: 12750 },
-  { id: "moonshotai/kimi-k3", name: "MoonshotAI: Kimi K3", provider: "moonshotai", context: 1048576, turnMicros: 10334 },
+  { id: "moonshotai/kimi-k3", name: "MoonshotAI: Kimi K3", provider: "moonshotai", context: 1048576, turnMicros: 9494 },
   { id: "openai/gpt-5.5", name: "OpenAI: GPT-5.5", provider: "openai", context: 1050000, turnMicros: 45000 },
   { id: "openai/gpt-5.6-luna", name: "OpenAI: GPT-5.6 Luna", provider: "openai", context: 1050000, turnMicros: 1800 },
   { id: "openai/gpt-5.6-sol", name: "OpenAI: GPT-5.6 Sol", provider: "openai", context: 1050000, turnMicros: 17000 },
@@ -61,7 +85,7 @@ export const AGENCY_MODELS = [
   { id: "qwen/qwen3.8-max-0902", name: "Qwen: Qwen3.8 Max (0902)", provider: "qwen", context: 1000000, turnMicros: 15000 },
   { id: "x-ai/grok-4.6", name: "SpaceXAI: Grok 4.6", provider: "x-ai", context: 500000, turnMicros: 15000 },
   { id: "x-ai/grok-4.7", name: "SpaceXAI: Grok 4.7", provider: "x-ai", context: 500000, turnMicros: 15000 },
-  { id: "z-ai/glm-5.3", name: "Z.ai: GLM 5.3", provider: "z-ai", context: 1048576, turnMicros: 3015 },
+  { id: "z-ai/glm-5.3", name: "Z.ai: GLM 5.3", provider: "z-ai", context: 1048576, turnMicros: 2355 },
 ];
 
 export const AGENCY_PROVIDERS = [...new Set(AGENCY_MODELS.map((m) => m.provider))];
