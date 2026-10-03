@@ -1,6 +1,7 @@
 import { JSDOM } from 'jsdom';
 import fs from 'fs';
 import path from 'path';
+import { healthyRpc } from '../../src/rpc.js';
 
 // Run with:  node extension/test/multi-venue.test.mjs
 //
@@ -145,7 +146,11 @@ check(MANIFEST.default_title === undefined,
 //
 // Everything above is structure. This is the actual coin that did not work.
 const { inspectMeteoraMigration, inspectPumpMigration } = await import('../../src/ext-launcher.js');
-const RPC = 'https://mainnet.helius-rpc.com/?api-key=ae11f74a-b518-408b-bc88-524c277da375';
+// Chosen rather than hardcoded. Every suite in this repo pinned the same key,
+// so when it hit its quota they all died at once on "429 max usage reached" -
+// a test failure that said nothing about the code. scanning: true keeps this
+// off the public endpoint, which cannot serve getProgramAccounts.
+const RPC = await healthyRpc({ scanning: true });
 const pump = await inspectPumpMigration({ rpcUrl: RPC, mint: DBC }).catch(() => null);
 check(pump?.isPumpCoin === false,
   'the coin really is not a pump coin, which is why the pump-only path found nothing');

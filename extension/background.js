@@ -18,6 +18,7 @@ import {
   inspectRaydiumMigration,
   previewSwapIntoQuote, swapIntoQuote, tokenHoldings,
   inspectPonsMigration, measurePonsFirstBuy, migratePons, evmAddressFromKey,
+  SOL_RPC as BUNDLED_RPC, SOL_RPC_FALLBACKS as BUNDLED_RPC_FALLBACKS, probeRpc,
 } from './vendor/launcher.js';
 
 // where the launcher keeps its keys, so the extension can borrow rather than
@@ -30,8 +31,9 @@ const LAUNCHER_URLS = [
 const LAUNCHER_HOME = 'https://shabbatmonster.github.io/tokenlaunch/';
 
 const DEFAULTS = {
-  // measured 15-21ms against 23-110ms for the other key in this repo
-  rpcUrl: 'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea',
+  // From the shared list in src/rpc.js, so the worker never holds its own copy
+  // of the keys - three had drifted apart across this repo before.
+  rpcUrl: BUNDLED_RPC,
   // 40% by default, which is a choice about LOSING the race rather than about
   // price impact. The floor is measured by simulating the real buy, so your own
   // impact - however large the buy - is already inside the number it is a
@@ -44,10 +46,7 @@ const DEFAULTS = {
   // Tried in order when the configured one is refusing. A throttled key answers
   // 429 and web3.js then retries the SAME endpoint with a backoff per attempt,
   // which is where the seconds go. Moving endpoint is far cheaper than waiting.
-  rpcFallbacks: [
-    'https://mainnet.helius-rpc.com/?api-key=ae11f74a-b518-408b-bc88-524c277da375',
-    'https://api.mainnet-beta.solana.com',
-  ],
+  rpcFallbacks: BUNDLED_RPC_FALLBACKS,
 };
 
 const getSettings = async () => ({ ...DEFAULTS, ...(await chrome.storage.local.get(Object.keys(DEFAULTS))) });
@@ -76,21 +75,11 @@ let migrateInFlight = false;
 const RPC_TTL_MS = 60_000;
 let goodRpc = null;
 
-async function probeRpc(url, timeoutMs = 1500) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, {
-      method: 'POST', signal: ctl.signal,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestBlockhash', params: [{ commitment: 'confirmed' }] }),
-    });
-    if (!r.ok) return false;                  // 429 lands here, and we move on
-    const j = await r.json();
-    return !!j?.result;
-  } catch { return false; } finally { clearTimeout(timer); }
-}
 
+/// Local rather than the shared one, because this has to honour whatever the
+/// user put in options. The probe underneath it is shared.
+/// Local rather than the shared chooser, because this one has to honour
+/// whatever the user put in options. The probe underneath it is shared.
 async function healthyRpc(settings) {
   if (goodRpc && Date.now() - goodRpc.at < RPC_TTL_MS) return goodRpc.url;
   const urls = [settings.rpcUrl, ...(settings.rpcFallbacks || [])].filter(Boolean);

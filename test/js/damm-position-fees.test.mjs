@@ -13,8 +13,13 @@
 // Run: node test/js/damm-position-fees.test.mjs
 
 import { findDammPositions, previewDammClaim, POOL_AUTHORITY } from '../../src/dammFees.js';
+import { healthyRpc } from '../../src/rpc.js';
 
-const RPC = 'https://mainnet.helius-rpc.com/?api-key=3fb08d49-71d7-492b-84f1-9ff0e3eb95ea';
+// Chosen rather than hardcoded. Every suite in this repo pinned the same key,
+// so when it hit its quota they all died at once on "429 max usage reached" -
+// a test failure that said nothing about the code. scanning: true keeps this
+// off the public endpoint, which cannot serve getProgramAccounts.
+const RPC = await healthyRpc({ scanning: true });
 const OWNER = 'JDQKDrc1TQgBRvdFh56tkta5sYcDj1SoP52Eiu64rSrT';
 
 let ok = true;

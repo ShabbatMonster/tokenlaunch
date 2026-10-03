@@ -1,6 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { inspectPumpMigration, migratePump, keypairFrom } from './pumpMigrate.js';
 import { previewSnipe, snipeMigration } from './pumpSnipe.js';
+import { SOL_RPC } from './rpc.js';
 
 // ---------------------------------------------------------------------------
 // The pump migrate page. Same shape as force-migrate.html for Pons: paste a
@@ -13,7 +14,8 @@ import { previewSnipe, snipeMigration } from './pumpSnipe.js';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const SOLSCAN = 'https://solscan.io';
-const RPC = 'https://mainnet.helius-rpc.com/?api-key=ae11f74a-b518-408b-bc88-524c277da375';
+// one shared list of endpoints rather than a key pasted per file
+const RPC = SOL_RPC;
 const loadKeys = () => { try { return JSON.parse(localStorage.getItem('keys.v1') || 'null'); } catch { return null; } };
 
 let solKey = null;
