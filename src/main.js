@@ -2667,6 +2667,24 @@ async function pumpReadFeeLimit() {
   }
 }
 
+/// Keep the DEV BUY label honest about what it spends.
+///
+/// A pump launch paired against a non-SOL quote takes its dev buy in THAT
+/// token, not in SOL - pump's create carries the quote as trailing accounts and
+/// the buy settles in it. The label said "SOL" regardless, which is the kind of
+/// thing you only notice after typing 1 and spending one of something else.
+function paintPumpDevSym() {
+  const el = $('pumpDevSym');
+  if (!el) return;
+  let mint = '';
+  try { mint = pumpQuoteMint(); } catch { mint = ''; }
+  if (!mint) { el.textContent = 'SOL'; return; }
+  const sel = $('pumpQuote');
+  const opt = sel && sel.value === mint ? (sel.options[sel.selectedIndex]?.text || '') : '';
+  // the option text reads like "SYMBOL — name"; the symbol alone is enough
+  el.textContent = (opt.split('—')[0] || '').trim() || mint.slice(0, 6) + '…';
+}
+
 function pumpQuoteMint() {
   const custom = $('pumpQuoteCustom').value.trim();
   if (custom) {
@@ -4426,6 +4444,7 @@ function applyPadUI(pad) {
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
+  if (pump) paintPumpDevSym();
   if (pump) renderArmed();
   $('clmmRow').classList.toggle('hidden', !clmm);      // single-sided CLMM curve
   $('uniRow').classList.toggle('hidden', !uni);
@@ -5546,6 +5565,9 @@ function init() {
       if (item.type.startsWith('image/')) { setImage(item.getAsFile()); break; }
     }
   });
+
+  $('pumpQuote').addEventListener('change', paintPumpDevSym);
+  $('pumpQuoteCustom').addEventListener('input', paintPumpDevSym);
 
   $('rpcLine').addEventListener('click', paintRpcLine);
   paintRpcLine().catch(() => {});
