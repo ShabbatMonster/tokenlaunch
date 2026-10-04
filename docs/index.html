@@ -260,9 +260,12 @@
         INFLUENCER <span class="hint">a persistent character that makes videos and posts on X</span></label>
       <div class="hint" style="font-size:11px;margin-top:6px"><b style="color:var(--warn,#c90)">This does not make an AGENCY coin.</b>
       AGENCY's registry only lists coins launched through <b>agencypad.fun</b> itself, and their site says so outright: a coin made
-      elsewhere that merely links to an AGENCY address is not an AGENCY coin. Read off their live launches, what they do that we
-      cannot is set the pump <code>creator</code> to a <b>fresh wallet they generate and hold the key to</b> &mdash; that wallet is
-      the coin's treasury, and it is what funds the mind. We cannot mint a key they custody, and we cannot write to their database.
+      elsewhere that merely links to an AGENCY address is not an AGENCY coin. Their launch transaction is no secret &mdash; four instructions
+      on public programs: pump's <code>CreateV2</code>, then <code>CreateFeeSharingConfig</code> and <code>UpdateFeeShares</code> on
+      pump's own fee-sharing program, then the dev buy. It is reproducible. It just would not help: <b>2,346 coins on chain carry
+      that exact arrangement and AGENCY lists 200</b>, and their site answers &ldquo;not launched on AGENCY&rdquo; for the rest even
+      though the on-chain config is byte-identical bar the mint and the payer. What makes a coin theirs is a row in their database,
+      written when you launch on their site.
       <br><br>What this pad does give you: a real pump.fun launch with every option below, the model and prompt recorded permanently
       in the token's <b>metadata</b>, and the CREATOR FEE RECIPIENT field above if you want the fees going to a treasury of your own
       rather than your launch wallet. To get a coin with an actual AGENCY mind, launch it on their site.</div>

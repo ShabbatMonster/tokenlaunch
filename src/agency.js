@@ -17,19 +17,29 @@
 // cap, fee totals and an AWAKE flag for 200 coins, so the backend plainly
 // exists. The launch form just does not ship its handler in those chunks.
 //
-// What they do that cannot be reproduced, read off their live launches rather
-// than their copy: the human pays and signs the pump create from their own
-// wallet - every payer is a different ordinary wallet, one of them months old -
-// but the `creator` ARGUMENT is set to a fresh wallet Agency generates and
-// holds the key to. create_v2 takes creator as an argument and that address
-// never signs, so it can be anything. That wallet receives the creator fees and
-// IS the coin's treasury; it is what their "creator fees -> its own treasury"
-// and "keys never reachable" describe, and what funds the mind.
+// What their launch transaction actually is, decoded rather than described -
+// and it is NOT secret. Four instructions, all on public programs:
 //
-// So two things are out of reach: a key Agency custodies, and a row in their
-// database. Their own site says as much - a coin made elsewhere that merely
-// links to an AGENCY address is not an AGENCY coin, and every real one is on
-// the coins page.
+//   6EF8rrect...  CreateV2                   the coin, signed and paid by YOU
+//   pfeeUxB6...   CreateFeeSharingConfig     pump's own fee-sharing program
+//   pfeeUxB6...   UpdateFeeShares            + MigrateBondingCurveCreator
+//   6EF8rrect...  Buy                        the optional dev buy
+//
+// Their docs match: "You sign in Phantom; AGENCY never signs." The bonding
+// curve's creator ends up as an account OWNED BY the fee-sharing program, not a
+// wallet - which is the literal meaning of "keys never reachable". An earlier
+// version of this comment said Agency generates a wallet and holds its key.
+// That was wrong: nobody holds a key to it, because it is program-owned.
+//
+// And the shape is not exclusive. 2,346 coins on chain carry exactly this
+// fee-sharing arrangement while Agency lists 200, and asking their own site
+// about the others returns "not launched on AGENCY / no mind" despite the
+// on-chain config being byte-identical apart from the mint and the payer. So
+// reproducing the transaction would not produce an AGENCY coin - the on-chain
+// shape cannot be the marker when thousands of non-AGENCY coins share it.
+//
+// What makes a coin theirs is a row in their database, written when you launch
+// through their site. That is the one thing here that cannot be built.
 //
 // What this pad is, then: a real pump.fun launch with every pump option intact,
 // the mind recorded permanently in the token's metadata, and the creator fees
