@@ -186,8 +186,8 @@ check(!/fetch\(/.test(AGENCY),
   'it still calls nothing, rather than inventing an endpoint');
 check(/does not make an AGENCY coin/i.test(HTML),
   'and the pad says the same on its face');
-check(/CREATOR FEE RECIPIENT/.test(HTML) && /treasury/i.test(HTML),
-  'naming the mechanism it cannot reproduce: a creator wallet Agency custodies');
+check(/row in their database/i.test(HTML) && /2,346/.test(HTML),
+  'and names the real reason: their registry, not anything secret in the transaction');
 
 // --- the creator argument, which is the whole mechanism -------------------------
 const PUMP = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'pump.js'), 'utf8');
