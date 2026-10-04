@@ -1097,6 +1097,20 @@ const PADS = [
       { symbol: 'custom…', address: 'custom' },
     ],
   },
+  {
+    // Abyss Launch ("Black Market Launch") on Robinhood Chain. Deployed, gated
+    // and wired - and open to nobody: no template is registered, nothing has
+    // ever launched through it, and launch.abyss.trading serves a component
+    // named `maintenance-splash`. Disabled rather than half-built, because a
+    // launch() here is ten inferred fields and real money. The readiness line
+    // under the pad list asks the chain, so this turns out to be checkable
+    // rather than a guess about when they open. See src/abyss.js.
+    id: 'abyss-robinhood', label: 'Abyss · Black Market', vm: 'evm', enabled: false,
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
+    nativeSymbol: 'ETH', curve: null,
+  },
   { id: 'noxa-monad',    label: 'Noxa · Monad',   vm: 'evm', enabled: false, chainId: 143,  rpc: '', factory: '0x7F03effbd7ceB22A3f80Dd468f67eF27826acD85', nativeSymbol: 'MON' },
   { id: 'noxa-megaeth',  label: 'Noxa · MegaETH', vm: 'evm', enabled: false, chainId: 4326, rpc: '', factory: '0xAc303930F2f7A78BBB037f3f4622Bd02f5545B9a', nativeSymbol: 'ETH' },
   {
@@ -4674,6 +4688,28 @@ async function paintRaydiumPlatform(pad) {
       + ' they open a window. Use the ordinary pad unless you know one is open.';
 }
 
+// --- is Abyss Launch open yet ----------------------------------------------
+//
+// The pad is disabled because nothing is registered, not because the contracts
+// are missing - so whether it CAN open is a question for the chain rather than
+// a constant in this file. It flips without any code change here.
+async function paintAbyssLine() {
+  const el = $('abyssLine');
+  if (!el) return;
+  try {
+    const { abyssLaunchStatus } = await import('./abyss.js');
+    const s = await abyssLaunchStatus();
+    el.innerHTML = s.ready
+      ? '<span style="color:var(--accent)">Abyss Launch is OPEN</span> — '
+        + `${s.templates.length} template(s) registered. The pad is still disabled: the launch call takes ten `
+        + 'fields whose meaning was never confirmed against a real launch, so it needs wiring against a live one first.'
+      : `<span style="color:var(--muted,#888)">Abyss Launch: not open</span> — ${esc(s.reason || 'unavailable')}`
+        + ` · gate ${s.gateWired ? 'wired' : 'not wired'}`;
+  } catch (e) {
+    el.textContent = 'could not read Abyss Launch: ' + (e?.message || e);
+  }
+}
+
 // --- which RPC is actually up ----------------------------------------------
 //
 // Three Helius keys, and two of them have been maxed at once before. When that
@@ -5568,6 +5604,9 @@ function init() {
 
   $('pumpQuote').addEventListener('change', paintPumpDevSym);
   $('pumpQuoteCustom').addEventListener('input', paintPumpDevSym);
+
+  $('abyssLine').addEventListener('click', paintAbyssLine);
+  paintAbyssLine().catch(() => {});
 
   $('rpcLine').addEventListener('click', paintRpcLine);
   paintRpcLine().catch(() => {});
