@@ -218,20 +218,46 @@ export async function abyssLaunchStatus({ connection } = {}) {
   ]);
 
   const gateWired = !!launcher && getAddress(launcher) === ABYSS_LAUNCH.launchFactory;
+
+  // Readiness comes from something OBSERVABLE, and an earlier version of this
+  // got it badly wrong: it keyed `ready` off findAbyssTemplates(), which
+  // confirms candidate ids against a list that is empty - so it could only ever
+  // return none, and `ready` could only ever be false. That is not a check, it
+  // is a constant wearing a check's clothes, and it would have gone on
+  // reporting "not open" for as long as nobody looked.
+  //
+  // nextTokenId() is the real signal. It REVERTS on the live coordinator today,
+  // which is what an uninitialised launch system looks like; once Abyss opens
+  // it has to return a number, because every launch mints a position against
+  // it. One cheap call, and nothing guessed.
+  const nextTokenId = await pub.readContract({
+    address: ABYSS_LAUNCH.coordinator,
+    abi: [{ type: 'function', name: 'nextTokenId', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' }],
+    functionName: 'nextTokenId',
+  }).then((v) => v).catch(() => null);
+
+  // Kept, but no longer load-bearing: the registry can CONFIRM an id and has no
+  // iterator, so with no candidates this says nothing either way. Reported with
+  // its own count so an empty result is never mistaken for "none exist".
+  const candidates = ABYSS_TEMPLATE_CANDIDATES;
   const templates = await findAbyssTemplates({ connection: pub, version: initialVersion ?? 1 });
 
+  const live = nextTokenId !== null;
   return {
     gateWired,
     launcher: launcher ? getAddress(launcher) : null,
     coordinatorTokenFactory: coordinatorTokenFactory ? getAddress(coordinatorTokenFactory) : null,
     registrar: registrar ? getAddress(registrar) : null,
     initialVersion: initialVersion ?? null,
+    nextTokenId: nextTokenId === null ? null : nextTokenId.toString(),
+    coordinatorLive: live,
     templates,
-    ready: gateWired && templates.length > 0,
+    templatesChecked: candidates.length,
+    ready: gateWired && live,
     reason: !gateWired
       ? 'the launch factory is not wired as the token factory\'s launcher'
-      : templates.length === 0
-        ? 'no template is registered yet - Abyss Launch is deployed but not open'
+      : !live
+        ? 'the coordinator reverts on nextTokenId() - deployed but not initialised, so nothing can launch'
         : null,
   };
 }
