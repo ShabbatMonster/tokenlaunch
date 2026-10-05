@@ -141,6 +141,20 @@ check(status.gateWired, 'the live gate matches what this file records');
 check(typeof status.ready === 'boolean' && (status.ready || !!status.reason),
   'readiness is answered from the chain, with a reason when it is not open');
 
+// Readiness must rest on something that can actually CHANGE. The first version
+// keyed it off a candidate-id list that is empty, so `ready` was false by
+// construction and would have stayed false after Abyss opened. This asserts the
+// signal is the coordinator itself, and that it is not the vacuous one.
+check(status.coordinatorLive === (status.nextTokenId !== null),
+  'readiness tracks the coordinator, which reverts until the system is initialised',
+  status.nextTokenId === null ? 'nextTokenId() reverts' : 'nextTokenId() = ' + status.nextTokenId);
+check(status.templatesChecked === 0 ? status.templates.length === 0 : true,
+  'the template helper reports how many ids it checked, so empty cannot read as "none exist"',
+  `checked ${status.templatesChecked}`);
+const ABI_SRC = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'abyss.js'), 'utf8');
+check(/ready: gateWired && live/.test(ABI_SRC) && !/ready: gateWired && templates.length/.test(ABI_SRC),
+  'and ready is no longer derived from the empty candidate list');
+
 // --- and the pad agrees with the chain ------------------------------------------
 const MAIN = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'main.js'), 'utf8');
 const pad = MAIN.slice(MAIN.indexOf("id: 'abyss-robinhood'"), MAIN.indexOf('\n  },', MAIN.indexOf("id: 'abyss-robinhood'")));
