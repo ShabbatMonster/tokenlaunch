@@ -224,6 +224,11 @@
       </div>
       <div class="hint" id="solQuoteHint" style="font-size:11px;margin-top:4px"></div>
 
+      <div class="row" style="margin-top:10px">
+        <div><label>TOTAL SUPPLY</label><input type="text" id="solSupply" value="1000000000" spellcheck="false"></div>
+      </div>
+      <div class="hint" id="solSupplyHint" style="font-size:11px;margin-top:4px"></div>
+
       <div class="row hidden" id="solFundRow" style="margin-top:10px">
         <div style="flex:0 0 130px"><label>SWAP IN (SOL)</label>
           <input type="text" id="solFundAmount" value="0" spellcheck="false"></div>
@@ -245,8 +250,7 @@
       <details class="adv" id="solParams">
         <summary>bonding-curve parameters (pump.fun defaults)</summary>
         <div class="row">
-          <div><label>TOTAL SUPPLY</label><input type="text" id="solSupply" value="1000000000" spellcheck="false"></div>
-          <div style="flex:0 0 120px"><label>FEE (BPS)</label><input type="text" id="solFeeBps" value="100" spellcheck="false"></div>
+          <div><label>FEE (BPS)</label><input type="text" id="solFeeBps" value="100" spellcheck="false"></div>
         </div>
         <div class="row">
           <div><label>MIGRATION THRESHOLD (QUOTE)</label><input type="text" id="solMigThreshold" spellcheck="false"></div>
