@@ -2493,6 +2493,27 @@ function solQuoteMint(pad) {
 /// 85-equivalent puts the start exactly at the 30-equivalent, which is how
 /// pump's own numbers relate. Priced live through Jupiter, so a stock or memecoin
 /// quote gets today's rate rather than a stale constant.
+/// What the supply figure actually changes.
+///
+/// DBC derives the curve from (total supply, % kept for migration, migration
+/// threshold). The threshold is the quote raised, and it is set separately - so
+/// supply moves the PRICE PER TOKEN and the token count, not the raise. Worth
+/// saying on the page, because "more supply" reads like "bigger launch" and it
+/// is not.
+function paintSolSupplyHint() {
+  const el = $('solSupplyHint');
+  if (!el) return;
+  const supply = Number(String($('solSupply')?.value || '').replace(/,/g, ''));
+  const pct = Number(String($('solMigPct')?.value || '').replace(/,/g, ''));
+  if (!(supply > 0)) { el.textContent = ''; return; }
+  const onCurve = Number.isFinite(pct) && pct > 0 && pct < 100 ? supply * (1 - pct / 100) : null;
+  el.innerHTML = onCurve
+    ? `<b>${onCurve.toLocaleString(undefined, { maximumFractionDigits: 0 })}</b> sold on the curve, `
+      + `${(supply - onCurve).toLocaleString(undefined, { maximumFractionDigits: 0 })} seeded into the pool at migration `
+      + '· supply sets the price per token, not the raise — that is the migration threshold'
+    : `${supply.toLocaleString()} tokens · supply sets the price per token, not the raise`;
+}
+
 async function applyPumpEconomics(pad) {
   const hint = $('solQuoteHint');
   try {
@@ -2500,13 +2521,19 @@ async function applyPumpEconomics(pad) {
     hint.textContent = 'pricing pump.fun economics against this quote\u2026';
     const { pumpEconomics } = await import('./solana.js');
     const e = await pumpEconomics(pad.rpc, quoteMint);
-    $('solSupply').value = String(e.totalSupply);
+    // Supply is yours to set, so this only fills it while it is still the
+    // default. Silently resetting a number someone typed is the kind of thing
+    // you discover after launching a billion of something you wanted a million of.
+    const supplyEl = $('solSupply');
+    const supplyIsDefault = String(supplyEl.value).trim().replace(/,/g, '') === String(e.totalSupply);
+    if (supplyIsDefault) supplyEl.value = String(e.totalSupply);
     $('solMigPct').value = String(e.pctSupplyOnMigration);
     $('solMigThreshold').value = String(e.migrationThreshold);
     const sym = SOL_QUOTES[pad.quoteSel]?.symbol || 'quote';
     hint.innerHTML = `<span class="ok">pump.fun economics</span> \u00b7 opens at ~`
       + `${e.startEquivalent.toLocaleString()} ${esc(sym)} (30 SOL equivalent), migrates at `
-      + `${e.migrationThreshold.toLocaleString()} ${esc(sym)} (85 SOL equivalent)`;
+      + `${e.migrationThreshold.toLocaleString()} ${esc(sym)} (85 SOL equivalent)`
+      + (supplyIsDefault ? '' : ` · kept your supply of ${Number(String(supplyEl.value).replace(/,/g, "")).toLocaleString()}`);
   } catch (err) {
     hint.innerHTML = `<span class="err">${esc(err?.message || String(err))}</span>`;
   }
@@ -4456,6 +4483,7 @@ function applyPadUI(pad) {
   $('supplyRow').classList.toggle('hidden', !pad.customSupply || sol);
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
+  if (meteora) paintSolSupplyHint();
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
   if (pump) paintPumpDevSym();
@@ -5604,6 +5632,8 @@ function init() {
 
   $('pumpQuote').addEventListener('change', paintPumpDevSym);
   $('pumpQuoteCustom').addEventListener('input', paintPumpDevSym);
+
+  for (const id of ['solSupply', 'solMigPct']) $(id).addEventListener('input', paintSolSupplyHint);
 
   $('abyssLine').addEventListener('click', paintAbyssLine);
   paintAbyssLine().catch(() => {});
