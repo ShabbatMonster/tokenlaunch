@@ -273,6 +273,16 @@ function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, 
         key(ataOf(bondingCurve, quote.mint, quote.tokenProgram), false, true),
         key(quote.tokenProgram),
         key(PUMP_QUOTE_REGISTRY),
+        // Pairing against another pump coin needs four more: where that coin's
+        // own liquidity sits. Appended only in that case, because a registry
+        // quote has no curve and no pool and the 20-account shape is what every
+        // launch here has used. See pumpCoinQuoteAccounts.
+        ...(quote.pumpCoin ? [
+          key(quote.pumpCoin.curve, false, true),
+          key(quote.pumpCoin.pool, false, true),
+          key(quote.pumpCoin.poolBaseVault, false, true),
+          key(quote.pumpCoin.poolQuoteVault, false, true),
+        ] : []),
       ] : []),
     ],
   });
@@ -620,7 +630,99 @@ async function resolveQuote(connection, quoteMint) {
       q.warnings.push(`transfer hook active: ${hook.accounts.length} extra account(s) attached to each trade`);
     }
   }
+  q.pumpCoin = await pumpCoinQuoteAccounts(connection, q.mint).catch(() => null);
+  if (q.pumpCoin) {
+    if (!q.pumpCoin.complete) {
+      q.blockers.push(
+        'that pump coin has not migrated yet, so it has no PumpSwap pool to price against - '
+        + 'it can only be used as a quote once its curve completes',
+      );
+    }
+    // The one-level rule, checked rather than assumed: the quote coin must
+    // itself be paired with SOL or with a quote-control mint. The second live
+    // example reads like a two-deep chain until you notice its third link is a
+    // registry mint, and a genuine chain is what this would otherwise allow
+    // someone to attempt.
+    const inner = q.pumpCoin.innerQuote.toBase58();
+    if (inner !== WSOL_MINT.toBase58()) {
+      const registry = await pumpQuoteRegistry(connection).catch(() => []);
+      if (!registry.some((r) => r.mint === inner)) {
+        q.blockers.push(
+          `that pump coin is paired with ${inner.slice(0, 8)}…, which is neither SOL nor a quote-control `
+          + 'mint. pump allows one level of indirection, not a chain.',
+        );
+      }
+    }
+  }
   return q;
+}
+
+// --- pairing against another pump coin --------------------------------------
+//
+// From pump's 2026-10-07 update: "New Pump coins can be paired with any
+// previously created Pump coin that are paired with SOL, USDC or one of the
+// mints in the quote control PDA." That quote control PDA turns out to be the
+// account this file already calls PUMP_QUOTE_REGISTRY - both derive from
+// pda(['quote-control']) - so the registry is the base case and a pump coin is
+// a new recursive one.
+//
+// Decoded from the first two live examples rather than taken from the post:
+//
+//   EXgYtzKh...pump  quoted in GDz2tXD7...pump, which is quoted in SOL
+//   E4q7cAYJ...pump  quoted in 9yPESNHi...pump, which is quoted in 9cRCn9rG...pump
+//
+// The second one looks like a chain two deep and is not: 9cRCn9rG IS a registry
+// mint. So the rule is exactly what the announcement says and no more - ONE
+// level of indirection, the quote coin itself paired with SOL, USDC or a
+// quote-control mint. Checking registry membership of that third link is what
+// tells the two readings apart, and skipping it is how this file first recorded
+// a recursion that does not exist.
+//
+// Both were still create_v2 - same discriminator, no new instruction needed -
+// but carrying 24 accounts instead of the 20 a registry quote needs. The four
+// extra ones say where the quote coin's own liquidity lives:
+//
+//   [20] the quote's bonding curve
+//   [21] the quote's PumpSwap pool
+//   [22] that pool's vault for the quote mint
+//   [23] that pool's vault for the quote's own quote
+//
+// Which is why the quote has to have MIGRATED first: before that there is no
+// pool and the last three do not exist. Both live examples are complete.
+const PUMP_AMM_PROGRAM = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+const WSOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
+
+/// The extra accounts create_v2 wants when the quote is itself a pump coin, or
+/// null when it is an ordinary mint and the 20-account shape applies.
+export async function pumpCoinQuoteAccounts(connection, quoteMint) {
+  const mint = new PublicKey(quoteMint);
+  const curve = await pumpCurve(connection, mint);
+  if (!curve) return null;                       // not a pump coin at all
+
+  // The curve records native SOL as the all-zero pubkey while the pool holds
+  // wrapped SOL, so the pool's pairing has to be translated rather than copied.
+  const inner = curve.quoteMint.equals(NATIVE_QUOTE) ? WSOL_MINT : curve.quoteMint;
+  const [innerInfo, mintInfo] = await Promise.all([
+    connection.getAccountInfo(inner),
+    connection.getAccountInfo(mint),
+  ]);
+  const innerProgram = innerInfo ? innerInfo.owner : TOKEN_PROGRAM;
+  const mintProgram = mintInfo ? mintInfo.owner : TOKEN_2022;
+
+  const poolAuthority = pda([Buffer.from('pool-authority'), mint.toBuffer()]);
+  const pool = pda(
+    [Buffer.from('pool'), Buffer.from([0, 0]), poolAuthority.toBuffer(), mint.toBuffer(), inner.toBuffer()],
+    PUMP_AMM_PROGRAM,
+  );
+  return {
+    complete: curve.complete,
+    innerQuote: inner,
+    innerProgram,
+    curve: curve.address,
+    pool,
+    poolBaseVault: ataOf(pool, mint, mintProgram),
+    poolQuoteVault: ataOf(pool, inner, innerProgram),
+  };
 }
 
 /// UI amount -> raw units for a quote, honouring a scaled-UI multiplier.
@@ -647,7 +749,12 @@ export async function pumpProbe(opts) {
     const g = await pumpStatus(rpcUrl);
     if (!g.createV2Enabled) return { ready: false, reason: 'pump.fun has create_v2 disabled' };
     const quote = await resolveQuote(connection, quoteMint);
-    const whitelisted = !quote || g.whitelistedQuotes.some((q) => q.mint === quote.mint.toBase58());
+    // Two ways to be pairable now: in the quote registry, or a migrated pump
+    // coin. The second is pump's 2026-10-07 change, and reporting it as
+    // "not whitelisted" would have been wrong rather than merely unhelpful.
+    const inRegistry = !quote || g.whitelistedQuotes.some((q) => q.mint === quote.mint.toBase58());
+    const asPumpCoin = !!quote?.pumpCoin?.complete;
+    const whitelisted = inRegistry || asPumpCoin;
 
     const tx = await buildPumpLaunch({
       connection,
@@ -874,6 +981,12 @@ export async function pumpCurve(connection, mintAddress) {
   const curve = pda([Buffer.from('bonding-curve'), mint.toBuffer()]);
   const info = await connection.getAccountInfo(curve);
   if (!info) return null;
+  // An address is not a curve just because something lives there. Checking the
+  // owner and the length matters now that every quote gets probed this way:
+  // pda(['bonding-curve', USDC]) resolves to a real but unrelated account, and
+  // reading reserves straight off it threw ERR_BUFFER_OUT_OF_BOUNDS rather than
+  // answering "not a pump coin".
+  if (!info.owner.equals(PUMP_PROGRAM) || info.data.length < 81) return null;
   const d = info.data;
   return {
     address: curve,
