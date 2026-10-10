@@ -220,7 +220,12 @@
       <input type="text" id="solCustomMint" class="hidden" spellcheck="false"
              style="margin-top:8px" placeholder="quote mint address">
       <div class="row" style="margin-top:8px">
-        <div><button class="btn secondary" id="solPumpEconBtn" style="margin-top:0">PUMP ECONOMICS (30 / 85 SOL EQUIVALENT)</button></div>
+        <div style="flex:0 0 96px"><label style="margin-top:0">START (SOL eq.)</label>
+          <input type="text" id="solEconStart" value="30" spellcheck="false"></div>
+        <div style="flex:0 0 110px"><label style="margin-top:0">MIGRATE (SOL eq.)</label>
+          <input type="text" id="solEconMigrate" value="85" spellcheck="false"></div>
+        <div><label style="margin-top:0">&nbsp;</label>
+          <button class="btn secondary" id="solPumpEconBtn" style="margin-top:0">APPLY ECONOMICS</button></div>
       </div>
       <div class="hint" id="solQuoteHint" style="font-size:11px;margin-top:4px"></div>
 
