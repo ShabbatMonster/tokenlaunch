@@ -798,19 +798,52 @@ export async function solEquivalent(rpcUrl, quoteMint, solAmount) {
 }
 
 /// pump.fun-shaped curve parameters for a given quote, priced live.
-export async function pumpEconomics(rpcUrl, quoteMint) {
+export async function pumpEconomics(rpcUrl, quoteMint, opts = {}) {
+  // The two figures are pump's by default and yours if you say so. They are not
+  // independent of each other: DBC takes (supply, % on migration, raise), and
+  // the START falls out of those - so naming a start means solving for the
+  // percentage rather than setting it.
+  const startSol = Number(opts.startSolEquivalent ?? PUMP_CURVE.startSolEquivalent);
+  const migrateSol = Number(opts.migrateSolEquivalent ?? PUMP_CURVE.migrateSolEquivalent);
+  if (!(startSol > 0) || !(migrateSol > 0)) throw new Error('both economics figures must be positive');
+  if (startSol >= migrateSol) throw new Error('the start has to be below the migration figure');
+
   const connection = new Connection(rpcUrl, 'confirmed');
   const { decimals } = await readQuoteMint(connection, new PublicKey(quoteMint));
   let migrationThreshold;
   let startEquivalent;
   if (quoteMint === SOL_MINT) {
-    migrationThreshold = PUMP_CURVE.migrateSolEquivalent;
-    startEquivalent = PUMP_CURVE.startSolEquivalent;
+    migrationThreshold = migrateSol;
+    startEquivalent = startSol;
   } else {
-    const lamports = Math.round(PUMP_CURVE.migrateSolEquivalent * 1e9);
+    const lamports = Math.round(migrateSol * 1e9);
     const q = await jupiterQuote(SOL_MINT, quoteMint, lamports, 100);
     migrationThreshold = Number(q.outAmount) / 10 ** decimals;
-    startEquivalent = migrationThreshold * (PUMP_CURVE.startSolEquivalent / PUMP_CURVE.migrateSolEquivalent);
+    startEquivalent = migrationThreshold * (startSol / migrateSol);
+  }
+  // pump's 30/85 gives 20.69%; any other pair scales the same way, and the
+  // migration market cap that comes out is raise x 100 / pct - checked against
+  // the SDK across seven configurations, exact every time.
+  const pct = PUMP_CURVE.pctSupplyOnMigration * (startSol / migrateSol) / (PUMP_CURVE.startSolEquivalent / PUMP_CURVE.migrateSolEquivalent);
+
+  // DBC will not build a curve for every ratio, and the failure it gives is
+  // "Not enough liquidity" with a raw lamport figure - useless for working out
+  // what to type instead. The band below was measured by binary-searching the
+  // SDK at a 1B supply: under ~3.17% there is too little supply left for the
+  // pool, and at ~49.84% and up it overflows. Since pct is fixed by the ratio
+  // of the two figures, that band is really a bound on START given MIGRATE.
+  const PCT_MIN = 3.174;
+  const PCT_MAX = 49.84;
+  if (pct < PCT_MIN || pct > PCT_MAX) {
+    const lo = PCT_MIN / 58.62 * migrateSol;
+    const hi = PCT_MAX / 58.62 * migrateSol;
+    const r = (v) => (v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2));
+    throw new Error(
+      `a start of ${startSol} against a migration of ${migrateSol} needs ${pct.toPrecision(3)}% of supply in the pool, `
+      + `which DBC will not build (it accepts roughly ${PCT_MIN}%-${PCT_MAX}%). `
+      + `For a migration of ${migrateSol}, the start has to be between ${r(lo)} and ${r(hi)} - `
+      + `or raise the supply instead, which moves the price per token rather than this ratio.`,
+    );
   }
   // keep a sane number of significant figures rather than a long float
   const round = (v) => {
@@ -821,8 +854,9 @@ export async function pumpEconomics(rpcUrl, quoteMint) {
   };
   return {
     totalSupply: PUMP_CURVE.totalSupply,
-    pctSupplyOnMigration: PUMP_CURVE.pctSupplyOnMigration,
+    pctSupplyOnMigration: round(pct),
     migrationThreshold: round(migrationThreshold),
+    migrationMarketCap: round(migrationThreshold * 100 / pct),
     startEquivalent: round(startEquivalent),
     quoteDecimals: decimals,
   };

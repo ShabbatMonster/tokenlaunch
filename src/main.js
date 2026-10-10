@@ -2520,7 +2520,15 @@ async function applyPumpEconomics(pad) {
     const quoteMint = solQuoteMint(pad);
     hint.textContent = 'pricing pump.fun economics against this quote\u2026';
     const { pumpEconomics } = await import('./solana.js');
-    const e = await pumpEconomics(pad.rpc, quoteMint);
+    const num = (id, what) => {
+      const v = +($(id).value.trim().replace(/,/g, ''));
+      if (!(v > 0)) throw new Error(`${what} must be a positive number`);
+      return v;
+    };
+    const e = await pumpEconomics(pad.rpc, quoteMint, {
+      startSolEquivalent: num('solEconStart', 'the start figure'),
+      migrateSolEquivalent: num('solEconMigrate', 'the migration figure'),
+    });
     // Supply is yours to set, so this only fills it while it is still the
     // default. Silently resetting a number someone typed is the kind of thing
     // you discover after launching a billion of something you wanted a million of.
@@ -2528,11 +2536,13 @@ async function applyPumpEconomics(pad) {
     const supplyIsDefault = String(supplyEl.value).trim().replace(/,/g, '') === String(e.totalSupply);
     if (supplyIsDefault) supplyEl.value = String(e.totalSupply);
     $('solMigPct').value = String(e.pctSupplyOnMigration);
+    paintSolSupplyHint();
     $('solMigThreshold').value = String(e.migrationThreshold);
     const sym = SOL_QUOTES[pad.quoteSel]?.symbol || 'quote';
     hint.innerHTML = `<span class="ok">pump.fun economics</span> \u00b7 opens at ~`
-      + `${e.startEquivalent.toLocaleString()} ${esc(sym)} (30 SOL equivalent), migrates at `
-      + `${e.migrationThreshold.toLocaleString()} ${esc(sym)} (85 SOL equivalent)`
+      + `${e.startEquivalent.toLocaleString()} ${esc(sym)}, raises `
+      + `${e.migrationThreshold.toLocaleString()} ${esc(sym)} · migration market cap `
+      + `${e.migrationMarketCap.toLocaleString()} ${esc(sym)} (${e.pctSupplyOnMigration}% on migration)`
       + (supplyIsDefault ? '' : ` · kept your supply of ${Number(String(supplyEl.value).replace(/,/g, "")).toLocaleString()}`);
   } catch (err) {
     hint.innerHTML = `<span class="err">${esc(err?.message || String(err))}</span>`;
