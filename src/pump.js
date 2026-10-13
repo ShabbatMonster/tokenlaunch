@@ -159,29 +159,32 @@ export async function pumpStatus(rpcUrl) {
   o += 1;
 
   const zero = NATIVE_QUOTE.toBase58();
-  const quotes = [];
-  for (const q of g.whitelistedQuoteMints) {
-    if (q.toBase58() === zero) continue;
-    const mi = await connection.getAccountInfo(q).catch(() => null);
-    quotes.push({
-      mint: q.toBase58(),
-      decimals: mi ? mi.data[44] : null,
-      tokenProgram: mi ? mi.owner.toBase58() : null,
-    });
-  }
-  // Global's own array is legacy (USDC only); the registry is the live list
+  // Global's own array is legacy (USDC only); the registry is the live list.
+  // Every mint's decimals and token program are read in batches of 100, not one
+  // request each: the registry passed 200 entries, and reading them one at a
+  // time took 40s on a rate-limited key - long enough that a launch looked hung
+  // on "reading pump.fun config".
   const registry = await pumpQuoteRegistry(connection).catch(() => []);
-  for (const r of registry) {
-    if (quotes.some((q) => q.mint === r.mint)) continue;
-    const mi = await connection.getAccountInfo(new PublicKey(r.mint)).catch(() => null);
-    quotes.push({
-      mint: r.mint,
+  const legacy = g.whitelistedQuoteMints.map((q) => q.toBase58()).filter((m) => m !== zero);
+  const mints = [...new Set([...legacy, ...registry.map((r) => r.mint)])];
+  const infos = [];
+  for (let i = 0; i < mints.length; i += 100) {
+    const chunk = mints.slice(i, i + 100).map((m) => new PublicKey(m));
+    const got = await connection.getMultipleAccountsInfo(chunk).catch(() => chunk.map(() => null));
+    infos.push(...got);
+  }
+  const reserves = new Map(registry.map((r) => [r.mint, r.virtualQuoteReserves]));
+  const quotes = mints.map((mint, i) => {
+    const mi = infos[i];
+    return {
+      mint,
       decimals: mi ? mi.data[44] : null,
       tokenProgram: mi ? mi.owner.toBase58() : null,
-      virtualQuoteReserves: r.virtualQuoteReserves,
-      fromRegistry: true,
-    });
-  }
+      ...(reserves.has(mint) && !legacy.includes(mint)
+        ? { virtualQuoteReserves: reserves.get(mint), fromRegistry: true }
+        : {}),
+    };
+  });
   return { ...g, whitelistedQuotes: quotes, registry };
 }
 
@@ -620,8 +623,8 @@ export async function resolveTransferHookAccounts(connection, hookProgram, mint)
 async function resolveQuote(connection, quoteMint, { global = null, forCreate = false } = {}) {
   if (!quoteMint || quoteMint === NATIVE_QUOTE.toBase58()) return null;
   const q = await inspectMint(connection, quoteMint);
-  const entry = (await pumpQuoteRegistry(connection).catch(() => []))
-    .find((r) => r.mint === q.mint.toBase58());
+  const registry = global?.registry ?? await pumpQuoteRegistry(connection).catch(() => []);
+  const entry = registry.find((r) => r.mint === q.mint.toBase58());
   if (entry) q.virtualQuoteReserves = entry.virtualQuoteReserves;
   if (q.transferHookProgram) {
     const hook = await resolveTransferHookAccounts(connection, q.transferHookProgram, q.mint);
@@ -639,7 +642,7 @@ async function resolveQuote(connection, quoteMint, { global = null, forCreate = 
   // is the whole chain: whether its bottom is eligible, whether anything on it
   // is mid-migration, and how deep the new coin would land. The walker collects
   // all three; none of them is a property of the quote coin alone.
-  q.pumpChain = forCreate ? await pumpQuoteChain(connection, q.mint).catch(() => null) : null;
+  q.pumpChain = forCreate ? await pumpQuoteChain(connection, q.mint, registry).catch(() => null) : null;
   if (q.pumpChain) {
     q.blockers.push(...q.pumpChain.blockers);
     q.depth = q.pumpChain.newDepth;
