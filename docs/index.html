@@ -316,6 +316,7 @@
       <label style="margin-top:10px">CUSTOM PAIR CONTRACT <span class="hint">overrides the dropdown · works for launching and arming, listed or not</span></label>
       <input type="text" id="pumpQuoteCustom" spellcheck="false"
              placeholder="paste any mint address to pair against">
+      <div class="hint" id="pumpDepthLine" style="font-size:11px;margin-top:4px"></div>
       <div class="row" style="margin-top:8px">
         <div><button class="btn secondary" id="pumpCheckBtn" style="margin-top:0">CHECK PAIRS ON-CHAIN</button></div>
       </div>
@@ -323,7 +324,13 @@
       <div class="hint" style="font-size:11px;margin-top:4px">create_v2 + buy_v2 in one tx (Token-2022, pump's lookup table).
       A non-SOL pair is created by passing the quote mint, the curve's quote account and the quote token program as three
       extra accounts on create_v2. CHECK PAIRS reads pump's Global account live, so a stock quote is selectable the moment
-      they whitelist one.</div>
+      they whitelist one.
+      <br><br>Pairing against another pump coin stacks: that coin's own chain is walked and every link's curve &mdash; plus
+      its pool and vaults if it has migrated &mdash; is passed too. A coin on SOL, USDC or a listed quote is
+      <b>depth&nbsp;0</b>; pairing against it makes yours depth&nbsp;1; pairing against <i>that</i> makes yours
+      depth&nbsp;2, which pump enabled on <b>13 Oct 2026</b>. The live cap is read from
+      <code>Global.max_curve_depth</code>, so the line above says what is actually allowed today rather than what this
+      page was written expecting.</div>
       <label style="margin-top:12px">ARMED PRESETS <span class="hint">image + metadata uploaded on arm, so FIRE is one transaction</span></label>
       <div class="row">
         <div><button class="btn secondary" id="pumpArmBtn" style="margin-top:0">ARM THIS TOKEN</button></div>

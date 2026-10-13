@@ -151,6 +151,12 @@ export async function pumpStatus(rpcUrl) {
   g.maxConfigurableCreatorFeeBps = num();
   g.holderRewardClaimAuthority = pk();
   g.isHolderRewardEnabled = bool();
+  // The cap on how deep a new coin may be nested. 1 while only one level of
+  // indirection was allowed, 2 since 2026-10-13. The program's own ceiling is
+  // 5 whatever this says. Read rather than assumed - it is the switch that
+  // decides whether a triple-stacked launch is possible today.
+  g.maxCurveDepth = d.length > o ? d.readUInt8(o) : 1;
+  o += 1;
 
   const zero = NATIVE_QUOTE.toBase58();
   const quotes = [];
@@ -273,16 +279,15 @@ function createV2Ix({ mint, user, name, symbol, uri, creator, isMayhem = false, 
         key(ataOf(bondingCurve, quote.mint, quote.tokenProgram), false, true),
         key(quote.tokenProgram),
         key(PUMP_QUOTE_REGISTRY),
-        // Pairing against another pump coin needs four more: where that coin's
-        // own liquidity sits. Appended only in that case, because a registry
-        // quote has no curve and no pool and the 20-account shape is what every
-        // launch here has used. See pumpCoinQuoteAccounts.
-        ...(quote.pumpCoin ? [
-          key(quote.pumpCoin.curve, false, true),
-          key(quote.pumpCoin.pool, false, true),
-          key(quote.pumpCoin.poolBaseVault, false, true),
-          key(quote.pumpCoin.poolQuoteVault, false, true),
-        ] : []),
+        // Pairing against another pump coin needs one group per coin on its
+        // chain: that coin's curve, and its pool and two vaults if it has
+        // migrated. Packed and positional, so the list is built by the walker
+        // rather than spelled out here - see pumpQuoteChainAccounts. A registry
+        // quote has no curve and no pool, and keeps the 20-account shape every
+        // launch here has used.
+        ...(quote.pumpChain
+          ? pumpQuoteChainAccounts(quote.pumpChain).map((a) => key(a, false, true))
+          : []),
       ] : []),
     ],
   });
@@ -612,7 +617,7 @@ export async function resolveTransferHookAccounts(connection, hookProgram, mint)
 /// the program's call, and asking it costs nothing (see pumpProbe) — refusing
 /// here would make it impossible to stage a launch against a contract before
 /// pump enables it, which is the entire point of arming one.
-async function resolveQuote(connection, quoteMint) {
+async function resolveQuote(connection, quoteMint, { global = null, forCreate = false } = {}) {
   if (!quoteMint || quoteMint === NATIVE_QUOTE.toBase58()) return null;
   const q = await inspectMint(connection, quoteMint);
   const entry = (await pumpQuoteRegistry(connection).catch(() => []))
@@ -630,99 +635,229 @@ async function resolveQuote(connection, quoteMint) {
       q.warnings.push(`transfer hook active: ${hook.accounts.length} extra account(s) attached to each trade`);
     }
   }
-  q.pumpCoin = await pumpCoinQuoteAccounts(connection, q.mint).catch(() => null);
-  if (q.pumpCoin) {
-    if (!q.pumpCoin.complete) {
-      q.blockers.push(
-        'that pump coin has not migrated yet, so it has no PumpSwap pool to price against - '
-        + 'it can only be used as a quote once its curve completes',
+  // A nested quote is allowed to sit anywhere on its own chain, so what matters
+  // is the whole chain: whether its bottom is eligible, whether anything on it
+  // is mid-migration, and how deep the new coin would land. The walker collects
+  // all three; none of them is a property of the quote coin alone.
+  q.pumpChain = forCreate ? await pumpQuoteChain(connection, q.mint).catch(() => null) : null;
+  if (q.pumpChain) {
+    q.blockers.push(...q.pumpChain.blockers);
+    q.depth = q.pumpChain.newDepth;
+    // The walk and the program should agree about how deep the quote already
+    // is. They are derived two different ways - one by following stored
+    // quote_mints, one read straight off the curve - so a mismatch means the
+    // walk stopped somewhere the program would not, and the accounts would be
+    // the wrong shape. Worth saying out loud rather than discovering in a
+    // QuoteChainAccountsRequired.
+    if (q.pumpChain.storedDepth !== q.pumpChain.depth) {
+      q.warnings.push(
+        `this quote's chain walks ${q.pumpChain.depth} deep but its curve records depth `
+        + `${q.pumpChain.storedDepth} - the account list may not match what the program expects`,
       );
     }
-    // The one-level rule, checked rather than assumed: the quote coin must
-    // itself be paired with SOL or with a quote-control mint. The second live
-    // example reads like a two-deep chain until you notice its third link is a
-    // registry mint, and a genuine chain is what this would otherwise allow
-    // someone to attempt.
-    const inner = q.pumpCoin.innerQuote.toBase58();
-    if (inner !== WSOL_MINT.toBase58()) {
-      const registry = await pumpQuoteRegistry(connection).catch(() => []);
-      if (!registry.some((r) => r.mint === inner)) {
-        q.blockers.push(
-          `that pump coin is paired with ${inner.slice(0, 8)}…, which is neither SOL nor a quote-control `
-          + 'mint. pump allows one level of indirection, not a chain.',
-        );
-      }
+    // The cap, read live. 1 until 2026-10-13, 2 after it, and the program
+    // refuses more than 5 whatever Global says. Checked here so an over-deep
+    // pairing is named rather than returned as CurveDepthExceeded.
+    const cap = global ? Math.min(Number(global.maxCurveDepth ?? 1), MAX_CURVE_DEPTH) : MAX_CURVE_DEPTH;
+    if (q.depth > cap) {
+      q.blockers.push(
+        `this pairing would make the new coin depth ${q.depth}; pump allows ${cap} today `
+        + '(CurveDepthExceeded)',
+      );
     }
   }
   return q;
 }
 
-// --- pairing against another pump coin --------------------------------------
+// --- pairing against another pump coin, at any depth -------------------------
 //
-// From pump's 2026-10-07 update: "New Pump coins can be paired with any
-// previously created Pump coin that are paired with SOL, USDC or one of the
-// mints in the quote control PDA." That quote control PDA turns out to be the
-// account this file already calls PUMP_QUOTE_REGISTRY - both derive from
-// pda(['quote-control']) - so the registry is the base case and a pump coin is
-// a new recursive one.
+// Every bonding curve stores a `depth`: 0 for a coin paired with SOL, USDC or a
+// listed quote mint, and the quote coin's depth plus one for a coin paired with
+// a pump coin. So for SOL -> A -> B -> C, A is 0, B is 1 and C is 2. pump caps
+// it with `Global.max_curve_depth` (1 at first, 2 since 2026-10-13) and the
+// program refuses more than 5 whatever that says.
 //
-// Decoded from the first two live examples rather than taken from the post:
+// A coin pump LISTS as a quote mint counts as depth 0 for its children whatever
+// its own depth, and none of the accounts below are read for it. That is the
+// distinction this file first got wrong: the two live examples,
 //
 //   EXgYtzKh...pump  quoted in GDz2tXD7...pump, which is quoted in SOL
 //   E4q7cAYJ...pump  quoted in 9yPESNHi...pump, which is quoted in 9cRCn9rG...pump
 //
-// The second one looks like a chain two deep and is not: 9cRCn9rG IS a registry
-// mint. So the rule is exactly what the announcement says and no more - ONE
-// level of indirection, the quote coin itself paired with SOL, USDC or a
-// quote-control mint. Checking registry membership of that third link is what
-// tells the two readings apart, and skipping it is how this file first recorded
-// a recursion that does not exist.
+// read like one chain of two and one of three, and 9cRCn9rG really is a pump
+// coin - but it is also a registry mint, so it terminates the chain. Both coins
+// carried 24 accounts, one group, depth 1. Reading that as proof that chains
+// were forbidden was the mistake; it only ever proved where a chain ENDS.
 //
-// Both were still create_v2 - same discriminator, no new instruction needed -
-// but carrying 24 accounts instead of the 20 a registry quote needs. The four
-// extra ones say where the quote coin's own liquidity lives:
+// Both are still create_v2 - same discriminator, no new instruction - carrying
+// the 16 fixed accounts and then one group for the quote coin:
 //
-//   [20] the quote's bonding curve
-//   [21] the quote's PumpSwap pool
-//   [22] that pool's vault for the quote mint
-//   [23] that pool's vault for the quote's own quote
+//   [0] the quote mint                    [4] the quote's bonding curve
+//   [1] the new curve's account for it    [5] the quote's PumpSwap pool
+//   [2] the quote's token program         [6] that pool's base vault
+//   [3] quote_control (the registry)      [7] that pool's quote vault
 //
-// Which is why the quote has to have MIGRATED first: before that there is no
-// pool and the last three do not exist. Both live examples are complete.
+// then four more slots for each coin BELOW the quote, nearest first, down to
+// the depth-0 coin: its curve, pool, base vault, quote vault.
+//
+// The pool slots exist only for a coin that has MIGRATED - before that there is
+// no pool and those three accounts do not exist. Groups are packed, so the next
+// curve sits at index 5 when the quote is still on its curve and at index 8
+// when it has migrated. Appending a fixed four per coin is wrong the moment any
+// coin on the chain is still on its curve.
 const PUMP_AMM_PROGRAM = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
 const WSOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
 
-/// The extra accounts create_v2 wants when the quote is itself a pump coin, or
-/// null when it is an ordinary mint and the 20-account shape applies.
-export async function pumpCoinQuoteAccounts(connection, quoteMint) {
-  const mint = new PublicKey(quoteMint);
+/// The program's own ceiling, whatever Global allows today.
+export const MAX_CURVE_DEPTH = 5;
+
+/// Where one coin on the chain keeps its liquidity.
+///
+/// `migrated` is read off the chain - the pool account either exists or it does
+/// not - rather than inferred from `complete`. The two come apart for exactly
+/// the window the program names QuoteCurveAwaitingMigration (6107): a curve that
+/// has sold out but whose migrate_v2 has not run yet.
+async function chainLink(connection, mint) {
   const curve = await pumpCurve(connection, mint);
-  if (!curve) return null;                       // not a pump coin at all
+  if (!curve) return null;
 
   // The curve records native SOL as the all-zero pubkey while the pool holds
-  // wrapped SOL, so the pool's pairing has to be translated rather than copied.
-  const inner = curve.quoteMint.equals(NATIVE_QUOTE) ? WSOL_MINT : curve.quoteMint;
-  const [innerInfo, mintInfo] = await Promise.all([
-    connection.getAccountInfo(inner),
-    connection.getAccountInfo(mint),
-  ]);
-  const innerProgram = innerInfo ? innerInfo.owner : TOKEN_PROGRAM;
-  const mintProgram = mintInfo ? mintInfo.owner : TOKEN_2022;
+  // wrapped SOL, so the pool's pairing has to be translated, not copied.
+  const native = curve.quoteMint.equals(NATIVE_QUOTE);
+  const inner = native ? WSOL_MINT : curve.quoteMint;
 
   const poolAuthority = pda([Buffer.from('pool-authority'), mint.toBuffer()]);
   const pool = pda(
     [Buffer.from('pool'), Buffer.from([0, 0]), poolAuthority.toBuffer(), mint.toBuffer(), inner.toBuffer()],
     PUMP_AMM_PROGRAM,
   );
+  const [innerInfo, mintInfo, poolInfo] = await Promise.all([
+    connection.getAccountInfo(inner),
+    connection.getAccountInfo(mint),
+    connection.getAccountInfo(pool),
+  ]);
+  const innerProgram = innerInfo ? innerInfo.owner : TOKEN_PROGRAM;
+  const mintProgram = mintInfo ? mintInfo.owner : TOKEN_2022;
+  const migrated = !!poolInfo && poolInfo.owner.equals(PUMP_AMM_PROGRAM);
+
+  // The vaults are fields on the pool, not a derivation. They are the pool's
+  // associated token accounts for every pool checked here, but the program
+  // reads pool.pool_base_token_account, so that is what gets passed when the
+  // pool exists; the derivation is only a fallback for a pool that does not
+  // exist yet and whose slots will not be sent anyway.
+  const d = migrated ? poolInfo.data : null;
   return {
+    mint,
+    curve: curve.address,
+    quoteMint: curve.quoteMint,
+    depth: curve.depth,
     complete: curve.complete,
+    isMayhem: curve.isMayhem,
+    native,
     innerQuote: inner,
     innerProgram,
-    curve: curve.address,
+    migrated,
     pool,
-    poolBaseVault: ataOf(pool, mint, mintProgram),
-    poolQuoteVault: ataOf(pool, inner, innerProgram),
+    poolBaseVault: d && d.length >= 171 ? new PublicKey(d.subarray(139, 171)) : ataOf(pool, mint, mintProgram),
+    poolQuoteVault: d && d.length >= 203 ? new PublicKey(d.subarray(171, 203)) : ataOf(pool, inner, innerProgram),
   };
+}
+
+/// Walk the quote's chain: the quote coin, then each coin below it, nearest
+/// first, down to the depth-0 coin that sits on SOL, USDC or a listed mint.
+///
+/// Returns null when the quote is not a pump coin at all, and null when it IS a
+/// listed quote mint - a listed mint is depth 0 for its children and none of
+/// these accounts are read for it, so taking the nested path there would attach
+/// accounts the program ignores. 9cRCn9rG is both a pump coin and a listed
+/// mint, which is exactly where that matters.
+export async function pumpQuoteChain(connection, quoteMint, listedQuotes = null) {
+  const listed = new Set(
+    (listedQuotes ?? await pumpQuoteRegistry(connection).catch(() => [])).map((r) => r.mint ?? r),
+  );
+  const start = new PublicKey(quoteMint);
+  if (listed.has(start.toBase58())) return null;
+
+  const links = [];
+  const blockers = [];
+  let cursor = start;
+  let bottomEligible = false;
+
+  // At most MAX_CURVE_DEPTH + 1 links can ever be legal; one extra iteration
+  // lets an over-long chain be reported as over-long rather than truncated.
+  for (let i = 0; i <= MAX_CURVE_DEPTH + 1; i++) {
+    const link = await chainLink(connection, cursor);
+    if (!link) break;                            // cursor is not a pump coin
+    links.push(link);
+    if (link.native || listed.has(link.innerQuote.toBase58())) { bottomEligible = true; break; }
+    cursor = link.quoteMint;
+  }
+  if (!links.length) return null;                // the quote is not a pump coin
+
+  for (const l of links) {
+    const who = l.mint.toBase58().slice(0, 8) + '…';
+    // Mayhem coins are SOL/USDC only, so one anywhere on the chain sinks it.
+    if (l.isMayhem) {
+      blockers.push(
+        who + " on this quote's chain is a mayhem-mode coin, which pump does not allow as a quote "
+        + '(QuoteBondingCurveNotEligible)',
+      );
+    }
+    // A sold-out curve with no pool is a real and temporary state, so name the
+    // coin and say it is worth retrying rather than report a flat refusal.
+    if (l.complete && !l.migrated) {
+      blockers.push(
+        who + " on this quote's chain has finished its curve but has not migrated yet "
+        + '(QuoteCurveAwaitingMigration) - retry once migrate_v2 has run',
+      );
+    }
+  }
+  if (!bottomEligible) {
+    const last = links[links.length - 1];
+    blockers.push(
+      "the bottom of this quote's chain is " + last.mint.toBase58().slice(0, 8) + '…, paired with '
+      + last.innerQuote.toBase58().slice(0, 8) + '… - neither SOL, USDC nor a listed quote mint '
+      + '(QuoteBondingCurveNotEligible)',
+    );
+  }
+
+  return {
+    links,
+    // The quote's depth is the number of coins below it; the new coin lands one
+    // deeper. The curve stores its own depth as well, so the walk can be
+    // checked against the program's own answer rather than trusted.
+    depth: links.length - 1,
+    storedDepth: links[0].depth,
+    newDepth: links.length,
+    bottomEligible,
+    blockers,
+    // the single-level view, which is all a depth-0 quote needs
+    complete: links[0].complete,
+    migrated: links[0].migrated,
+    innerQuote: links[0].innerQuote,
+    innerProgram: links[0].innerProgram,
+    curve: links[0].curve,
+    pool: links[0].pool,
+    poolBaseVault: links[0].poolBaseVault,
+    poolQuoteVault: links[0].poolQuoteVault,
+  };
+}
+
+/// Remaining accounts 4 onwards: one group per coin on the chain, packed, each
+/// being that coin's curve plus its pool and two vaults only if it has
+/// migrated. Slots are positional, so the packing is the whole point.
+export function pumpQuoteChainAccounts(chain) {
+  const out = [];
+  for (const l of chain.links) {
+    out.push(l.curve);
+    if (l.migrated) out.push(l.pool, l.poolBaseVault, l.poolQuoteVault);
+  }
+  return out;
+}
+
+/// The chain for one quote, or null when the quote is an ordinary mint.
+export async function pumpCoinQuoteAccounts(connection, quoteMint) {
+  return pumpQuoteChain(connection, quoteMint);
 }
 
 /// UI amount -> raw units for a quote, honouring a scaled-UI multiplier.
@@ -748,12 +883,15 @@ export async function pumpProbe(opts) {
   try {
     const g = await pumpStatus(rpcUrl);
     if (!g.createV2Enabled) return { ready: false, reason: 'pump.fun has create_v2 disabled' };
-    const quote = await resolveQuote(connection, quoteMint);
-    // Two ways to be pairable now: in the quote registry, or a migrated pump
-    // coin. The second is pump's 2026-10-07 change, and reporting it as
-    // "not whitelisted" would have been wrong rather than merely unhelpful.
+    const quote = await resolveQuote(connection, quoteMint, { global: g, forCreate: true });
+    // Two ways to be pairable now: in the quote registry, or a pump coin whose
+    // chain bottoms out in a listed one. The second is pump's 2026-10-07
+    // change, and reporting it as "not whitelisted" would have been wrong
+    // rather than merely unhelpful. Note it does NOT require the quote to have
+    // migrated - a coin still on its curve is a legal quote, it just has no
+    // pool accounts to pass.
     const inRegistry = !quote || g.whitelistedQuotes.some((q) => q.mint === quote.mint.toBase58());
-    const asPumpCoin = !!quote?.pumpCoin?.complete;
+    const asPumpCoin = !!quote?.pumpChain?.bottomEligible;
     const whitelisted = inRegistry || asPumpCoin;
 
     const tx = await buildPumpLaunch({
@@ -802,7 +940,7 @@ export async function pumpWarmup({ rpcUrl, quoteMint }) {
   // one at a time for the same reason launchPump does it that way - a burst on
   // one key gets throttled, and nothing here is in a hurry
   const global = await pumpStatus(rpcUrl);
-  const quote = await resolveQuote(connection, quoteMint);
+  const quote = await resolveQuote(connection, quoteMint, { global, forCreate: true });
   const lookupTable = await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
   return { global, quote, lookupTable, quoteMint: quoteMint ?? null, at: Date.now() };
 }
@@ -845,7 +983,7 @@ export async function launchPump(opts) {
   say(pre.global ? 'using the pump.fun config already read…' : 'reading pump.fun config…');
   const g = pre.global ?? await pumpStatus(rpcUrl);
   // null is a legitimate quote (a plain SOL pair), so presence decides here
-  const quote = 'quote' in pre ? pre.quote : await resolveQuote(connection, quoteMint);
+  const quote = 'quote' in pre ? pre.quote : await resolveQuote(connection, quoteMint, { global: g, forCreate: true });
   const lookupTable = pre.lookupTable ?? await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
 
   if (!g.createV2Enabled) throw new Error('pump.fun has create_v2 disabled right now');
@@ -989,6 +1127,12 @@ export async function pumpCurve(connection, mintAddress) {
   if (!info.owner.equals(PUMP_PROGRAM) || info.data.length < 81) return null;
   const d = info.data;
   return {
+    // Written only once a nested coin is created, so an older curve's account
+    // is short and simply has no byte there. Absent means depth 0, which is
+    // what every coin paired with SOL, USDC or a listed mint is.
+    depth: d.length >= 142 ? d.readUInt8(141) : 0,
+    isMayhem: d.readUInt8(81) !== 0,
+    creatorFeeBps: d.length >= 123 ? d.readBigUInt64LE(115) : 0n,
     address: curve,
     mint,
     virtualTokenReserves: d.readBigUInt64LE(8),

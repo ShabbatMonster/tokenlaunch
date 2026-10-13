@@ -1084,6 +1084,7 @@ export const RAYDIUM_QUOTES = {
 // lazy import for everything Solana.
 export { launchPump, pumpWarmup, pumpProbe, pumpStatus, pumpTokensForSol, pumpQuoteRegistry, inspectMint, quoteUiToRaw, PUMP_LOOKUP_TABLE, PUMP_QUOTE_REGISTRY } from './pump.js';
 export { pumpTrade, pumpCurve, pumpCurveQuote } from './pump.js';
+export { pumpQuoteChain, pumpQuoteChainAccounts, MAX_CURVE_DEPTH } from './pump.js';
 import { pumpTrade, pumpCurve } from './pump.js';
 
 export const RAYDIUM_PLATFORM_ID = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
