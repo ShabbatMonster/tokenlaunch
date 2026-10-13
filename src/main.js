@@ -2736,6 +2736,63 @@ function paintPumpDevSym() {
   el.textContent = (opt.split('—')[0] || '').trim() || mint.slice(0, 6) + '…';
 }
 
+// How deep the pair you picked would put your coin, and which accounts that
+// takes. Worth showing rather than leaving to a failed simulation: a pump coin
+// looks like any other mint in that box, and the difference between pairing
+// against a SOL-quoted coin and pairing against one that is itself paired with
+// a pump coin is the difference between depth 1 and depth 2 - one of which pump
+// only started allowing on 13 Oct 2026.
+//
+// Debounced because it is driven by typing into the custom-pair box and each
+// run walks the chain, which is one read per link.
+let pumpDepthSeq = 0;
+let pumpDepthTimer = null;
+
+function paintPumpDepth() {
+  if (pumpDepthTimer) clearTimeout(pumpDepthTimer);
+  pumpDepthTimer = setTimeout(paintPumpDepthNow, 350);
+}
+
+async function paintPumpDepthNow() {
+  const el = $('pumpDepthLine');
+  if (!el) return;
+  let mint = '';
+  try { mint = pumpQuoteMint(); } catch { el.textContent = ''; return; }
+  const seq = ++pumpDepthSeq;
+  if (!mint) { el.innerHTML = 'depth <b>0</b> &mdash; a native SOL pair, the 20-account shape.'; return; }
+  el.textContent = 'walking that pair\u2019s chain\u2026';
+  try {
+    const pad = PADS.find((x) => x.id === 'pump-sol');
+    const { pumpQuoteChain, pumpQuoteChainAccounts, pumpStatus } = await import('./solana.js');
+    const { Connection } = await import('@solana/web3.js');
+    const g = await pumpStatus(pad.rpc);
+    const chain = await pumpQuoteChain(new Connection(pad.rpc, 'confirmed'), mint, g.registry);
+    if (seq !== pumpDepthSeq) return;        // a later keystroke already won
+    const cap = Math.min(Number(g.maxCurveDepth ?? 1), 5);
+    if (!chain) {
+      el.innerHTML = 'depth <b>0</b> &mdash; a listed quote mint or an ordinary token, '
+        + 'so no chain accounts are passed. Cap today: <b>' + cap + '</b>.';
+      return;
+    }
+    const hops = chain.links.slice().reverse()
+      .map((l) => esc(l.mint.toBase58().slice(0, 8)) + '\u2026 <span class="hint">('
+        + (l.migrated ? 'migrated' : 'on curve') + ')</span>');
+    const bottom = chain.bottomEligible
+      ? (chain.links[chain.links.length - 1].native ? 'SOL' : 'a listed quote')
+      : '<span class="err">nothing listed</span>';
+    const n = pumpQuoteChainAccounts(chain).length;
+    el.innerHTML = 'your coin would be depth <b>' + chain.newDepth + '</b> of <b>' + cap + '</b> allowed'
+      + ' &middot; ' + n + ' chain account' + (n === 1 ? '' : 's') + '<br>'
+      + bottom + ' \u2192 ' + hops.join(' \u2192 ') + ' \u2192 <b>your coin</b>'
+      + (chain.blockers.length
+        ? '<br><span class="err">' + esc(chain.blockers.join('; ')) + '</span>'
+        : '');
+  } catch (e) {
+    if (seq !== pumpDepthSeq) return;
+    el.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+  }
+}
+
 function pumpQuoteMint() {
   const custom = $('pumpQuoteCustom').value.trim();
   if (custom) {
@@ -5640,8 +5697,8 @@ function init() {
     }
   });
 
-  $('pumpQuote').addEventListener('change', paintPumpDevSym);
-  $('pumpQuoteCustom').addEventListener('input', paintPumpDevSym);
+  $('pumpQuote').addEventListener('change', () => { paintPumpDevSym(); paintPumpDepth(); });
+  $('pumpQuoteCustom').addEventListener('input', () => { paintPumpDevSym(); paintPumpDepth(); });
 
   for (const id of ['solSupply', 'solMigPct']) $(id).addEventListener('input', paintSolSupplyHint);
 

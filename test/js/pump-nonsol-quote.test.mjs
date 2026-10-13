@@ -84,7 +84,8 @@ check(/function paintPumpDevSym/.test(MAIN),
 const HTML = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'docs', 'index.html'), 'utf8');
 check(/DEV BUY \(<span id="pumpDevSym">SOL<\/span>/.test(HTML),
   'defaulting to SOL, and named in the markup so it can be repainted');
-check(/pumpQuoteCustom'\)\.addEventListener\('input', paintPumpDevSym\)/.test(MAIN),
+// the listener may also repaint the depth line, so match the call, not its exact form
+check(/pumpQuoteCustom'\)\.addEventListener\('input', (?:paintPumpDevSym\)|\(\) => \{[^}]*paintPumpDevSym\(\))/.test(MAIN),
   'repainted when a mint is pasted, not only when the dropdown changes');
 
 // --- funding, which is the part that bites ------------------------------------
