@@ -73,7 +73,7 @@ export const HOOKE_ABI = parseAbi([
   'function stablecoin() view returns (address)',
   'function feeHook() view returns (address)',
   'function MAX_METADATA_BYTES() view returns (uint256)',
-  'function claimCreatorFees(address token)',
+  'function claimCreatorFees(address token) returns (uint256 claimed)',
   'function graduationTarget(address token) view returns (uint256)',
 ]);
 // the factory getter has no recoverable name; 0xc45a0155 returns the factory
@@ -219,6 +219,66 @@ export async function buildEthToUsdg(pub, { recipient, usdgOut, buffer = 1.03, d
   ];
   const data = encodeFunctionData({ abi: UR_ABI, functionName: 'execute', args: ['0x0b00', inputs, deadline] });
   return { to: HOOKE.router, data, value: ethIn, ethIn, price };
+}
+
+// --- creator fees --------------------------------------------------------------
+//
+// Every trade pays a 1% fee in hXMAX, split 75% to the coin's creator and 25% to
+// the platform (MemeFeeAccrued carries the trade, the fee, and both shares).
+// The creator's share sits in the hook until claimCreatorFees(token) is called.
+//
+// launches(token) is the per-coin record, unnamed fields read by position:
+//   [0] the wallet that launched     [5] who the creator fees are paid to
+//   [8] unclaimed creator fees, hXMAX
+// [5] is the createMeme `creator` argument, and is distinct from [0]: a
+// simulated launch by one wallet naming another as recipient stored them
+// separately, and the claim paid [5]. Anyone may call the claim - it pays [5]
+// whoever sends it - so listing it for a coin you did not launch is harmless.
+
+/// Where the hook was deployed; the first launch through it is block 88,512,998.
+export const HOOKE_START_BLOCK = 88_500_000n;
+
+// All three addresses are indexed - read off a simulated launch whose launcher
+// and fee recipient differed, which put them in topics 2 and 3 respectively.
+// The data carries the pool id and the salt, then the three strings.
+const MEME_LAUNCHED = parseAbi([
+  'event MemeLaunched(address indexed token, address indexed launcher, address indexed feeRecipient, bytes32 poolId, bytes32 salt, string name, string symbol, string metadata)',
+])[0];
+
+export async function hookeLaunchInfo(pub, token) {
+  const r = await pub.call({ to: HOOKE.hook, data: '0x1f2d8550' + getAddress(token).slice(2).toLowerCase().padStart(64, '0') });
+  const w = (r.data || '0x').slice(2).match(/.{64}/g) || [];
+  if (w.length < 9 || /^0+$/.test(w[0])) return null;               // not a Hooke coin
+  return {
+    token: getAddress(token),
+    launcher: getAddress('0x' + w[0].slice(24)),
+    feeRecipient: getAddress('0x' + w[5].slice(24)),
+    unclaimed: BigInt('0x' + w[8]),
+  };
+}
+
+/// Every Hooke coin a wallet launched or is paid the creator fees of.
+///
+/// Two filtered queries - launcher, then fee recipient - so the cost follows
+/// your own launches rather than the platform's (24 launches by its second
+/// day). Walked in chunks because the RPC caps a single query.
+export async function hookeCoinsOf(pub, address) {
+  const me = getAddress(address);
+  const head = await pub.getBlockNumber();
+  const tokens = new Map();
+  for (let from = HOOKE_START_BLOCK; from <= head; from += 2_000_000n) {
+    const to = from + 1_999_999n > head ? head : from + 1_999_999n;
+    const [asLauncher, asRecipient] = await Promise.all([
+      pub.getLogs({ address: HOOKE.hook, event: MEME_LAUNCHED, args: { launcher: me }, fromBlock: from, toBlock: to }),
+      pub.getLogs({ address: HOOKE.hook, event: MEME_LAUNCHED, args: { feeRecipient: me }, fromBlock: from, toBlock: to }),
+    ]);
+    for (const l of [...asLauncher, ...asRecipient]) tokens.set(getAddress(l.args.token), l.args.symbol);
+  }
+  const infos = await Promise.all([...tokens].map(async ([t, symbol]) => {
+    const info = await hookeLaunchInfo(pub, t).catch(() => null);
+    return info && { ...info, symbol };
+  }));
+  return infos.filter(Boolean);
 }
 
 export { ERC20 as HOOKE_ERC20 };

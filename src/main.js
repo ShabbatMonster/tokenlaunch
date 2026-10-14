@@ -4204,6 +4204,8 @@ async function renderTokenList() {
   // Solana / Meteora launches claim through the DBC partner-fee path, not a locker
   if (activePad.vm === 'sol' && activePad.family === 'meteora') return renderMeteoraClaims(box);
   if (!account) { box.innerHTML = '<div class="empty">unlock wallet to load your launches</div>'; return; }
+  // Hooke keeps creator fees in the hook itself, per coin, in hXMAX
+  if (activePad.family === 'hooke') return renderHookeClaims(box, activePad);
   const pad = claimPad();
   box.innerHTML = '<div class="empty">loading…</div>';
   try {
@@ -4240,6 +4242,7 @@ async function claimAllFees(btn) {
   // Solana / Meteora claims run off the SOL key, not an EVM account
   if (activePad.vm === 'sol' && activePad.family === 'meteora') { await claimAllMeteora(btn); return; }
   if (!account) { say('unlock wallet first', true); return; }
+  if (activePad.family === 'hooke') { await claimAllHooke(activePad, btn); return; }
   const pad = claimPad();
   if (pad.family === 'pools') { await claimAllPoolsFees(pad, btn); return; }
   // pons v2 escrow aggregates all fees per recipient — one claim() covers
@@ -4352,6 +4355,107 @@ async function claimFees(pad, token, btn) {
     say(/NoFeesToCollect/i.test(msg) ? 'nothing to claim yet' : msg, true);
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+// --- Hooke creator fees. 75% of a 1% fee on every trade, paid in hXMAX and held
+// in the hook per coin until claimed. Read straight from launches(token), so
+// the figure is what a claim would pay right now. ---------------------------
+async function hookeFeeRows(pad) {
+  const H = await import('./hooke.js');
+  const pub = publicClientFor(pad);
+  const found = await H.hookeCoinsOf(pub, account.address);
+  // a coin launched from this page but not yet indexed by the RPC still shows
+  const local = loadLaunches().filter((l) => l.pad === pad.id).map((l) => l.token);
+  for (const t of local) {
+    if (found.some((f) => f.token.toLowerCase() === t.toLowerCase())) continue;
+    const info = await H.hookeLaunchInfo(pub, t).catch(() => null);
+    if (info) found.push(info);
+  }
+  return { H, pub, rows: found };
+}
+
+async function renderHookeClaims(box, pad) {
+  box.innerHTML = '<div class="empty">reading your Hooke coins…</div>';
+  try {
+    const { pub, rows } = await hookeFeeRows(pad);
+    if (!rows.length) { box.innerHTML = '<div class="empty">no Hooke coins launched by, or paying fees to, this wallet</div>'; return; }
+    box.innerHTML = '';
+    for (const r of rows) {
+      const sym = r.symbol || loadLaunches().find((l) => l.token.toLowerCase() === r.token.toLowerCase())?.symbol
+        || await pub.readContract({ address: r.token, abi: ERC20_ABI, functionName: 'symbol' }).catch(() => '?');
+      const mine = r.feeRecipient.toLowerCase() === account.address.toLowerCase();
+      const row = document.createElement('div');
+      row.className = 'token-row';
+      row.innerHTML =
+        `<span class="sym">${esc(sym)}</span>` +
+        `<span class="addr"><a href="${esc(pad.site(r.token))}" target="_blank" rel="noopener">${esc(r.token)}</a><br>` +
+        `<b>${(+formatUnits(r.unclaimed, 18)).toLocaleString(undefined, { maximumFractionDigits: 4 })} hXMAX</b> unclaimed` +
+        (mine ? ' · paid to you' : ` · paid to ${esc(r.feeRecipient.slice(0, 6))}…${esc(r.feeRecipient.slice(-4))}`) +
+        '</span>';
+      const btn = document.createElement('button');
+      btn.className = 'mini';
+      btn.textContent = 'CLAIM';
+      btn.disabled = r.unclaimed === 0n;
+      btn.onclick = () => claimHooke(pad, r.token, btn);
+      row.appendChild(btn);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    box.innerHTML = `<div class="empty">couldn't read Hooke fees: ${esc(e.shortMessage || e.message)}</div>`;
+  }
+}
+
+async function claimHooke(pad, token, btn) {
+  const out = $('claimStatus');
+  const say = (msg, err) => { out.innerHTML = err ? `<span class="err">${msg}</span>` : msg; };
+  if (btn) btn.disabled = true;
+  try {
+    const H = await import('./hooke.js');
+    const pub = publicClientFor(pad);
+    const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+    const info = await H.hookeLaunchInfo(pub, token);
+    if (!info) throw new Error('not a Hooke coin');
+    if (info.unclaimed === 0n) { say('nothing to claim on this coin yet'); return; }
+    // the claim pays the recorded recipient whoever sends it - say where it goes
+    const dest = info.feeRecipient.toLowerCase() === account.address.toLowerCase() ? 'you' : info.feeRecipient;
+    say(`claiming ${formatUnits(info.unclaimed, 18)} hXMAX → ${esc(dest)}…`);
+    const { result } = await pub.simulateContract({ address: H.HOOKE.hook, abi: H.HOOKE_ABI, functionName: 'claimCreatorFees', args: [token], account });
+    const hash = await wallet.writeContract({ address: H.HOOKE.hook, abi: H.HOOKE_ABI, functionName: 'claimCreatorFees', args: [token] });
+    const r = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+    if (r.status !== 'success') throw new Error('claim reverted: ' + hash);
+    const got = typeof result === 'bigint' ? result : info.unclaimed;
+    say(`<span style="color:var(--accent)">FEES CLAIMED ✓</span> ${formatUnits(got, 18)} hXMAX → ${esc(dest)} · <a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx</a>`);
+    refreshBalance(); renderTokenList();
+  } catch (e) {
+    say(esc(e.shortMessage || e.message), true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function claimAllHooke(pad, btn) {
+  const out = $('claimStatus');
+  btn.disabled = true;
+  try {
+    out.textContent = 'checking which coins have fees…';
+    const { H, pub, rows } = await hookeFeeRows(pad);
+    const due = rows.filter((r) => r.unclaimed > 0n);
+    if (!due.length) { out.textContent = `nothing to claim across ${rows.length} coin${rows.length === 1 ? '' : 's'}`; return; }
+    const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+    let nonce = await pub.getTransactionCount({ address: account.address, blockTag: 'pending' });
+    const hashes = [];
+    for (const r of due) {
+      hashes.push(await wallet.writeContract({ address: H.HOOKE.hook, abi: H.HOOKE_ABI, functionName: 'claimCreatorFees', args: [r.token], nonce: nonce++ }));
+    }
+    const ok = (await Promise.all(hashes.map((hash) => pub.waitForTransactionReceipt({ hash, confirmations: 1 }).then((x) => x.status === 'success').catch(() => false)))).filter(Boolean).length;
+    const total = due.reduce((s, r) => s + r.unclaimed, 0n);
+    out.innerHTML = `<span style="color:var(--accent)">CLAIMED ${ok}/${due.length} ✓</span> ~${(+formatUnits(total, 18)).toLocaleString(undefined, { maximumFractionDigits: 4 })} hXMAX`;
+    refreshBalance(); renderTokenList();
+  } catch (e) {
+    out.innerHTML = `<span class="err">${esc(e.shortMessage || e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
   }
 }
 
