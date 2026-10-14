@@ -13,7 +13,7 @@ import path from 'node:path';
 import { decodeFunctionData, keccak256, encodeAbiParameters, pad, toHex, getAddress, encodeFunctionData } from 'viem';
 import {
   HOOKE, HOOKE_ABI, HOOKE_FACTORY_ABI, HOOKE_PAY, hookePublicClient, hookeStatus, mineHookeSalt,
-  prepareHookeSalt, hookeCreateArgs, buildEthToUsdg,
+  prepareHookeSalt, hookeCreateArgs, buildEthToUsdg, hookeLaunchInfo, hookeCoinsOf,
 } from '../../src/hooke.js';
 
 const pub = hookePublicClient();
@@ -97,6 +97,27 @@ const sw = await buildEthToUsdg(pub, { recipient: ME, usdgOut: 50_000_000n, dead
 const swapOk = await pub.call({ account: ME, to: sw.to, data: sw.data, value: sw.value, stateOverride: [{ address: ME, balance: 10n ** 20n }] }).then(() => true, () => false);
 check(swapOk, 'ETH -> at least 50 USDG through the Universal Router simulates', `${Number(sw.value) / 1e18} ETH at ${sw.price.toFixed(0)} USDG/ETH`);
 check(sw.data.startsWith('0x3593564c'), "using the router's execute(), the call WOLFPACK's own buyers make");
+
+// --- creator fees ------------------------------------------------------------------------
+const CREATOR = getAddress(tx.from);
+const info = await hookeLaunchInfo(pub, WOLFPACK);
+check(!!info && info.launcher === CREATOR && info.feeRecipient === CREATOR, "WOLFPACK's record names its creator as launcher and fee recipient");
+check(info.unclaimed > 0n, 'and holds unclaimed creator fees in hXMAX', `${Number(info.unclaimed) / 1e18} hXMAX`);
+const claimSim = await pub.simulateContract({ address: HOOKE.hook, abi: HOOKE_ABI, functionName: 'claimCreatorFees', args: [WOLFPACK], account: CREATOR });
+const drift = claimSim.result > info.unclaimed ? claimSim.result - info.unclaimed : info.unclaimed - claimSim.result;
+check(drift * 100n <= info.unclaimed, 'which is what a claim pays (within live trading drift)', `claim ${Number(claimSim.result) / 1e18}`);
+check((await hookeLaunchInfo(pub, HOOKE.usdg)) === null, 'a coin that is not from Hooke reads as null');
+const mine = await hookeCoinsOf(pub, CREATOR);
+// 0x7D0F launched two WOLFPACKs; a third WOLFPACK (0x54a089...) is a different
+// wallet's, and must not be listed as this one's
+check(mine.some((c) => c.token === WOLFPACK) && mine.length >= 2, "the fee panel finds the creator's coins", `${mine.length} coins`);
+check(!mine.some((c) => c.token === getAddress('0x54a089f37db7b66a0ecd6661863f758371210000')), "but not the WOLFPACK another wallet launched");
+check(mine.every((c) => c.launcher === CREATOR || c.feeRecipient === CREATOR), 'every coin listed was launched by, or pays, this wallet');
+check(mine.find((c) => c.token === WOLFPACK)?.symbol === 'WOLFPACK', 'symbols come straight from the launch event');
+check((await hookeCoinsOf(pub, ME)).length === 0, 'and nothing for a wallet that launched nothing');
+const MAIN_SRC = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'main.js'), 'utf8');
+check(/if \(activePad\.family === 'hooke'\) return renderHookeClaims/.test(MAIN_SRC), 'MY TOKENS · CLAIM FEES lists Hooke coins with their unclaimed hXMAX');
+check(/if \(activePad\.family === 'hooke'\) \{ await claimAllHooke/.test(MAIN_SRC), 'and CLAIM ALL claims every coin that has fees');
 
 // --- the pad -------------------------------------------------------------------------
 const MAIN = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'main.js'), 'utf8');
