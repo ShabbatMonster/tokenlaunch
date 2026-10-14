@@ -2525,9 +2525,11 @@ async function applyPumpEconomics(pad) {
       if (!(v > 0)) throw new Error(`${what} must be a positive number`);
       return v;
     };
+    const typedSupply = Number(String($('solSupply')?.value || '').replace(/,/g, ''));
     const e = await pumpEconomics(pad.rpc, quoteMint, {
       startSolEquivalent: num('solEconStart', 'the start figure'),
       migrateSolEquivalent: num('solEconMigrate', 'the migration figure'),
+      ...(typedSupply > 0 ? { totalSupply: typedSupply } : {}),
     });
     // Supply is yours to set, so this only fills it while it is still the
     // default. Silently resetting a number someone typed is the kind of thing
@@ -2539,14 +2541,20 @@ async function applyPumpEconomics(pad) {
     paintSolSupplyHint();
     $('solMigThreshold').value = String(e.migrationThreshold);
     const sym = SOL_QUOTES[pad.quoteSel]?.symbol || 'quote';
-    hint.innerHTML = `<span class="ok">pump.fun economics</span> \u00b7 opens at ~`
-      + `${e.startEquivalent.toLocaleString()} ${esc(sym)}, raises `
+    hint.innerHTML = `<span class="ok">economics applied</span> \u00b7 opens at a ~`
+      + `${e.openingMarketCap.toLocaleString()} ${esc(sym)} market cap, raises `
       + `${e.migrationThreshold.toLocaleString()} ${esc(sym)} · migration market cap `
       + `${e.migrationMarketCap.toLocaleString()} ${esc(sym)} (${e.pctSupplyOnMigration}% on migration)`
       + (supplyIsDefault ? '' : ` · kept your supply of ${Number(String(supplyEl.value).replace(/,/g, "")).toLocaleString()}`);
   } catch (err) {
     hint.innerHTML = `<span class="err">${esc(err?.message || String(err))}</span>`;
   }
+}
+
+// mirrors meteoraBaseDecimals in solana.js, which this file only reaches through
+// a dynamic import
+function meteoraDecimalsFor(totalSupply) {
+  return BigInt(Math.ceil(Number(totalSupply))) * 10n ** 9n <= 18_446_744_073_709_551_615n ? 9 : 6;
 }
 
 function solParamsFromUI(pad) {
@@ -2567,7 +2575,9 @@ function solParamsFromUI(pad) {
   if (!(migrationThreshold > 0)) throw new Error('migration threshold must be positive');
   return {
     totalSupply: num('solSupply', 'total supply'),
-    baseDecimals: 6,
+    // 9 whenever the supply allows it: at 6, curves that sell nearly the whole
+    // supply round short of their own threshold and Meteora refuses them
+    baseDecimals: meteoraDecimalsFor(num('solSupply', 'total supply')),
     feeBps: num('solFeeBps', 'fee bps'),
     pctSupplyOnMigration: num('solMigPct', '% on migration'),
     migrationThreshold,

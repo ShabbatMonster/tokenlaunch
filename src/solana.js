@@ -65,6 +65,20 @@ function keypairFromSecret(secret) {
   return Keypair.fromSecretKey(bytes);
 }
 
+/// Base decimals for a new DBC token: 9 whenever the supply fits a u64 at 9,
+/// else 6.
+///
+/// This decides which curves can be built at all. At 6 decimals a 1B supply is
+/// only 1e15 raw units, and a curve that sells nearly all of it up to a high
+/// migration price rounds short of its own threshold - the SDK refuses it with
+/// "Not enough liquidity ... amountLeft". JACKPOT (BhycXzE7) sells 99.81% of a
+/// 1B supply to raise 21,408 SOL; its exact curve fails at 6 decimals and builds
+/// at 9, which is what it uses. 9 caps the supply at ~18.4B tokens, so a bigger
+/// supply falls back to 6 rather than overflowing.
+export function meteoraBaseDecimals(totalSupply) {
+  return BigInt(Math.ceil(Number(totalSupply))) * 10n ** 9n <= 18_446_744_073_709_551_615n ? 9 : 6;
+}
+
 // pump.fun-style curve, editable via `p`:
 //   totalSupply, baseDecimals, feeBps (buy+sell), migrationThreshold (in whole
 //   quote tokens), pctSupplyOnMigration, feeClaimer (all trading fees go here)
@@ -821,29 +835,51 @@ export async function pumpEconomics(rpcUrl, quoteMint, opts = {}) {
     migrationThreshold = Number(q.outAmount) / 10 ** decimals;
     startEquivalent = migrationThreshold * (startSol / migrateSol);
   }
-  // pump's 30/85 gives 20.69%; any other pair scales the same way, and the
-  // migration market cap that comes out is raise x 100 / pct - checked against
-  // the SDK across seven configurations, exact every time.
-  const pct = PUMP_CURVE.pctSupplyOnMigration * (startSol / migrateSol) / (PUMP_CURVE.startSolEquivalent / PUMP_CURVE.migrateSolEquivalent);
-
-  // DBC will not build a curve for every ratio, and the failure it gives is
-  // "Not enough liquidity" with a raw lamport figure - useless for working out
-  // what to type instead. The band below was measured by binary-searching the
-  // SDK at a 1B supply: under ~3.17% there is too little supply left for the
-  // pool, and at ~49.84% and up it overflows. Since pct is fixed by the ratio
-  // of the two figures, that band is really a bound on START given MIGRATE.
-  const PCT_MIN = 3.174;
-  const PCT_MAX = 49.84;
-  if (pct < PCT_MIN || pct > PCT_MAX) {
-    const lo = PCT_MIN / 58.62 * migrateSol;
-    const hi = PCT_MAX / 58.62 * migrateSol;
-    const r = (v) => (v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2));
-    throw new Error(
-      `a start of ${startSol} against a migration of ${migrateSol} needs ${pct.toPrecision(3)}% of supply in the pool, `
-      + `which DBC will not build (it accepts roughly ${PCT_MIN}%-${PCT_MAX}%). `
-      + `For a migration of ${migrateSol}, the start has to be between ${r(lo)} and ${r(hi)} - `
-      + `or raise the supply instead, which moves the price per token rather than this ratio.`,
-    );
+  // Solve for the % on migration that makes DBC open where START says, by
+  // asking the SDK itself - bisecting on the curve it would actually build.
+  //
+  // This replaced a linear rule (pct = 58.62 x start / migrate) and a 3.17%-
+  // 49.84% band that came with it. Both were artifacts: the rule is only exact
+  // at pump's 30/85, and the band was measured at 6 decimals, where a curve
+  // selling nearly the whole supply rounds short of its threshold. The real
+  // relation for a one-segment curve is
+  //
+  //     opening market cap = raise x p / (1 - p)^2
+  //
+  // so a huge raise from a pump-like open just means a tiny p - JACKPOT runs
+  // 0.19% to raise 21,408 SOL from a ~46 SOL open. Nothing caps the ratio
+  // except whether the curve can be represented, and the SDK is the authority
+  // on that.
+  //
+  // START keeps pump's convention: it is the VIRTUAL quote, and pump opens a 1B
+  // coin with 1.073B virtual tokens, so 30 means a 27.96 SOL opening cap. That
+  // keeps 30/85 landing on exactly the 20.69% it always has.
+  const PUMP_VIRTUAL_TOKENS = 1.073;
+  const targetOpen = startEquivalent / PUMP_VIRTUAL_TOKENS;
+  const supply = Number(opts.totalSupply ?? PUMP_CURVE.totalSupply);
+  const baseDecimals = meteoraBaseDecimals(supply);
+  const curveAt = (p) => {
+    try {
+      return buildLaunchConfig(decimals, {
+        totalSupply: supply, baseDecimals, feeBps: 100,
+        pctSupplyOnMigration: p, migrationThreshold,
+      });
+    } catch (e) { return { error: e }; }
+  };
+  const openOf = (cfg) => {
+    const sp = Number(BigInt(cfg.sqrtStartPrice.toString())) / 2 ** 64;
+    return sp * sp * 10 ** (baseDecimals - decimals) * supply;
+  };
+  // opening cap rises with p; bisect in log space, since useful p spans
+  // from ~1e-5 % to ~50 %
+  let lo = Math.log(1e-6);
+  let hi = Math.log(95);
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    const cfg = curveAt(Math.exp(mid));
+    // an unbuildable midpoint is treated as "too high" - the overflow side is
+    // where the SDK refuses, and the solve then settles below it
+    if (cfg.error || openOf(cfg) > targetOpen) hi = mid; else lo = mid;
   }
   // keep a sane number of significant figures rather than a long float
   const round = (v) => {
@@ -852,12 +888,31 @@ export async function pumpEconomics(rpcUrl, quoteMint, opts = {}) {
     const places = Math.max(0, 5 - mag);
     return +v.toFixed(places);
   };
+  const pct = round(Math.exp(lo));
+  const built = curveAt(pct);
+  if (built.error) {
+    throw new Error(
+      `Meteora will not build a curve that opens at ${round(targetOpen)} and raises ${round(migrationThreshold)} `
+      + `on a supply of ${supply.toLocaleString()}: ${built.error.message}`,
+    );
+  }
+  const opened = openOf(built);
+  // the bisection lands on the SDK's own answer, so a miss means the target was
+  // outside what any p can reach - say so instead of quietly launching elsewhere
+  if (Math.abs(opened - targetOpen) / targetOpen > 0.01) {
+    throw new Error(
+      `the closest curve Meteora will build for a raise of ${round(migrationThreshold)} opens at ${round(opened)}, `
+      + `not ${round(targetOpen)} - raise the START or lower MIGRATE`,
+    );
+  }
   return {
     totalSupply: PUMP_CURVE.totalSupply,
-    pctSupplyOnMigration: round(pct),
+    baseDecimals,
+    pctSupplyOnMigration: pct,
     migrationThreshold: round(migrationThreshold),
     migrationMarketCap: round(migrationThreshold * 100 / pct),
     startEquivalent: round(startEquivalent),
+    openingMarketCap: round(opened),
     quoteDecimals: decimals,
   };
 }
