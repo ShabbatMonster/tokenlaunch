@@ -61,15 +61,17 @@ check((tile.match(/href="#bloom"/g) || []).length >= 4 && /#ec6fa0/.test(tile) &
   'with pink and periwinkle petunias, both');
 
 // --- wiring ---------------------------------------------------------------------------
+// Petunia is one of the looks the switcher cycles (Deco is the default since
+// 2026-10-14; deco-theme.test.mjs owns the default and the full order).
 for (const page of PAGES) {
   const html = fs.readFileSync(path.join(docs, page), 'utf8');
-  const link = html.indexOf('<link id="skin" rel="stylesheet" href="petunia.css">');
+  const link = html.indexOf('<link id="skin" rel="stylesheet"');
   const styleEnd = html.indexOf('</style>');
   check(link > styleEnd && styleEnd > -1 && html.indexOf('<script src="skin.js"></script>') > link,
-    `${page} loads petunia.css after its own <style>, then skin.js`);
+    `${page} loads the skin after its own <style>, then skin.js`);
 }
-check(/var current = 'petunia'/.test(skinJs), 'Petunia is the default look');
-check(/ORDER = \['petunia', 'riso', 'classic'\]/.test(skinJs), 'and the switcher cycles Petunia, Riso, Classic');
+check(/petunia:\s*\{\s*href:\s*'petunia\.css'/.test(skinJs) && /ORDER = \[[^\]]*'petunia'/.test(skinJs),
+  'skin.js lists Petunia and cycles through it');
 check(/\.menubar \.mb-skin\s*\{/.test(css), 'petunia styles the switcher it adds to the masthead');
 
 {
@@ -79,12 +81,11 @@ check(/\.menubar \.mb-skin\s*\{/.test(css), 'petunia styles the switcher it adds
   dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
   const btn = dom.window.document.querySelector('nav.menubar .mb-skin');
   const link = dom.window.document.getElementById('skin');
-  const seen = [link.getAttribute('href')];
-  for (let i = 0; i < 3 && btn; i++) { btn.click(); seen.push(link.getAttribute('href')); }
-  check(!!btn && seen.join(' ') === 'petunia.css riso.css classic.css petunia.css',
-    'clicking the switcher goes Petunia -> Riso -> Classic -> Petunia', seen.join(' -> '));
-  check(/Look: Petunia/.test(btn.textContent), 'and its label names the look you are on', btn.textContent);
-  check(dom.window.document.documentElement.dataset.skin === 'petunia', 'the page is tagged with the current look');
+  let reached = link.getAttribute('href') === 'petunia.css';
+  for (let i = 0; i < 4 && btn && !reached; i++) { btn.click(); reached = link.getAttribute('href') === 'petunia.css'; }
+  check(reached, 'clicking the switcher reaches petunia.css');
+  check(/Look: Petunia/.test(btn.textContent), 'and its label then names Petunia', btn.textContent);
+  check(dom.window.document.documentElement.dataset.skin === 'petunia', 'with the page tagged as Petunia');
 }
 // a saved choice beats the default
 {

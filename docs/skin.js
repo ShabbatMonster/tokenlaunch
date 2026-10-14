@@ -1,4 +1,4 @@
-// Which look the launcher wears: Petunia (the default), Riso or Classic.
+// Which look the launcher wears: Deco (the default), Petunia, Riso or Classic.
 //
 // Loaded as a plain script straight after the <link id="skin">, so the saved
 // choice is applied before the first paint rather than flashing the default.
@@ -7,13 +7,14 @@
 // The menu-bar button cycles through the looks in ORDER.
 (function () {
   var SKINS = {
+    deco: { href: 'deco.css', label: 'Deco' },
     petunia: { href: 'petunia.css', label: 'Petunia' },
     riso: { href: 'riso.css', label: 'Riso' },
     classic: { href: 'classic.css', label: 'Classic' },
   };
-  var ORDER = ['petunia', 'riso', 'classic'];
+  var ORDER = ['deco', 'petunia', 'riso', 'classic'];
   var KEY = 'tokenlaunch.skin';
-  var current = 'petunia';
+  var current = 'deco';
   try {
     var saved = localStorage.getItem(KEY);
     if (SKINS[saved]) current = saved;
