@@ -65,12 +65,12 @@ check(/\.menubar \.mb-skin\s*\{/.test(css), 'riso styles the switcher it adds to
   dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
   const btn = dom.window.document.querySelector('nav.menubar .mb-skin');
   const link = dom.window.document.getElementById('skin');
+  // click until Riso comes up rather than counting - the cycle's length and
+  // starting point belong to whichever look is the default
   const seen = [link.getAttribute('href')];
-  for (let i = 0; i < 3 && btn; i++) { btn.click(); seen.push(link.getAttribute('href')); }
-  check(!!btn && seen.includes('riso.css'), 'clicking the switcher reaches riso.css', seen.join(' -> '));
-  // three clicks went all the way round to Petunia; one more is Riso
-  btn.click();
-  check(link.getAttribute('href') === 'riso.css' && dom.window.localStorage.getItem('tokenlaunch.skin') === 'riso',
+  for (let i = 0; i < 6 && btn && link.getAttribute('href') !== 'riso.css'; i++) { btn.click(); seen.push(link.getAttribute('href')); }
+  check(!!btn && link.getAttribute('href') === 'riso.css', 'clicking the switcher reaches riso.css', seen.join(' -> '));
+  check(dom.window.localStorage.getItem('tokenlaunch.skin') === 'riso',
     'and the choice is remembered');
 }
 
