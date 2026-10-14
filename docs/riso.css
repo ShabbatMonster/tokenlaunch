@@ -1,0 +1,422 @@
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;600&display=swap');
+
+/* ---------------------------------------------------------------------------
+   Riso: the launcher as a risograph-printed zine.
+
+   Same trick as classic.css - loaded AFTER each page's own <style>, it remaps
+   the handful of custom properties every page is built on (--bg, --panel,
+   --border, --text, --dim, --accent, --danger) and adds chrome on top. Layout
+   is untouched: nothing here sets a width, a flex direction or an order.
+
+   The look is three spot inks on warm paper - fluorescent pink, riso blue and
+   process yellow - printed over a warm black, with the faults that make riso
+   prints riso: layers that do not quite line up (the hard pink offset under
+   every card), halftone dots bleeding in from the corners, and a little grain.
+   Buttons are stamps: yellow ink with a hard shadow, and they press down.
+
+   Ink is not contrast. Pink and yellow never carry body text; they are fills
+   with ink-black text on them (pink ~5.3:1, yellow ~15:1). Text colours are
+   the darker cousins - blue #0062a0, green #00704a, red #b3121a - all at
+   4.5:1 or better on the card paper.
+
+   prefers-color-scheme: dark prints the same inks on black paper.
+--------------------------------------------------------------------------- */
+
+:root {
+  /* the stock and the inks */
+  --r-paper:    #f3ecdf;
+  --r-card:     #fbf7ef;
+  --r-field:    #fffdf8;
+  --r-ink:      #231f20;      /* riso black is warm, not #000 */
+  --r-ink-soft: #5b5350;
+  --r-rule:     #cfc4b2;
+  --r-pink:     #ff48b0;      /* fluorescent pink */
+  --r-blue:     #0078bf;      /* riso blue, for fills */
+  --r-blue-txt: #0062a0;      /* the same blue, darkened to read as text */
+  --r-yellow:   #ffe800;
+  --r-green:    #00704a;
+  --r-red:      #b3121a;
+  --r-amber:    #8a5a00;
+  --r-shadow:   var(--r-ink); /* the hard offset under stamps */
+  --r-on-ink:   #f3ecdf;      /* text printed on solid ink */
+  --r-on-blue:  #ffffff;      /* text printed on a blue fill */
+  --r-dots:     rgba(255, 72, 176, .38);
+  --r-dots-2:   rgba(0, 120, 191, .30);
+  --r-grain:    .07;
+
+  /* remapped onto what the pages already use */
+  --bg:     var(--r-paper);
+  --panel:  var(--r-card);
+  --panel2: var(--r-field);
+  --border: var(--r-ink);
+  --text:   var(--r-ink);
+  --dim:    var(--r-ink-soft);
+  --accent: var(--r-green);
+  --warn:   var(--r-amber);
+  --danger: var(--r-red);
+
+  --r-display: "Bricolage Grotesque", "Arial Rounded MT Bold", system-ui, sans-serif;
+  --r-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --r-paper:    #16131a;
+    --r-card:     #211d26;
+    --r-field:    #1a1720;
+    --r-ink:      #f3ecdf;
+    --r-ink-soft: #b9b0a6;
+    --r-rule:     #4a4350;
+    --r-blue:     #3fa9f5;
+    --r-blue-txt: #6cc0ff;
+    --r-green:    #4ee59a;
+    --r-red:      #ff6b72;
+    --r-amber:    #ffc657;
+    --r-shadow:   #e9dfcf;      /* on black paper the stamp offset prints in cream */
+    --r-on-blue:  #16131a;      /* the night blue is light: ink-dark type on it */
+    --r-on-ink:   #16131a;
+    --r-dots:     rgba(255, 72, 176, .30);
+    --r-dots-2:   rgba(63, 169, 245, .24);
+    --r-grain:    .10;
+    color-scheme: dark;
+  }
+}
+
+/* --- the sheet ------------------------------------------------------------ */
+body {
+  background-color: var(--r-paper);
+  /* paper grain: fractal noise, desaturated, barely there */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .5 0 0 0 0 .45 0 0 0 0 .4 0 0 0 .32 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-blend-mode: multiply;
+  color: var(--r-ink);
+  font-family: var(--r-display);
+  font-size: 14px;
+  padding-top: 52px;              /* clears the fixed masthead */
+  position: relative;
+}
+@media (prefers-color-scheme: dark) { body { background-blend-mode: screen; } }
+
+/* halftone bleeding in from two corners - one ink each, faded by a mask so it
+   reads as a print gradient rather than wallpaper */
+body::before, body::after {
+  content: ""; position: fixed; pointer-events: none; z-index: -1;
+  width: 62vmax; height: 62vmax;
+  background-size: 11px 11px;
+}
+body::before {
+  top: -18vmax; right: -18vmax;
+  background-image: radial-gradient(circle, var(--r-dots) 2.1px, transparent 2.6px);
+  -webkit-mask-image: radial-gradient(circle at 70% 30%, #000 0%, transparent 62%);
+          mask-image: radial-gradient(circle at 70% 30%, #000 0%, transparent 62%);
+}
+body::after {
+  bottom: -22vmax; left: -22vmax;
+  background-image: radial-gradient(circle, var(--r-dots-2) 1.8px, transparent 2.3px);
+  background-position: 5px 5px;
+  -webkit-mask-image: radial-gradient(circle at 30% 70%, #000 0%, transparent 60%);
+          mask-image: radial-gradient(circle at 30% 70%, #000 0%, transparent 60%);
+}
+
+::selection { background: var(--r-yellow); color: #231f20; }
+
+/* Data stays monospace: addresses, hashes, amounts, anything typed. */
+code, kbd, pre, input, textarea, select, .mono, .addr, .hint code, .status, .kv dd,
+.token-row .addr, .wallet-chip .bal {
+  font-family: var(--r-mono);
+}
+
+/* --- the masthead --------------------------------------------------------- */
+.menubar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+  display: flex; align-items: center; gap: 2px;
+  height: 40px; padding: 0 10px;
+  background: #231f20;
+  border-bottom: 4px solid var(--r-pink);
+  box-shadow: 0 4px 0 0 var(--r-yellow);  /* a second ink, a hair off */
+  overflow-x: auto; overflow-y: hidden; white-space: nowrap;
+  scrollbar-width: none;
+}
+.menubar::-webkit-scrollbar { display: none; }
+.menubar a, .menubar .mb-item {
+  font-family: var(--r-display); font-weight: 800; font-size: 13px;
+  letter-spacing: .06em; text-transform: uppercase;
+  color: #f3ecdf; text-decoration: none;
+  padding: 5px 10px; border-radius: 3px;
+  transition: transform .12s ease, background-color .12s ease;
+}
+.menubar a u, .menubar .mb-item u { text-decoration: underline; text-decoration-color: var(--r-pink); text-underline-offset: 2px; text-decoration-thickness: 2px; }
+.menubar a:hover { color: #231f20; background: var(--r-pink); }
+.menubar a:hover u { text-decoration-color: #231f20; }
+/* the current page is marked with a highlighter, slightly crooked */
+.menubar a[aria-current="page"] {
+  color: #231f20; background: var(--r-yellow);
+  transform: rotate(-2deg);
+}
+.menubar a[aria-current="page"] u { text-decoration-color: #231f20; }
+.menubar .mb-gap { flex: 1; }
+.menubar .mb-right { display: flex; align-items: center; gap: 6px; }
+.menubar .mb-skin {
+  flex: none; margin-left: 8px;
+  font-family: var(--r-display); font-weight: 800; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  color: #231f20; background: #f3ecdf; border: 2px solid #f3ecdf; border-radius: 999px;
+  padding: 3px 10px; box-shadow: none; cursor: pointer;
+}
+.menubar .mb-skin:hover { background: var(--r-yellow); border-color: var(--r-yellow); transform: none; }
+
+/* --- headings --------------------------------------------------------------- */
+header h1, .titlebar {
+  font-family: var(--r-display); font-weight: 800;
+  font-size: 22px; letter-spacing: .04em; text-transform: uppercase; line-height: 1;
+  color: var(--r-ink);
+  /* two inks that did not register: pink one way, blue the other */
+  text-shadow: 2px 2px 0 var(--r-pink), -1.5px -1px 0 var(--r-blue);
+}
+header { gap: 10px; align-items: center; }
+header a { color: var(--r-blue-txt); }
+
+.modal h2, .modal h3 {
+  font-family: var(--r-display); font-weight: 800; font-size: 17px;
+  letter-spacing: .03em; text-transform: uppercase;
+  text-shadow: 1.5px 1.5px 0 var(--r-pink);
+}
+
+label {
+  font-family: var(--r-display); font-weight: 800;
+  font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--r-blue-txt);
+}
+label .hint { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--r-ink-soft); }
+
+/* --- cards: the sheet with its pink plate printed a few px off ----------- */
+.card, .modal {
+  background: var(--r-card);
+  border: 2px solid var(--r-ink);
+  border-radius: 6px;
+  box-shadow: 7px 7px 0 0 var(--r-pink);
+}
+.card + .card { margin-top: 22px; }
+.modal { box-shadow: 8px 8px 0 0 var(--r-blue); }
+.overlay { background: rgba(35, 31, 32, .55); backdrop-filter: blur(2px); }
+
+/* --- fields ------------------------------------------------------------------- */
+input[type=text], input[type=password], input[type=number], input[type=url], input[type=search], textarea, select {
+  background: var(--r-field);
+  border: 2px solid var(--r-ink);
+  border-radius: 4px;
+  color: var(--r-ink);
+  font-size: 13px;
+}
+select { color: var(--r-ink); padding: 8px 10px; cursor: pointer; }
+input:focus, textarea:focus, select:focus {
+  border-color: var(--r-blue);
+  box-shadow: 0 0 0 3px var(--r-yellow);
+  outline: none;
+}
+input::placeholder, textarea::placeholder { color: var(--r-ink-soft); opacity: .75; }
+input[readonly] { background: transparent; border-style: dashed; }
+
+/* --- stamps (every button) ------------------------------------------------------ */
+button, .btn {
+  font-family: var(--r-display); font-weight: 800;
+  letter-spacing: .06em; text-transform: uppercase;
+  color: #231f20; background: var(--r-yellow);
+  border: 2px solid var(--r-ink); border-radius: 4px;
+  box-shadow: 3px 3px 0 0 var(--r-shadow);
+  cursor: pointer;
+  transition: transform .08s ease, box-shadow .08s ease, background-color .12s ease;
+}
+button:hover:not(:disabled), .btn:hover:not(:disabled):not(.disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 0 var(--r-shadow);
+}
+button:active:not(:disabled), .btn:active:not(:disabled):not(.disabled) {
+  transform: translate(3px, 3px);
+  box-shadow: 0 0 0 0 var(--r-shadow);
+}
+button:disabled, .btn:disabled, .btn.disabled {
+  opacity: .45; cursor: not-allowed; box-shadow: none; transform: none;
+}
+button:focus-visible, .btn:focus-visible, a:focus-visible, .pad:focus-visible {
+  outline: 3px solid var(--r-blue); outline-offset: 3px;
+}
+
+/* the big one: pink plate, ink type, and a blue misregistration on hover */
+.launch-btn, #launchBtn {
+  background: var(--r-pink); color: #231f20;
+  font-size: 17px; letter-spacing: .14em;
+  border: 2px solid var(--r-ink); border-radius: 6px;
+  box-shadow: 5px 5px 0 0 var(--r-shadow);
+}
+.launch-btn:hover:not(:disabled), #launchBtn:hover:not(:disabled) {
+  box-shadow: 5px 5px 0 0 var(--r-blue), 7px 7px 0 0 var(--r-shadow);
+}
+
+/* VAMP carries its own inline purple gradient; reprint it in blue ink with a
+   pink halftone overprint so it belongs to the same sheet */
+#vampBtn {
+  background-color: var(--r-blue) !important;
+  background-image: radial-gradient(circle, rgba(255, 72, 176, .55) 1.4px, transparent 1.9px) !important;
+  background-size: 7px 7px !important;
+  color: var(--r-on-blue) !important;
+  border: 2px solid var(--r-ink) !important;
+  border-radius: 4px !important;
+  box-shadow: 3px 3px 0 0 var(--r-shadow);
+  text-shadow: none;
+}
+
+/* --- variants that out-specify the base rules ------------------------------
+   Each page carries two-class rules (.btn.secondary, .modal button.primary,
+   .mini, .tab.active...) that beat a bare `button` however late this file
+   loads - specificity, not order - so they are restyled by name. */
+.btn.secondary, .mini, .chip-edit-row .x, .tab {
+  background: var(--r-card); color: var(--r-ink);
+}
+.mini { font-size: 11px; padding: 4px 9px; box-shadow: 2px 2px 0 0 var(--r-shadow); }
+.mini.wide { width: 100%; padding: 10px 0; }
+.mini.accent { background: var(--r-pink); color: #231f20; }
+.chip-edit-row .x:hover { background: var(--r-red); color: #fff; }
+.btn.sell { background: var(--r-pink); color: #231f20; }
+.btn.force { background: var(--r-blue); color: var(--r-on-blue); }
+.modal button.primary {
+  background: var(--r-pink); color: #231f20;
+  border: 2px solid var(--r-ink); box-shadow: 4px 4px 0 0 var(--r-shadow);
+}
+.modal .ghost {
+  background: none; border: none; box-shadow: none; text-transform: none; letter-spacing: 0;
+  color: var(--r-blue-txt); text-decoration: underline; text-underline-offset: 3px;
+}
+.modal .ghost:hover:not(:disabled) { transform: none; box-shadow: none; background: var(--r-yellow); color: #231f20; }
+
+/* --- stickers: the pad picker, tabs, chips, badges ------------------------------ */
+.pads { gap: 8px; }
+.pad {
+  font-family: var(--r-display); font-weight: 600; font-size: 12px;
+  text-transform: none; letter-spacing: .01em;
+  color: var(--r-ink); background: var(--r-card);
+  border: 2px solid var(--r-ink); border-radius: 999px;
+  padding: 6px 13px;
+  box-shadow: 2px 2px 0 0 var(--r-shadow);
+}
+.pad:hover:not(:disabled) { transform: rotate(-2deg) translateY(-1px); box-shadow: 3px 3px 0 0 var(--r-shadow); }
+.pad.active, .pad[aria-pressed="true"] {
+  background: var(--r-blue); color: var(--r-on-blue);
+  box-shadow: 3px 3px 0 0 var(--r-pink);
+}
+.pad:disabled { border-style: dashed; box-shadow: none; opacity: .5; }
+.pad input { color: inherit; font-family: var(--r-mono); }
+
+.tabs { gap: 6px; }
+.tab { border-radius: 999px; padding: 6px 14px; }
+.tab.active { background: var(--r-blue); color: var(--r-on-blue); box-shadow: 3px 3px 0 0 var(--r-pink); }
+
+.chip {
+  font-family: var(--r-display); font-weight: 600;
+  background: var(--r-card); border: 2px solid var(--r-ink); border-radius: 999px; color: var(--r-ink);
+}
+.chip:hover { background: var(--r-yellow); color: #231f20; }
+
+.badge {
+  font-family: var(--r-display); font-weight: 800; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  border: 2px solid var(--r-ink); border-radius: 999px; padding: 1px 8px;
+  background: var(--r-card); color: var(--r-ink);
+}
+.badge.active  { background: var(--r-blue); color: var(--r-on-blue); }
+.badge.ready   { background: var(--r-yellow); color: #231f20; }
+.badge.done    { background: var(--r-green); color: var(--r-card); }
+.badge.blocked { background: var(--r-red); color: #fff; }
+
+/* --- wallet, drop zone, lists --------------------------------------------------- */
+.wallet-chip {
+  background: var(--r-card); color: var(--r-ink);
+  border: 2px solid var(--r-ink); border-radius: 999px;
+  padding: 5px 12px; box-shadow: 2px 2px 0 0 var(--r-shadow);
+}
+.wallet-chip .bal { color: var(--r-ink); font-weight: 600; }
+.wallet-chip .dot { border: 1.5px solid var(--r-ink); width: 9px; height: 9px; }
+.wallet-chip .dot.on { background: #00b46a; }
+
+.drop {
+  border: 2px dashed var(--r-ink); border-radius: 6px;
+  background-color: var(--r-field);
+  background-image: radial-gradient(circle, var(--r-dots) 1.3px, transparent 1.7px);
+  background-size: 8px 8px;
+  color: var(--r-ink);
+}
+.drop.drag { border-color: var(--r-pink); border-style: solid; box-shadow: 0 0 0 3px var(--r-yellow); }
+.drop.has { background-image: none; border-style: solid; }
+
+.token-row, .list > * { border-bottom: 2px dotted var(--r-rule); }
+.token-row .sym {
+  font-family: var(--r-display); font-weight: 800; letter-spacing: .03em;
+  background: var(--r-yellow); color: #231f20; padding: 0 5px; border-radius: 2px;
+}
+.token-row .addr a { color: var(--r-ink-soft); }
+.token-row .addr a:hover { color: var(--r-blue-txt); background: none; }
+
+/* --- text ----------------------------------------------------------------------- */
+a { color: var(--r-blue-txt); text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
+a:hover { background: var(--r-yellow); color: #231f20; }
+.hint, .sub, .drop-hint, .fee-note, .dim, .note { color: var(--r-ink-soft); opacity: 1; }
+.hint b, .fee-note b { color: var(--r-ink); }
+.buy-preview b, .preview b, .quote b, .tokinfo b, .bals b { color: var(--r-ink); }
+
+.status:not(:empty) {
+  background: var(--r-field);
+  border: 2px dashed var(--r-ink-soft);
+  border-radius: 6px;
+  padding: 9px 11px;
+  color: var(--r-ink);
+}
+.status a { color: var(--r-blue-txt); }
+.ok, .status .ok   { color: var(--r-green); font-weight: 600; }
+.err, .status .err { color: var(--r-red); font-weight: 600; }
+.warn, .status .warn { color: var(--r-amber); font-weight: 600; }
+.modal .err { color: var(--r-red); }
+
+details.adv summary, details.dev summary {
+  font-family: var(--r-display); font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--r-blue-txt);
+}
+details.dev pre { background: var(--r-field); border: 2px dashed var(--r-rule); border-radius: 4px; }
+
+.kv dt { font-family: var(--r-display); font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--r-blue-txt); }
+
+/* progress bars: a pink plate with stripes, like a screen-print fill */
+.bar { background: var(--r-field); border: 2px solid var(--r-ink); border-radius: 999px; overflow: hidden; }
+.bar > div {
+  background-color: var(--r-pink);
+  background-image: repeating-linear-gradient(-45deg, transparent 0 6px, rgba(35, 31, 32, .18) 6px 9px);
+}
+
+hr { border: none; border-top: 2px dotted var(--r-rule); }
+
+table { border-collapse: separate; border-spacing: 0; width: 100%; }
+th {
+  font-family: var(--r-display); font-weight: 800; font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  background: #231f20; color: #f3ecdf; padding: 5px 8px; text-align: left;
+}
+td { padding: 4px 8px; border-bottom: 2px dotted var(--r-rule); font-size: 12px; }
+tr:hover td { background: var(--r-yellow); color: #231f20; }
+tr:hover td a { color: #231f20; }
+
+/* scrollbars: an ink bar in a paper gutter */
+* { scrollbar-color: var(--r-ink) var(--r-paper); }
+::-webkit-scrollbar { width: 12px; height: 12px; background: var(--r-paper); }
+::-webkit-scrollbar-thumb { background: var(--r-ink); border: 3px solid var(--r-paper); border-radius: 999px; }
+
+@media (max-width: 560px) {
+  /* the header row (title, page links, wallet) is wider than a phone; let it
+     wrap instead of widening the whole page */
+  header { flex-wrap: wrap; row-gap: 8px; }
+  header > div { flex-wrap: wrap; row-gap: 4px; }
+  header h1 { font-size: 18px; }
+  .menubar a, .menubar .mb-item { font-size: 12px; padding: 5px 8px; }
+  .card { box-shadow: 5px 5px 0 0 var(--r-pink); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; }
+  button:hover:not(:disabled), .btn:hover:not(:disabled), .pad:hover:not(:disabled),
+  .menubar a[aria-current="page"] { transform: none !important; }
+}
