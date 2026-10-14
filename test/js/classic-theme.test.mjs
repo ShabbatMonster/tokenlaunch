@@ -56,12 +56,20 @@ check(/border-radius:\s*0\s*!important/.test(css),
 check(/a:visited\s*\{\s*color:\s*#551a8b/.test(css),
   'and visited links are still purple');
 
+// --- classic is still one of the two looks ---------------------------------------
+const skinJs = fs.readFileSync(path.join(docs, 'skin.js'), 'utf8');
+check(/classic:\s*\{\s*href:\s*'classic\.css'/.test(skinJs), 'skin.js can switch the site to classic.css');
+check(/\.menubar \.mb-skin\s*\{/.test(css), 'and classic styles the switcher it adds to the menu bar');
+
 // --- every page is wired, in the right order -----------------------------------
 for (const page of PAGES) {
   const html = fs.readFileSync(path.join(docs, page), 'utf8');
-  const link = html.indexOf('classic.css');
+  // Pages now load a switchable skin: <link id="skin"> after the page style,
+  // which skin.js points at classic.css when that look is chosen. The order
+  // requirement is the same - it is the skin link that has to come last.
+  const link = html.indexOf('id="skin"');
   const styleEnd = html.indexOf('</style>');
-  check(link > -1, `${page} links classic.css`);
+  check(link > -1 && html.indexOf('src="skin.js"') > link, `${page} has the skin link, with skin.js right after it`);
   check(link > styleEnd && styleEnd > -1,
     `${page} loads it AFTER its own <style>, so the remap wins`,
     link > styleEnd ? `link@${link} > style@${styleEnd}` : 'WRONG ORDER — page stays dark');

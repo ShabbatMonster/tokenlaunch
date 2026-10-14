@@ -107,6 +107,8 @@ input[type=url], input[type=search], textarea, select, .status, .token-list {
   background: var(--c-soft); font-weight: bold;
 }
 .menubar .mb-gap { flex: 1; }
+/* the look switcher skin.js appends - a small raised button, like a toolbar control */
+.menubar .mb-skin { flex: none; margin-left: 6px; padding: 1px 8px; font-size: 12px; line-height: 18px; text-transform: none; letter-spacing: 0; }
 .menubar .mb-right { display: flex; align-items: center; gap: 6px; padding-right: 2px; }
 
 /* --- windows -------------------------------------------------------------- */
@@ -235,6 +237,9 @@ hr { border: none; border-top: 1px solid var(--c-shadow); border-bottom: 1px sol
 
 @media (max-width: 560px) {
   .menubar { overflow-x: auto; }
+  /* the header row is wider than a phone - wrap it rather than widen the page */
+  header { flex-wrap: wrap; row-gap: 6px; }
+  header > div { flex-wrap: wrap; row-gap: 4px; }
   .menubar .mb-right { display: none; }
 }
 
