@@ -42,20 +42,22 @@ check(!/(^|[^-])width:\s*\d+px[^;]*;[^}]*\.app/.test(css) && !/\.app\s*\{/.test(
   'it never sizes the app column - the layout is the pages\', not the theme\'s');
 
 // --- wiring ---------------------------------------------------------------------
+// Riso is one of three looks now (Petunia is the default); every page carries
+// the switchable <link id="skin"> after its own <style>, and skin.js can reach
+// riso.css from it.
 for (const page of PAGES) {
   const html = fs.readFileSync(path.join(docs, page), 'utf8');
-  const link = html.indexOf('<link id="skin" rel="stylesheet" href="riso.css">');
+  const link = html.indexOf('<link id="skin" rel="stylesheet"');
   const styleEnd = html.indexOf('</style>');
   check(link > styleEnd && styleEnd > -1 && html.indexOf('<script src="skin.js"></script>') > link,
-    `${page} loads riso.css after its own <style>, then skin.js`);
+    `${page} loads the skin after its own <style>, then skin.js`);
 }
-check(/var current = 'riso'/.test(skinJs), 'Riso is the default look');
-check(/riso:\s*\{\s*href:\s*'riso\.css'/.test(skinJs) && /classic:\s*\{\s*href:\s*'classic\.css'/.test(skinJs),
-  'and skin.js can switch between the two');
-check((skinJs.match(/try \{/g) || []).length >= 2, 'reading and saving the choice both survive blocked storage');
+check(/riso:\s*\{\s*href:\s*'riso\.css'/.test(skinJs) && /ORDER = \[[^\]]*'riso'/.test(skinJs),
+  'skin.js lists Riso and cycles through it');
+check((skinJs.match(/try {/g) || []).length >= 2, 'reading and saving the choice both survive blocked storage');
 check(/\.menubar \.mb-skin\s*\{/.test(css), 'riso styles the switcher it adds to the masthead');
 
-// the switcher really mounts: run skin.js in a page and look
+// the switcher really reaches Riso: run skin.js in a page and click through
 {
   const html = fs.readFileSync(path.join(docs, 'index.html'), 'utf8').replace(/<script[^>]*src="(?!skin\.js)[^"]*"[^>]*><\/script>/g, '');
   const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'http://localhost/' });
@@ -63,12 +65,13 @@ check(/\.menubar \.mb-skin\s*\{/.test(css), 'riso styles the switcher it adds to
   dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
   const btn = dom.window.document.querySelector('nav.menubar .mb-skin');
   const link = dom.window.document.getElementById('skin');
-  check(!!btn && link.getAttribute('href') === 'riso.css', 'the switcher appears in the menu bar, with Riso applied');
+  const seen = [link.getAttribute('href')];
+  for (let i = 0; i < 3 && btn; i++) { btn.click(); seen.push(link.getAttribute('href')); }
+  check(!!btn && seen.includes('riso.css'), 'clicking the switcher reaches riso.css', seen.join(' -> '));
+  // three clicks went all the way round to Petunia; one more is Riso
   btn.click();
-  check(link.getAttribute('href') === 'classic.css' && dom.window.localStorage.getItem('tokenlaunch.skin') === 'classic',
-    'clicking it swaps to classic.css and remembers the choice');
-  btn.click();
-  check(link.getAttribute('href') === 'riso.css', 'and clicking again comes back');
+  check(link.getAttribute('href') === 'riso.css' && dom.window.localStorage.getItem('tokenlaunch.skin') === 'riso',
+    'and the choice is remembered');
 }
 
 // --- legibility ------------------------------------------------------------------
