@@ -493,6 +493,30 @@
       <div class="status" id="lunchBuyStatus"></div>
     </div>
 
+    <div id="hookeRow" class="hidden">
+      <div class="row">
+        <div><label>PAIRED WITH</label><input type="text" value="hXMAX (Hooke XMAX) — fixed by the factory" readonly></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>PAY DEV BUY WITH</label><select id="hookePay">
+          <option value="ETH">ETH (swapped to USDG first)</option>
+          <option value="USDG">USDG</option>
+          <option value="HXMAX">hXMAX</option>
+        </select></div>
+        <div style="flex:0 0 150px"><label>DEV BUY (<span id="hookeBuySym">USDG</span>)</label><input type="text" id="hookeBuy" value="50" spellcheck="false"></div>
+        <div style="flex:0 0 100px"><label>SLIPPAGE %</label><input type="text" id="hookeSlippage" value="2" spellcheck="false"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>CREATOR FEES GO TO (BLANK = YOU)</label><input type="text" id="hookeCreator" spellcheck="false" placeholder="0x... (defaults to your own address)"></div>
+      </div>
+      <div class="hint" id="hookeLine" style="font-size:11px;margin-top:6px"></div>
+      <div class="hint" style="font-size:11px;margin-top:6px">The factory WOLFPACK launched from, called the same way: <code>createMeme</code> on the Hooke hook with a salt mined so the
+      token address ends in <b>0000</b> (the factory refuses anything else), paired against <b>hXMAX</b>. 800M of the 1B supply sells on the
+      hook's curve, 200M is held for graduation. A dev buy is <b>required</b> by the contract and is paid in USDG or hXMAX &mdash; WOLFPACK
+      used 50 USDG. Pick ETH and it is swapped to USDG on Uniswap first (a separate transaction, sized so it cannot come up short).
+      The launch fee is read live and sent exactly; the contract rejects any other amount.</div>
+    </div>
+
     <div id="longRow" class="hidden">
       <div class="row">
         <div><label>PAIR AGAINST (STOCK)</label><select id="longQuoteSelect"></select></div>
