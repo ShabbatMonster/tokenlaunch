@@ -1127,6 +1127,17 @@ const PADS = [
     quoteMint: null,           // resolved from quoteSel / custom input
   },
   {
+    // Hooke - the factory WOLFPACK (0x5199...0000) launched from. Every coin is
+    // paired against hXMAX, its address is mined to end in 0000, and a dev buy
+    // in USDG or hXMAX is part of the launch call itself. Recovered from the
+    // chain: see src/hooke.js.
+    id: 'hooke-robinhood', label: 'Hooke · hXMAX', vm: 'evm', enabled: true, family: 'hooke',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
+    nativeSymbol: 'ETH', curve: null,
+  },
+  {
     // lunch.fun - tax tokens paired against stocks on Robinhood chain. Defaults
     // match what the pad is for: HOOD as the pairing, 1%/1% tax, single-asset
     // holder rewards. Basket rewards are a toggle. See launchLunch().
@@ -1920,7 +1931,9 @@ async function launch() {
   const supplyTokens = padSupply(pad);
   if (pad.customSupply && !(supplyTokens >= 1 && supplyTokens <= 1e18)) throw new Error('supply must be between 1 and 1e18 tokens');
 
-  const dists = distroOn ? parseDistributions(supplyTokens) : [];
+  // a distro list left switched on from another pad must not follow you onto a
+  // pad that hides the panel (flap, Hooke...) and block its launch
+  const dists = distroOn && !$('distroBlock').classList.contains('hidden') ? parseDistributions(supplyTokens) : [];
   // o1/B20 allocations are minted NATIVELY at launch (createLaunch) — they don't come
   // from a dev buy, so skip the curve/dev-buy distribution checks for it entirely.
   if (pad.family !== 'b20') {
@@ -1946,6 +1959,13 @@ async function launch() {
 
   setStatus('uploading image to IPFS...');
   const logo = await uploadToIpfs(logoBlob);
+
+  if (pad.family === 'hooke') {
+    await launchHooke(pad, { name, symbol, logo, description, twitter, website });
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
 
   // Pools — open v4 launchpad. createToken (IPFS image) -> distributeToken -> dev buy
   if (pad.family === 'pools') {
@@ -3598,6 +3618,134 @@ async function launchLunch(pad, inp) {
   return { token: predicted, hash };
 }
 
+// Hooke: createMeme on the hook, exactly the way WOLFPACK was launched.
+//
+// Order matters and each step is checked before the next spends anything:
+// config read and compared against what was decoded, metadata size, salt mined
+// and confirmed by the factory's own computeAddress, funding (an optional ETH ->
+// USDG swap, then the approval), and a simulation that also prices the dev buy
+// so its minimum-out is real rather than 1.
+async function launchHooke(pad, { name, symbol, logo, description, twitter, website }) {
+  const H = await import('./hooke.js');
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+
+  setStatus('reading the Hooke factory...');
+  const st = await H.hookeStatus(pub);
+  if (!st.ok) throw new Error('the Hooke contracts changed since this pad was built: ' + st.problems.join('; '));
+
+  const payKey = $('hookePay').value;                      // ETH | USDG | HXMAX
+  const pay = payKey === 'HXMAX' ? H.HOOKE_PAY.HXMAX : H.HOOKE_PAY.USDG;
+  const payToken = payKey === 'HXMAX' ? H.HOOKE.hxmax : H.HOOKE.usdg;
+  const buyStr = $('hookeBuy').value.trim();
+  if (!(+buyStr > 0)) throw new Error('the dev buy is required by the contract - set an amount');
+  const amountIn = parseUnits(buyStr, pay.decimals);
+  const slip = Math.min(50, Math.max(0, +($('hookeSlippage').value || 2)));
+  const creatorRaw = $('hookeCreator').value.trim();
+  if (creatorRaw && !/^0x[0-9a-fA-F]{40}$/.test(creatorRaw)) throw new Error('creator fee address is not a valid address');
+  const creator = creatorRaw || account.address;
+
+  // same four fields as WOLFPACK's metadata; socials only when given
+  setStatus('publishing token metadata to IPFS...');
+  const meta = { name, symbol, description, image: logo };
+  if (twitter) meta.twitter = twitter;
+  if (website) meta.website = website;
+  const metadata = 'ipfs://' + await uploadJsonToIpfs(meta);
+  if (new TextEncoder().encode(metadata).length > st.maxMetadataBytes) {
+    throw new Error(`metadata URI is longer than the ${st.maxMetadataBytes} bytes the hook accepts`);
+  }
+
+  setStatus(`mining a token address ending in ${st.vanitySuffix}...`);
+  const { salt, token: predicted, tries } = await H.prepareHookeSalt(pub, { creator: account.address, name, symbol, status: st });
+
+  const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 600);
+  const ethBal = await pub.getBalance({ address: account.address });
+
+  // fund the dev buy
+  const have = await pub.readContract({ address: payToken, abi: H.HOOKE_ERC20, functionName: 'balanceOf', args: [account.address] });
+  if (payKey === 'ETH' && have < amountIn) {
+    const need = amountIn - have;
+    const sw = await H.buildEthToUsdg(pub, { recipient: account.address, usdgOut: need, deadline: deadline() });
+    if (ethBal < sw.value + st.launchFee) {
+      throw new Error(`need ~${formatEther(sw.value + st.launchFee)} ETH for the swap and launch fee, wallet has ${formatEther(ethBal)}`);
+    }
+    setStatus(`swapping ~${(+formatEther(sw.value)).toFixed(5)} ETH -> ${formatUnits(need, 6)} USDG...`);
+    const sh = await wallet.sendTransaction({ to: sw.to, data: sw.data, value: sw.value });
+    const sr = await pub.waitForTransactionReceipt({ hash: sh, confirmations: 1 });
+    if (sr.status !== 'success') throw new Error('ETH -> USDG swap reverted: ' + sh);
+  } else if (have < amountIn) {
+    throw new Error(`wallet holds ${formatUnits(have, pay.decimals)} ${pay.symbol}, the dev buy needs ${buyStr}`);
+  }
+  if (ethBal < st.launchFee) throw new Error(`need ${formatEther(st.launchFee)} ETH for the launch fee`);
+
+  const allowance = await pub.readContract({ address: payToken, abi: H.HOOKE_ERC20, functionName: 'allowance', args: [account.address, H.HOOKE.hook] });
+  if (allowance < amountIn) {
+    setStatus(`approving ${pay.symbol} to the Hooke hook...`);
+    const ah = await wallet.writeContract({ address: payToken, abi: H.HOOKE_ERC20, functionName: 'approve', args: [H.HOOKE.hook, amountIn] });
+    await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+  }
+
+  // price the dev buy, then set the minimum from it
+  const argsFor = (minTokensOut) => H.hookeCreateArgs({
+    salt, name, symbol, metadata, creator, mode: pay.mode, amountIn, minTokensOut, deadline: deadline(),
+  });
+  setStatus('simulating the launch...');
+  let quoted;
+  try {
+    const { result } = await pub.simulateContract({
+      address: H.HOOKE.hook, abi: H.HOOKE_ABI, functionName: 'createMeme', args: argsFor(1n), value: st.launchFee, account,
+    });
+    if (getAddress(result[0]) !== getAddress(predicted)) throw new Error(`the hook would create ${result[0]}, not the mined ${predicted}`);
+    quoted = result[1];
+  } catch (e) {
+    throw new Error('launch simulation failed: ' + H.hookeRevertReason(e));
+  }
+  const minTokensOut = quoted * BigInt(Math.round((100 - slip) * 100)) / 10000n;
+
+  setStatus('sending the launch...');
+  const hash = await wallet.writeContract({
+    address: H.HOOKE.hook, abi: H.HOOKE_ABI, functionName: 'createMeme', args: argsFor(minTokensOut), value: st.launchFee,
+  });
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error('launch reverted: ' + hash);
+
+  rememberLaunch(pad, predicted, symbol);
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${predicted}<br>` +
+    `paired against hXMAX · dev buy ${esc(buyStr)} ${esc(pay.symbol)} → ~${Number(formatUnits(quoted, 18)).toLocaleString(undefined, { maximumFractionDigits: 0 })} ${esc(symbol)}` +
+    ` · address mined in ${tries.toLocaleString()} tries<br>` +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a> · ` +
+    `<a href="${pad.explorer}/token/${predicted}" target="_blank" rel="noopener">token</a>`;
+  return { token: predicted, hash };
+}
+
+// live line under the Hooke row: fee, pair, and what the wallet can pay with
+async function updateHookeUI(pad) {
+  const sym = { ETH: 'USDG', USDG: 'USDG', HXMAX: 'hXMAX' }[$('hookePay').value] || 'USDG';
+  $('hookeBuySym').textContent = sym;
+  const line = $('hookeLine');
+  try {
+    const H = await import('./hooke.js');
+    const pub = publicClientFor(pad);
+    const st = await H.hookeStatus(pub);
+    let wallet = '';
+    if (account) {
+      const [eth, usdg, hx] = await Promise.all([
+        pub.getBalance({ address: account.address }),
+        pub.readContract({ address: H.HOOKE.usdg, abi: H.HOOKE_ERC20, functionName: 'balanceOf', args: [account.address] }),
+        pub.readContract({ address: H.HOOKE.hxmax, abi: H.HOOKE_ERC20, functionName: 'balanceOf', args: [account.address] }),
+      ]);
+      wallet = ` · wallet: ${(+formatEther(eth)).toFixed(4)} ETH, ${(+formatUnits(usdg, 6)).toFixed(2)} USDG, ${(+formatUnits(hx, 18)).toFixed(4)} hXMAX`;
+    }
+    line.innerHTML = st.ok
+      ? `<span class="ok">live</span> · launch fee ${formatEther(st.launchFee)} ETH · pair hXMAX · addresses end ${st.vanitySuffix}${wallet}`
+      : `<span class="err">the Hooke contracts changed: ${esc(st.problems.join('; '))}</span>`;
+  } catch (e) {
+    line.innerHTML = `<span class="err">could not read the Hooke factory: ${esc(e?.shortMessage || e?.message || String(e))}</span>`;
+  }
+}
+
 async function launchV4Curve(pad, inp) {
   if (!pad.factory) throw new Error('the v4 curve factory is not deployed yet');
   const pub = publicClientFor(pad);
@@ -4557,6 +4705,7 @@ function applyPadUI(pad) {
   const v4curve = pad.family === 'v4curve';
   const long = pad.family === 'long';
   const lunch = pad.family === 'lunch';
+  const hooke = pad.family === 'hooke';
   $('supplyRow').classList.toggle('hidden', !pad.customSupply || sol);
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
@@ -4572,11 +4721,13 @@ function applyPadUI(pad) {
   $('v4curveRow').classList.toggle('hidden', !v4curve); // our v4 curve: any quote + threshold
   $('longRow').classList.toggle('hidden', !long);       // long.xyz: stock numeraire + supply
   $('lunchRow').classList.toggle('hidden', !lunch);     // lunch.fun: pairing, tax, rewards, quote-buy
+  $('hookeRow').classList.toggle('hidden', !hooke);     // Hooke: hXMAX pair, USDG/hXMAX dev buy
+  if (hooke) updateHookeUI(pad);
   // B20 has no bonding curve / dev buy — you mint a fixed on-chain allocation. Its
   // "distributions" are the insider allocations (minted at creation, not transfers).
   // flap/pons-v2 have their own dev-buy field (in the pair token), so hide the ETH one.
-  $('devBuyBlock').classList.toggle('hidden', sol || uni || b20 || flap || ponsV2 || lunch);
-  $('distroBlock').classList.toggle('hidden', sol || uni || dyor || flap);
+  $('devBuyBlock').classList.toggle('hidden', sol || uni || b20 || flap || ponsV2 || lunch || hooke);
+  $('distroBlock').classList.toggle('hidden', sol || uni || dyor || flap || hooke);
   if (flap) updateFlapUI(pad);
   if (ponsV2) updatePonsUI(pad);
   if (v4curve) updateV4CurveUI(pad);
@@ -5708,6 +5859,7 @@ function init() {
   });
 
   $('pumpQuote').addEventListener('change', () => { paintPumpDevSym(); paintPumpDepth(); });
+  $('hookePay').addEventListener('change', () => { if (activePad.family === 'hooke') updateHookeUI(activePad); });
   $('pumpQuoteCustom').addEventListener('input', () => { paintPumpDevSym(); paintPumpDepth(); });
 
   for (const id of ['solSupply', 'solMigPct']) $(id).addEventListener('input', paintSolSupplyHint);
