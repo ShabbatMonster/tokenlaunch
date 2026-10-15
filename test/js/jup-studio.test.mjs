@@ -14,7 +14,7 @@ import { Connection, Keypair, PublicKey, VersionedTransaction } from '@solana/we
 import bs58 from 'bs58';
 import { DynamicBondingCurveClient } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import { SOL_RPC } from '../../src/rpc.js';
-import { studioVesting, studioRaise, studioCreateTx, studioClaimables, studioClaimDryRun, studioCreatorTokens, studioBuildBuy, studioReservedName, studioImageProblem, studioPreflight, launchStudio, studioMinGraduation } from '../../src/jupstudio.js';
+import { studioVesting, studioRaise, studioCreateTx, studioClaimables, studioClaimDryRun, studioCreatorTokens, studioBuildBuy, studioReservedName, studioImageProblem, studioPreflight, launchStudio, studioMinGraduation, studioSizeProblem } from '../../src/jupstudio.js';
 
 const fails = [];
 const check = (ok, label, detail = '') => {
@@ -48,6 +48,22 @@ const minJup = await studioMinGraduation({ quote: 'JUP', initialMarketCap: 10000
 let minOk = '';
 try { await studioCreateTx(bs58.encode(Keypair.generate().secretKey), { name: 'Min Probe', symbol: 'MINP', quote: 'JUP', initialMarketCap: 10000, migrationMarketCap: minJup.minimum, vesting: { pct: 10 } }); minOk = 'accepted'; } catch (e) { minOk = e.message; }
 check(minOk === 'accepted', 'the minimum graduation cap computed for a JUP pair is one Studio accepts', `${minJup.minimum} JUP at $${minJup.price.toFixed(3)}: ${minOk}`);
+
+// Solana's 1232-byte cap: JUP is not in Studio's lookup table, so a JUP launch
+// only fits with name + ticker of 16 characters or fewer; USDC fits anything
+const sizeOf = async (quote, name, symbol, mig) => {
+  const k = Keypair.generate();
+  const { transaction } = await studioCreateTx(bs58.encode(k.secretKey), { name, symbol, quote, initialMarketCap: 10000, migrationMarketCap: mig, vesting: { pct: 0 } });
+  const t = VersionedTransaction.deserialize(Buffer.from(transaction, 'base64'));
+  t.sign([k]);
+  return t.serialize().length;
+};
+const at16 = await sizeOf('JUP', 'Twelve Chars', 'ABCD', 838000);
+const at17 = await sizeOf('JUP', 'Thirteen Char', 'ABCD', 838000);
+const usdcMax = await sizeOf('USDC', 'A'.repeat(32), 'B'.repeat(10), 150000);
+check(at16 <= 1232 && at17 > 1232 && usdcMax <= 1232, 'a JUP launch fits at 16 characters of name + ticker and not at 17; USDC fits the longest name Studio allows', `${at16} / ${at17} / ${usdcMax} bytes`);
+check(!studioSizeProblem({ quote: 'JUP', name: 'Twelve Chars', symbol: 'ABCD' }) && /cut 1/.test(studioSizeProblem({ quote: 'JUP', name: 'Thirteen Char', symbol: 'ABCD' }) || '')
+  && !studioSizeProblem({ quote: 'USDC', name: 'A'.repeat(32), symbol: 'B'.repeat(10) }), 'and the pad says exactly that before anything is built');
 
 // --- a launch, built by Studio for a throwaway wallet ------------------------------------------
 const kp = Keypair.generate();

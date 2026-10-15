@@ -1275,7 +1275,7 @@ export { inspectSolCoin, configParamsFromPoolConfig, diffPoolConfigs } from './s
 export {
   launchStudio, studioCreateTx, studioRaise, studioVesting, studioClaimables, studioClaim, studioCreatorTokens,
   studioDevBuy, studioBuildBuy, studioPreflight, studioReservedName, studioImageProblem,
-  studioQuotePriceUsd, studioMinGraduation, STUDIO_MIN_RAISE_USD,
+  studioQuotePriceUsd, studioMinGraduation, STUDIO_MIN_RAISE_USD, studioSizeProblem,
   STUDIO_QUOTES, STUDIO_MAX_CLAIMABLE_PCT,
 } from './jupstudio.js';
 import { pumpTrade, pumpCurve } from './pump.js';

@@ -3202,6 +3202,7 @@ function updateJupUI() {
         + (usd != null && symbol !== 'USDC' ? ` (~$${Math.round(usd).toLocaleString()})` : '') + ' before graduating'
         + (buy > 0 ? ` · dev buy ${buy} SOL${f.quote === 'SOL' ? '' : ` (swapped to ${esc(f.quote)} first)`}` : '')
         + (buy > 0 && f.antiSniping ? ` · <span class="err">turn anti-sniping off to dev buy - your own buy would pay its 99% fee</span>` : '')
+        + ((() => { const p = S.studioSizeProblem({ quote: f.quote, name: $('name').value.trim(), symbol: $('symbol').value.trim() }); return p ? ` · <span class="err">${esc(p)}</span>` : ''; })())
         + (pct ? ` · you get <b>${(1e9 * pct / 100).toLocaleString()}</b> tokens (${pct}%) ${f.vesting.months ? `vested over ${f.vesting.months} months` : 'the moment it migrates'}` : '')
         + (low ? ` · <span class="err">Studio needs about $15,000 raised - raise the graduation market cap</span>`
           + ` <button type="button" class="btn secondary" id="jupSetMin" style="padding:2px 10px;font-size:11px">SET MINIMUM</button>` : '');
@@ -3225,7 +3226,7 @@ async function launchJupStudio(pad, inp) {
   // error", so catch its reasons here first - before any SOL is swapped
   const image = logoBlob.type === 'image/gif' || !logoBlob.type ? await squareResize(logoBlob, 512) : logoBlob;
   setStatus('checking the launch…');
-  await S.studioPreflight(solKeyB58, { name: inp.name, symbol: inp.symbol, image, rpc: pad.rpc, extraSol: devSol });
+  await S.studioPreflight(solKeyB58, { name: inp.name, symbol: inp.symbol, image, rpc: pad.rpc, extraSol: devSol, quote: f.quote });
   let buyRaw = null;
   if (devSol > 0) {
     if (f.antiSniping) throw new Error('turn anti-sniping off to dev buy - the buy would land inside the anti-sniping window and pay up to 99% in fees');
@@ -6609,6 +6610,7 @@ function init() {
     $(id).addEventListener('input', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
     $(id).addEventListener('change', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
   }
+  for (const id of ['name', 'symbol']) $(id).addEventListener('input', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
   $('jupPreset').addEventListener('change', () => {
     if ($('jupPreset').value === 'meme') {
       $('jupQuote').value = 'USDC'; $('jupInitMc').value = '5000'; $('jupMigMc').value = '75000';
