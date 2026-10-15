@@ -4777,35 +4777,33 @@ function setStatus(msg, isErr = false) {
   $('status').innerHTML = isErr ? `<span class="err">${esc(msg)}</span>` : msg;
 }
 
-// The picker shows only the launchpad in use, with a "change" control that
-// opens the full list; choosing one closes it again. Pads that are not live
-// yet are left out entirely - they cannot be chosen, so listing them is noise.
-let padsOpen = false;
+// Every live launchpad, laid out as a grid of tabs. Each carries its chain so
+// the stylesheet can mark it with that chain's colour; the full label is the
+// tooltip, since a grid cell may cut a long one short. Pads that are not live
+// yet are left out - they cannot be chosen.
+const padChain = (pad) => (pad.vm === 'sol' ? 'sol' : String(pad.chainId ?? ''));
 
 function renderPads() {
   const box = $('pads');
   box.innerHTML = '';
   for (const pad of PADS) {
     if (!pad.enabled) continue;
-    if (!padsOpen && pad !== activePad) continue;
     const b = document.createElement('button');
+    b.type = 'button';
     b.className = 'pad' + (pad === activePad ? ' active' : '');
-    b.textContent = pad.label;
+    b.dataset.chain = padChain(pad);
+    b.title = pad.label;
+    b.setAttribute('aria-pressed', String(pad === activePad));
+    const name = document.createElement('span');
+    name.textContent = pad.label;
+    b.appendChild(name);
     b.onclick = () => {
       activePad = pad;
-      padsOpen = false;
       applyPadUI(pad);
       renderPads(); renderBuyChips(); refreshFeeNote(); refreshBalance(); renderTokenList();
     };
     box.appendChild(b);
   }
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'pad pad-toggle';
-  toggle.textContent = padsOpen ? 'close' : 'change';
-  toggle.setAttribute('aria-expanded', String(padsOpen));
-  toggle.onclick = () => { padsOpen = !padsOpen; renderPads(); };
-  box.appendChild(toggle);
 }
 
 // show/hide the per-pad input sections + wallet for the active pad
