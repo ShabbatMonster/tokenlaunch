@@ -44,6 +44,9 @@
   </div>
   <div class="hint" id="coinInfo" style="margin-top:8px"></div>
 
+  <label style="margin-top:12px">RPCs <span class="hint">your own go first — used for reads and sends. Leave blank to use the app's Helius endpoints (the public RPC blocks these calls).</span></label>
+  <textarea id="rpcs" spellcheck="false" placeholder="https://your-fast-rpc… (one per line)" style="min-height:48px"></textarea>
+
   <div id="armWrap" class="hidden">
     <div class="panel">
       <label>Private keys <span class="hint">one per line, base58 (Phantom export). Stay in this browser tab.</span></label>
@@ -66,9 +69,7 @@
         <div><label>Priority tip (SOL)</label><input type="text" id="tip" value="0.001" spellcheck="false"></div>
         <div><label>Slippage bps</label><input type="text" id="slip" value="0" spellcheck="false"></div>
       </div>
-      <label style="margin-top:12px">Extra RPCs <span class="hint">optional, one per line — more endpoints = faster landing</span></label>
-      <textarea id="rpcs" spellcheck="false" placeholder="https://your-fast-rpc…" style="min-height:52px"></textarea>
-      <div class="hint" style="margin-top:8px">The sell is a market exit (slippage 0 = accept any price — the point is to get out). It fires from <code>Start early</code> before the time and retries through the lock error every ~0.4s until each wallet confirms.</div>
+      <div class="hint" style="margin-top:12px">The sell is a market exit (slippage 0 = accept any price — the point is to get out). It fires from <code>Start early</code> before the time and retries through the lock error every ~0.4s until each wallet confirms.</div>
       <div id="countdown" style="margin-top:10px"></div>
       <button class="btn primary" id="armBtn">ARM</button>
     </div>
