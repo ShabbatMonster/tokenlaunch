@@ -152,17 +152,23 @@ function minOutFor(amountIn) {
 }
 
 // --- firing -----------------------------------------------------------------
-async function fireWallet(w, i, keys, amountIn, blockhash) {
-  const built = buildSignedSell({ keys, secret: w.secret, amountIn, minOut: minOutFor(amountIn), blockhash, priorityMicroLamports: priorityMicro() });
+// Fire one wallet's sell. `tipMicro` is the priority fee to put on THIS attempt
+// (micro-lamports per compute unit). The priority fee is charged on any tx that
+// lands - including one that lands and reverts with EarlyLocked before the
+// unlock - so the loop passes 0 for the pre-unlock probes and the real tip only
+// once the chain clock is at the unlock. A probe that lands early then costs
+// only the ~0.000005 SOL base fee, not the tip.
+async function fireWallet(w, i, keys, amountIn, blockhash, tipMicro) {
+  const built = buildSignedSell({ keys, secret: w.secret, amountIn, minOut: minOutFor(amountIn), blockhash, priorityMicroLamports: tipMicro });
   const raw = built.serialized;
   const b64 = typeof Buffer !== 'undefined' ? Buffer.from(raw).toString('base64') : btoa(String.fromCharCode(...raw));
   const sig = bs58.encode(built.tx.signatures[0]);
-  // blast to every RPC (sendRawTransaction) and Jito at once
   const sends = [];
   for (const url of rpcs) {
     sends.push(fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction', params: [b64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }] }) }).catch(() => null));
   }
-  if (priorityMicro() > 0) for (const url of JITO) sends.push(fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction', params: [b64, { encoding: 'base64' }] }) }).catch(() => null));
+  // only broadcast to Jito once the real tip is on (otherwise it is just noise)
+  if (tipMicro > 0) for (const url of JITO) sends.push(fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction', params: [b64, { encoding: 'base64' }] }) }).catch(() => null));
   await Promise.allSettled(sends);
   return sig;
 }
@@ -184,21 +190,39 @@ async function armAndFire() {
   let blockhash = (await conn.getLatestBlockhash('confirmed')).blockhash;
   const bhTimer = setInterval(async () => { try { blockhash = (await conn.getLatestBlockhash('confirmed')).blockhash; } catch {} }, 10_000);
 
-  setStatus(`armed — firing ${ready.length} wallets at ${new Date(when).toISOString().replace(/\.\d+Z$/, 'Z')} (from ${lead / 1000}s early)`);
-  // wait until lead-time before the target
+  // the lock uses the CHAIN clock, which can lag the PC clock, so track the
+  // offset and gate the real tip on chain time: the big tip goes on only from
+  // the unlock (minus a small lead so the first open block already carries it),
+  // and pre-unlock attempts go out at zero priority.
+  let chainOffsetMs = 0;
+  const syncClock = async () => {
+    try { const slot = await conn.getSlot('confirmed'); const t = await conn.getBlockTime(slot); if (t) chainOffsetMs = t * 1000 - Date.now(); } catch {}
+  };
+  await syncClock();
+  const clockTimer = setInterval(syncClock, 5_000);
+  const chainNow = () => Date.now() + chainOffsetMs;
+  const tipLeadMs = 400;                    // start paying the tip this long (chain time) before the unlock
+  const fullTip = priorityMicro();
+
+  setStatus(`armed — firing ${ready.length} wallets at ${new Date(when).toISOString().replace(/\.\d+Z$/, 'Z')} · tip only from the unlock (chain clock ${chainOffsetMs >= 0 ? '+' : ''}${(chainOffsetMs / 1000).toFixed(1)}s)`);
+  // wait until lead-time before the target (wall clock, just to start the loop)
   while (!abort && Date.now() < when - lead) await sleep(Math.min(250, when - lead - Date.now()));
 
   // fire-and-retry loop: resend every round until each wallet confirms or errors
   let round = 0;
   while (firing && !abort && confirmed.size < ready.length) {
     round++;
+    // real tip only once the chain clock reaches the unlock (minus a small
+    // lead); before that, probes go out at zero priority so a reverted landing
+    // costs only the base fee, not the tip
+    const tipMicro = chainNow() >= when - tipLeadMs ? fullTip : 0;
     await Promise.all(ready.map(async (w, idx) => {
       const i = wallets.indexOf(w);
       if (confirmed.has(w.pubkey)) return;
       const amountIn = (w.balance * BigInt(Math.round(pct * 100))) / 10000n;
       try {
-        const sig = await fireWallet(w, i, coin.keys, amountIn, blockhash);
-        wstat(i, `sent (round ${round}) …checking`, '');
+        const sig = await fireWallet(w, i, coin.keys, amountIn, blockhash, tipMicro);
+        wstat(i, tipMicro > 0 ? `firing with tip (round ${round})…` : `probing — not yet unlocked (round ${round})`, '');
         const st = await conn.getSignatureStatus(sig);
         const s = st?.value;
         if (s && !s.err && (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized')) {
@@ -213,11 +237,13 @@ async function armAndFire() {
         }
       } catch (e) { wstat(i, 'retry: ' + (e.message || e), ''); }
     }));
-    $('status').innerHTML = `firing… round ${round}, sold ${confirmed.size}/${ready.length}`;
+    const phase = chainNow() >= when - tipLeadMs ? 'firing with tip' : 'probing (no tip yet)';
+    $('status').innerHTML = `${phase}… round ${round}, sold ${confirmed.size}/${ready.length}`;
     if (confirmed.size < ready.length) await sleep(400);
     if (Date.now() > when + 120_000) break;  // give up after 2 min past target
   }
   clearInterval(bhTimer);
+  clearInterval(clockTimer);
   firing = false;
   $('armBtn').textContent = 'ARM';
   setStatus(`done — sold ${confirmed.size}/${ready.length}` + (confirmed.size < ready.length ? '. re-check the unsold rows.' : ' ✓'), confirmed.size === ready.length ? 'ok' : 'err');
