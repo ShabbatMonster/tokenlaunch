@@ -3195,7 +3195,10 @@ function updateJupUI() {
       const { raise, symbol } = await S.studioRaise(f);
       const pct = f.vesting.pct;
       const low = symbol === 'USDC' && raise < 15000;
+      const buy = Number($('jupDevBuy').value.trim() || 0);
       line.innerHTML = `raises <b>${raise.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${esc(symbol)}</b> before graduating`
+        + (buy > 0 ? ` · dev buy ${buy} SOL${f.quote === 'SOL' ? '' : ` (swapped to ${esc(f.quote)} first)`}` : '')
+        + (buy > 0 && f.antiSniping ? ` · <span class="err">turn anti-sniping off to dev buy - your own buy would pay its 99% fee</span>` : '')
         + (pct ? ` · you get <b>${(1e9 * pct / 100).toLocaleString()}</b> tokens (${pct}%) ${f.vesting.months ? `vested over ${f.vesting.months} months` : 'the moment it migrates'}` : '')
         + (low ? ` · <span class="err">Studio needs about 15,000 USDC - raise the graduation market cap</span>` : '');
     } catch (e) {
@@ -3208,6 +3211,27 @@ async function launchJupStudio(pad, inp) {
   if (!logoBlob) throw new Error('Studio needs a logo image');
   const S = await import('./solana.js');
   const f = jupForm();
+
+  // the dev buy: our own buy right after the launch (Studio has none). Paid in
+  // SOL; on a USDC/JUP pair the SOL is swapped BEFORE the launch, so the only
+  // thing left for afterwards is the one buy transaction.
+  const devSol = Number($('jupDevBuy').value.trim() || 0);
+  if (!(devSol >= 0)) throw new Error('dev buy must be a number of SOL (0 for none)');
+  let buyRaw = null;
+  if (devSol > 0) {
+    if (f.antiSniping) throw new Error('turn anti-sniping off to dev buy - the buy would land inside the anti-sniping window and pay up to 99% in fees');
+    const q = S.STUDIO_QUOTES[f.quote];
+    const { raise } = await S.studioRaise(f);
+    if (f.quote === 'SOL') {
+      if (devSol >= raise) throw new Error(`a ${devSol} SOL buy would fill the whole ${raise.toFixed(2)} SOL curve and graduate it on the spot - buy less`);
+      buyRaw = String(Math.round(devSol * 1e9));
+    } else {
+      setStatus(`swapping ${devSol} SOL to ${f.quote} for the dev buy…`);
+      const sw = await S.swapIntoQuote({ rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint: q.address, uiSol: String(devSol), slippageBps: 100, onStatus: (m) => setStatus(m) });
+      if (sw.received >= raise) throw new Error(`${sw.received} ${f.quote} would fill the whole ${raise.toFixed(0)} ${f.quote} curve and graduate it on the spot - it is in your wallet; buy less`);
+      buyRaw = sw.receivedRaw;
+    }
+  }
   // Studio only takes x.com and t.me links, and http(s) sites
   const twitter = /^https:\/\/(www\.)?x\.com\//.test(inp.twitter || '') ? inp.twitter : undefined;
   const website = /^https?:\/\//.test(inp.website || '') ? inp.website : undefined;
@@ -3216,9 +3240,18 @@ async function launchJupStudio(pad, inp) {
     image, description: inp.description, onStatus: (m) => setStatus(m),
   });
   rememberLaunch(pad, res.mint, inp.symbol);
+  let bought = '';
+  if (buyRaw) {
+    try {
+      const b = await S.studioDevBuy(pad.rpc, solKeyB58, res.mint, buyRaw, { onStatus: (m) => setStatus(m) });
+      bought = ` · dev buy ✓ ~${(Number(b.tokensOut) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 0 })} ${esc(inp.symbol)} (<a href="${pad.explorer}/tx/${b.sig}" target="_blank" rel="noopener">tx</a>)`;
+    } catch (e) {
+      bought = ` · <span class="err">launched, but the dev buy failed: ${esc(e.message)}${f.quote === 'SOL' ? '' : ` - the ${esc(f.quote)} is still in your wallet`}</span>`;
+    }
+  }
   $('status').innerHTML =
     `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>`
-    + `on Jupiter Studio${f.vesting.pct ? ` · ${f.vesting.pct}% of supply yours at migration - claim it under STUDIO REWARDS` : ''}<br>`
+    + `on Jupiter Studio${f.vesting.pct ? ` · ${f.vesting.pct}% of supply yours at migration - claim it under STUDIO REWARDS` : ''}${bought}<br>`
     + `<a href="https://jup.ag/tokens/${res.mint}" target="_blank" rel="noopener">jup.ag</a> · `
     + `<a href="https://studio.jup.ag/tokens/${res.mint}" target="_blank" rel="noopener">studio page</a> · `
     + `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">token</a>`;
@@ -6564,7 +6597,7 @@ function init() {
     finally { btn.disabled = false; }
   });
   $('mimicSim').addEventListener('click', () => simulateMimic(activePad));
-  for (const id of ['jupQuote', 'jupInitMc', 'jupMigMc', 'jupAllocOn', 'jupAllocPct', 'jupVest', 'jupCliff', 'jupFreq', 'jupFee', 'jupAnti']) {
+  for (const id of ['jupQuote', 'jupInitMc', 'jupMigMc', 'jupAllocOn', 'jupAllocPct', 'jupVest', 'jupCliff', 'jupFreq', 'jupFee', 'jupAnti', 'jupDevBuy']) {
     $(id).addEventListener('input', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
     $(id).addEventListener('change', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
   }
