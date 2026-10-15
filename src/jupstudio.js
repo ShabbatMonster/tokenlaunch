@@ -65,9 +65,28 @@ export async function studioImageProblem(image) {
 /// vaults, mint and metadata (~0.018), Jupiter's creator account, and fees.
 export const STUDIO_LAUNCH_SOL = 0.03;
 
+// Solana caps a transaction at 1232 bytes and Studio's launch runs close to it.
+// Measured against create-tx: with USDC or SOL the launch is 1189 bytes at a
+// 4-character name+ticker, room for anything Studio allows; JUP is not in
+// Studio's lookup table, so its address rides in full and the same launch is
+// 1220 bytes - leaving 12 bytes, i.e. name + ticker of 16 bytes at most. The
+// tx is co-signed by Jupiter, so it cannot be shrunk on our side.
+export const STUDIO_TX_LIMIT = 1232;
+export const STUDIO_JUP_NAME_BUDGET = 16;
+export const nameBytes = ({ name, symbol }) => new TextEncoder().encode(String(name || '') + String(symbol || '')).length;
+export function studioSizeProblem({ quote, name, symbol }) {
+  if ((typeof quote === 'string' ? quote : quote?.symbol) !== 'JUP') return null;
+  const n = nameBytes({ name, symbol });
+  return n > STUDIO_JUP_NAME_BUDGET
+    ? `a JUP-paired Studio launch only fits Solana's size limit with name + ticker of ${STUDIO_JUP_NAME_BUDGET} characters or fewer - yours are ${n}; cut ${n - STUDIO_JUP_NAME_BUDGET}, or pair with USDC or SOL`
+    : null;
+}
+
 /// Everything Studio would refuse, checked before anything is spent: the name,
 /// the logo, and enough SOL for the launch plus any dev buy.
-export async function studioPreflight(secret, { name, symbol, image, rpc, extraSol = 0 }) {
+export async function studioPreflight(secret, { name, symbol, image, rpc, extraSol = 0, quote }) {
+  const tooBig = studioSizeProblem({ quote, name, symbol });
+  if (tooBig) throw new Error(tooBig);
   if (studioReservedName({ name, symbol })) throw new Error('Studio refuses that name or ticker - it reads as JUP, SOL, USDC, USDT, BTC or ETH (or Jupiter, Solana, Tether, Ethereum in the name)');
   const bad = await studioImageProblem(image);
   if (bad) throw new Error(bad);
@@ -211,6 +230,10 @@ export async function launchStudio(secret, opts, { image, description, onStatus,
   say('asking Jupiter Studio to build the launch…');
   const { transaction, request } = await studioCreateTx(secret, { ...opts, imageContentType: image?.type || opts.imageContentType || 'image/png' });
   const { tx, b64: signed } = signB64(secret, transaction);
+  const size = tx.serialize().length;
+  if (size > STUDIO_TX_LIMIT) {
+    throw new Error(`Studio built a launch of ${size} bytes and Solana's limit is ${STUDIO_TX_LIMIT} - shorten the name + ticker by ${size - STUDIO_TX_LIMIT} characters${opts.quote === 'JUP' ? ', or pair with USDC or SOL (the JUP address costs 31 bytes that the Studio lookup table does not cover)' : ''}`);
+  }
   if (simulateWith) {
     const sim = await simulateWith.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
     return { dryRun: true, request, tx, err: sim.value.err, logs: sim.value.logs || [] };
