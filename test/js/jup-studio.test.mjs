@@ -10,11 +10,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { DynamicBondingCurveClient } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import { SOL_RPC } from '../../src/rpc.js';
-import { studioVesting, studioRaise, studioCreateTx, studioClaimables, studioClaimDryRun, studioCreatorTokens } from '../../src/jupstudio.js';
+import { studioVesting, studioRaise, studioCreateTx, studioClaimables, studioClaimDryRun, studioCreatorTokens, studioBuildBuy } from '../../src/jupstudio.js';
 
 const fails = [];
 const check = (ok, label, detail = '') => {
@@ -81,6 +81,21 @@ for (const kind of ['allocation', 'dbc-fees']) {
 const other = await studioClaimables(MINT, kp.publicKey.toBase58());
 check(other.mine === false, 'and to any other wallet the coin reads as not theirs');
 
+// --- the dev buy: our own buy on the pool, right after launch ------------------------------------
+// simulated on a live USDC Studio pool as a large USDC holder, and on a SOL pool
+for (const [mint, holder, amount, label] of [
+  ['C9vSTnueJpRRcxKJCtn8f3XmCkrGFd4FWqhk6rfXjups', 'GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE', '50000000', '50 USDC on a Studio pool'],
+  ['6G3JsxAAjBwQT2gqAUT7ijYm9NZs8fkbkAGSy1mgnCRV', '5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9', '50000000', '0.05 SOL on a SOL pool (Token-2022 coin)'],
+]) {
+  const b = await studioBuildBuy(connection, new PublicKey(holder), mint, amount).catch((e) => ({ err: e.message }));
+  if (!b || b.err) { check(false, `a dev buy of ${label} is built`, b?.err || 'no pool (graduated?)'); continue; }
+  b.tx.feePayer = new PublicKey(holder);
+  b.tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+  const sim = await connection.simulateTransaction(new VersionedTransaction(b.tx.compileMessage()), { sigVerify: false, replaceRecentBlockhash: true });
+  check(!sim.value.err && BigInt(b.minOut) > 0n && BigInt(b.minOut) < BigInt(b.tokensOut), `a dev buy of ${label} simulates clean, with a slippage floor`,
+    sim.value.err ? JSON.stringify(sim.value.err) : `${Number(b.tokensOut) / 1e6} tokens, at least ${Number(b.minOut) / 1e6}`);
+}
+
 // --- the pad ------------------------------------------------------------------------------------
 const MAIN = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'main.js'), 'utf8');
 const HTML = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'docs', 'index.html'), 'utf8');
@@ -91,6 +106,11 @@ check(['jupQuote', 'jupInitMc', 'jupMigMc', 'jupVest', 'jupCliff', 'jupFreq', 'j
   'every Studio launch parameter: quote, market caps, vesting, cliff, unlocks, fee, anti-sniping, presets, live raise');
 check(['jupClaimMint', 'jupClaimLoad', 'jupClaims'].every((id) => HTML.includes(`id="${id}"`)) && /studioClaim\(solKeyB58, kind, c, activePad\.rpc\)/.test(MAIN),
   'and a Studio Rewards panel whose claims are simulated before they are sent');
+
+const launchJ = MAIN.slice(MAIN.indexOf('async function launchJupStudio'), MAIN.indexOf('// The claim panel'));
+check(HTML.includes('id="jupDevBuy"') && launchJ.indexOf('swapIntoQuote') > -1 && launchJ.indexOf('swapIntoQuote') < launchJ.indexOf('launchStudio(')
+  && launchJ.indexOf('studioDevBuy') > launchJ.indexOf('launchStudio('), 'a dev buy: SOL swapped to the pair before the launch, bought the moment the pool lands');
+check(/if \(f\.antiSniping\) throw/.test(launchJ) && /graduate it on the spot/.test(launchJ), 'refused with anti-sniping on, or when it would fill the curve by itself');
 
 console.log('');
 process.exit(fails.length ? 1 : 0);

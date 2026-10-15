@@ -23,8 +23,10 @@
 // vesting schedule the whole amount is a cliff at migration - "40% at
 // migration" is exactly that, 400M tokens claimable the moment it graduates.
 
-import { Connection, Keypair, PublicKey, VersionedTransaction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, VersionedTransaction, ComputeBudgetProgram } from '@solana/web3.js';
 import { ed25519 } from '@noble/curves/ed25519';
+import { DynamicBondingCurveClient, swapQuote, getCurrentPoint } from '@meteora-ag/dynamic-bonding-curve-sdk';
+import BN from 'bn.js';
 import bs58 from 'bs58';
 
 export const STUDIO_API = 'https://studio-api.jup.ag';
@@ -168,6 +170,59 @@ export async function launchStudio(secret, opts, { image, description, onStatus,
   const mint = res?.data?.mint || res?.mint;
   if (!mint) throw new Error('Jupiter Studio accepted the launch but returned no mint: ' + JSON.stringify(res).slice(0, 200));
   return { mint, request };
+}
+
+// --- the dev buy ---------------------------------------------------------------
+//
+// Studio has no dev buy - its form and its API take none - and the launch
+// transaction cannot carry one: Jupiter co-signs it, so a single added
+// instruction would void their signatures. So the buy is ours, sent the moment
+// the pool exists. It is a separate transaction, a block or so behind the
+// launch, not part of it.
+
+/// Build a buy of `amountIn` (raw quote units) on a DBC pool, with a minimum
+/// out from the curve's own quote. Returns null while the pool does not exist.
+export async function studioBuildBuy(connection, owner, mint, amountIn, slippageBps = 500) {
+  const client = new DynamicBondingCurveClient(connection, 'confirmed');
+  const pa = await client.state.getPoolByBaseMint(new PublicKey(mint)).catch(() => null);
+  if (!pa) return null;
+  const state = pa.account?.poolState || pa.account;
+  const config = await client.state.getPoolConfig(state.config);
+  const point = await getCurrentPoint(connection, config.activationType);
+  const amt = BN.isBN(amountIn) ? amountIn : new BN(String(amountIn));
+  // this SDK's quote reads the account wrapped as { poolState }
+  const q = swapQuote(pa.account?.poolState ? pa.account : { poolState: state }, config, false, amt, slippageBps, false, point, false);
+  const tx = await client.pool.swap({
+    owner: new PublicKey(owner), pool: pa.publicKey, amountIn: amt,
+    minimumAmountOut: q.minimumAmountOut, swapBaseForQuote: false, referralTokenAccount: null,
+  });
+  tx.instructions.unshift(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 500_000 }),
+  );
+  return { tx, pool: pa.publicKey.toBase58(), tokensOut: q.outputAmount.toString(), minOut: q.minimumAmountOut.toString() };
+}
+
+/// Buy right after launch: wait for the pool, then buy and confirm.
+export async function studioDevBuy(rpc, secret, mint, amountIn, { slippageBps = 500, waitMs = 45_000, onStatus } = {}) {
+  const connection = typeof rpc === 'string' ? new Connection(rpc, 'confirmed') : rpc;
+  const kp = keypairOf(secret);
+  const t0 = Date.now();
+  let built = null;
+  while (!(built = await studioBuildBuy(connection, kp.publicKey, mint, amountIn, slippageBps))) {
+    if (Date.now() - t0 > waitMs) throw new Error('the pool did not appear in time - buy it from the Trade tab');
+    onStatus?.('waiting for the pool to land…');
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  onStatus?.('dev buy…');
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  built.tx.feePayer = kp.publicKey;
+  built.tx.recentBlockhash = blockhash;
+  built.tx.sign(kp);
+  const sig = await connection.sendRawTransaction(built.tx.serialize(), { skipPreflight: false, maxRetries: 5 });
+  const conf = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+  if (conf.value.err) throw new Error('the dev buy failed on chain: ' + JSON.stringify(conf.value.err) + ' (' + sig + ')');
+  return { sig, tokensOut: built.tokensOut };
 }
 
 // --- claiming ------------------------------------------------------------------

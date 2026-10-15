@@ -575,12 +575,15 @@
         </select></div>
       </div>
       <div class="row" style="margin-top:8px">
-        <div><label>TRADING FEE</label><select id="jupFee"><option value="100">1%</option><option value="200">2%</option></select></div>
+        <div style="flex:0 0 150px"><label>DEV BUY (SOL)</label><input type="text" id="jupDevBuy" value="0" placeholder="0 = none" spellcheck="false"></div>
+        <div style="flex:0 0 120px"><label>TRADING FEE</label><select id="jupFee"><option value="100">1%</option><option value="200">2%</option></select></div>
         <div><label style="margin-top:22px"><input type="checkbox" id="jupAnti" style="width:auto;margin-right:6px"> anti-sniping <span class="hint">99% buy fee at launch, falling to 0 over 15-60s, paid to you</span></label></div>
       </div>
       <div class="hint" id="jupLine" style="font-size:12px;margin-top:8px"></div>
       <div class="hint" style="font-size:11px;margin-top:6px">Launched through Jupiter Studio's own backend, exactly as studio.jup.ag does it: a Meteora bonding curve,
         1B supply, graduating to a Meteora DAMM v2 pool. You get 50% of trading fees before and after graduation.
+        Studio has no dev buy of its own, and Jupiter co-signs the launch so nothing can be added to it: the dev buy here is your own
+        buy, sent the moment the pool lands (a block or so after). On a USDC or JUP pair the SOL is swapped first, before the launch.
         Studio needs the curve to raise at least about 15,000 USDC (or the SOL/JUP equivalent) - holding supply back lowers the raise, so raise the graduation market cap to match.</div>
 
       <label style="margin-top:14px">STUDIO REWARDS <span class="hint">trading fees, your migration allocation and graduated LP</span></label>
