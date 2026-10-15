@@ -1,0 +1,272 @@
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=DM+Mono:wght@400;500&display=swap');
+
+/* ---------------------------------------------------------------------------
+   The launcher's one look: a caterpillar cat on a leaf.
+
+   The photo (caterpillar-cat.webp) fills the window. Everything sits on
+   frosted glass over it, so the cat stays visible through the interface, and
+   on a wide screen the column moves to the right so its face and body are
+   clear on the left. The colours are the photo's: leaf greens for actions,
+   fur greys for the quiet parts, the amber of its eyes for LAUNCH.
+
+   Loaded AFTER each page's own <style>: it remaps the custom properties every
+   page is built on (--bg, --panel, --border, --text, --dim, --accent,
+   --danger) and adds the glass. A photo of daylight, so it is light in both
+   colour schemes.
+--------------------------------------------------------------------------- */
+
+:root {
+  --k-leaf-deep: #1f3d1a;
+  --k-leaf:      #2f5d22;
+  --k-leaf-mid:  #3e6b2c;
+  --k-vein:      #8fbf5a;
+  --k-fur:       #6b6e74;
+  --k-amber:     #e3a03a;
+  --k-amber-lo:  #c9831f;
+  --k-ink:       #1b211a;
+  --k-ink-soft:  #465043;
+  --k-glass:     rgba(250, 251, 247, .8);
+  --k-glass-hi:  rgba(255, 255, 255, .9);
+  --k-line:      rgba(31, 61, 26, .16);
+  --k-green:     #1f6b2c;
+  --k-red:       #b3261e;
+  --k-amber-txt: #7a4d00;
+
+  --bg:     var(--k-leaf-deep);
+  --panel:  var(--k-glass);
+  --panel2: #ffffff;
+  --border: #cdd5c6;
+  --text:   var(--k-ink);
+  --dim:    var(--k-ink-soft);
+  --accent: var(--k-green);
+  --warn:   var(--k-amber-txt);
+  --danger: var(--k-red);
+
+  --k-sans: "Nunito", "Segoe UI", system-ui, sans-serif;
+  --k-mono: "DM Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+
+body {
+  background: var(--k-leaf-deep) url("caterpillar-cat.webp") 22% 50% / cover no-repeat fixed;
+  color: var(--k-ink);
+  font-family: var(--k-sans);
+  font-size: 15px;
+  padding-top: 64px;
+}
+/* a wide screen gives the cat the left of the window */
+@media (min-width: 1000px) {
+  body { justify-content: flex-end; padding-right: max(32px, 7vw); }
+}
+
+::selection { background: var(--k-vein); color: var(--k-ink); }
+
+code, kbd, pre, input, textarea, select, .mono, .addr, .hint code, .status, .kv dd,
+.token-row .addr, .wallet-chip .bal { font-family: var(--k-mono); }
+
+/* --- the menu bar: dark leaf glass ------------------------------------------------- */
+.menubar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+  display: flex; align-items: center; gap: 4px;
+  height: 48px; padding: 0 16px;
+  background: rgba(20, 38, 16, .72);
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
+          backdrop-filter: blur(12px) saturate(1.3);
+  border-bottom: 1px solid rgba(143, 191, 90, .35);
+  overflow-x: auto; overflow-y: hidden; white-space: nowrap; scrollbar-width: none;
+}
+.menubar::-webkit-scrollbar { display: none; }
+.menubar a, .menubar .mb-item {
+  font-family: var(--k-sans); font-weight: 800; font-size: 14px;
+  color: #f2f6ee; text-decoration: none; padding: 6px 13px; border-radius: 999px;
+}
+.menubar a u { text-decoration: none; }
+.menubar a:hover { background: rgba(255, 255, 255, .14); }
+.menubar a[aria-current="page"] { color: #241a08; background: var(--k-amber); }
+.menubar .mb-gap { flex: 1; }
+
+/* --- the header floats on the photo ------------------------------------------------- */
+header { gap: 10px; align-items: center; }
+header h1, .titlebar {
+  font-family: var(--k-sans); font-weight: 900; font-size: 26px; letter-spacing: .02em;
+  color: #ffffff;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, .55), 0 1px 0 rgba(0, 0, 0, .4);
+}
+header a {
+  color: #ffffff !important; font-weight: 700;
+  background: rgba(20, 38, 16, .55); padding: 5px 11px; border-radius: 999px;
+  text-shadow: none;
+}
+header a:hover { background: rgba(20, 38, 16, .75); }
+
+/* --- glass cards --------------------------------------------------------------------- */
+.card, .modal {
+  background: var(--k-glass);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+          backdrop-filter: blur(16px) saturate(1.25);
+  border: 1px solid rgba(255, 255, 255, .6);
+  border-radius: 22px;
+  box-shadow: 0 18px 40px rgba(10, 25, 8, .35);
+}
+.card + .card { margin-top: 16px; }
+/* explanatory notes that sit directly in the column (swap, arc, the migrate
+   pages) would otherwise be read straight off the photo */
+.app > .note {
+  background: var(--k-glass);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+          backdrop-filter: blur(16px) saturate(1.25);
+  border: 1px solid rgba(255, 255, 255, .6);
+  border-radius: 16px;
+  padding: 12px 14px;
+  margin-top: 12px;
+}
+.overlay { background: rgba(10, 25, 8, .5); }
+
+label {
+  font-family: var(--k-sans); font-weight: 800; font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--k-leaf);
+}
+label .hint { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--k-ink-soft); }
+.modal h2, .modal h3 { font-family: var(--k-sans); font-weight: 900; font-size: 20px; color: var(--k-leaf-deep); }
+a { color: var(--k-leaf); text-underline-offset: 3px; }
+a:hover { color: var(--k-leaf-deep); }
+.hint, .sub, .drop-hint, .fee-note, .dim, .note { color: var(--k-ink-soft); opacity: 1; }
+.hint b, .fee-note b, .buy-preview b, .preview b, .quote b, .tokinfo b, .bals b { color: var(--k-ink); }
+
+/* --- fields --------------------------------------------------------------------------- */
+input[type=text], input[type=password], input[type=number], input[type=url], input[type=search], textarea, select {
+  background: #ffffff; border: 1.5px solid var(--border); border-radius: 12px; color: var(--k-ink); font-size: 15px;
+}
+select { color: var(--k-ink); padding: 9px 11px; }
+input:focus, textarea:focus, select:focus { border-color: var(--k-amber-lo); box-shadow: 0 0 0 4px rgba(227, 160, 58, .3); outline: none; }
+input::placeholder, textarea::placeholder { color: var(--k-ink-soft); opacity: .6; }
+input[readonly] { background: transparent; border-style: dashed; }
+
+/* --- buttons: leaf green ------------------------------------------------------------------ */
+button, .btn {
+  font-family: var(--k-sans); font-weight: 800;
+  color: #ffffff; background: var(--k-leaf);
+  border: none; border-radius: 999px;
+  cursor: pointer; transition: background-color .15s ease, transform .08s ease;
+}
+button:hover:not(:disabled), .btn:hover:not(:disabled):not(.disabled) { background: var(--k-leaf-mid); }
+button:active:not(:disabled), .btn:active:not(:disabled):not(.disabled) { transform: scale(.98); }
+button:disabled, .btn:disabled, .btn.disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, .btn:focus-visible, a:focus-visible, .pad:focus-visible, summary:focus-visible {
+  outline: 3px solid var(--k-amber); outline-offset: 3px;
+}
+
+/* LAUNCH: the amber of its eyes */
+.launch-btn, #launchBtn {
+  color: #241a08;
+  font-size: 18px; font-weight: 900; letter-spacing: .12em;
+  background: linear-gradient(180deg, #f3bb5c, var(--k-amber) 55%, var(--k-amber-lo));
+  border-radius: 999px; padding: 15px;
+  box-shadow: 0 6px 18px rgba(201, 131, 31, .45);
+}
+.launch-btn:hover:not(:disabled), #launchBtn:hover:not(:disabled) { background: linear-gradient(180deg, #f6c56f, #e8a944 55%, #d08a26); }
+
+/* VAMP carries an inline purple gradient; bring it into the palette */
+#vampBtn {
+  background: var(--k-leaf-deep) !important; color: #ffffff !important;
+  border: none !important; border-radius: 999px !important;
+  font-family: var(--k-sans) !important; font-weight: 800 !important; letter-spacing: .02em !important;
+}
+
+/* --- variants that out-specify the base rules ------------------------------
+   Two-class rules on the pages (.btn.secondary, .mini, .tab.active,
+   .modal button.primary...) beat a bare `button`, so each is restyled. */
+.btn.secondary, .mini, .chip-edit-row .x, .tab {
+  color: var(--k-ink); background: rgba(255, 255, 255, .85); border: 1.5px solid var(--border);
+}
+.btn.secondary:hover:not(:disabled), .mini:hover:not(:disabled), .tab:hover:not(:disabled) { background: #ffffff; }
+.mini { font-size: 12px; padding: 4px 11px; }
+.mini.wide { width: 100%; padding: 10px 0; }
+.mini.accent { color: #241a08; background: var(--k-amber); border-color: var(--k-amber-lo); }
+.chip-edit-row .x:hover { color: #fff; background: var(--k-red); border-color: var(--k-red); }
+.btn.sell { color: #fff; background: var(--k-red); }
+.btn.force { color: #fff; background: var(--k-leaf-deep); }
+.modal button.primary { color: #241a08; background: linear-gradient(180deg, #f3bb5c, var(--k-amber) 55%, var(--k-amber-lo)); border-radius: 999px; }
+.modal .ghost { background: none; color: var(--k-leaf); text-decoration: underline; }
+
+/* --- launchpad picker ------------------------------------------------------------------ */
+.pads { gap: 7px; }
+.pad {
+  font-family: var(--k-sans); font-weight: 700; font-size: 13px;
+  color: var(--k-ink); background: rgba(255, 255, 255, .9);
+  border: 1.5px solid var(--border); border-radius: 999px; padding: 7px 14px;
+}
+.pad:hover:not(:disabled) { background: #ffffff; border-color: var(--k-vein); }
+.pad.active, .pad[aria-pressed="true"] { color: #ffffff; background: var(--k-leaf); border-color: var(--k-leaf); }
+.pad:disabled { border-style: dashed; color: var(--k-ink-soft); opacity: .6; }
+.pad input { color: inherit; font-family: var(--k-mono); }
+/* the "change" control that opens the full launchpad list */
+.pad.pad-toggle { color: var(--k-leaf); background: transparent; border-color: transparent; text-decoration: underline; text-underline-offset: 3px; }
+.pad.pad-toggle:hover:not(:disabled) { background: rgba(255, 255, 255, .6); border-color: transparent; }
+.tabs { gap: 6px; }
+.tab { padding: 7px 14px; border-radius: 999px; }
+.tab.active { color: #ffffff; background: var(--k-leaf); border-color: var(--k-leaf); }
+.chip { font-family: var(--k-sans); border: 1.5px solid var(--border); border-radius: 999px; background: #ffffff; color: var(--k-ink); }
+.chip:hover { border-color: var(--k-vein); }
+.badge { font-family: var(--k-sans); font-weight: 800; font-size: 11px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 9px; background: #ffffff; color: var(--k-ink); }
+.badge.active  { color: #fff; background: var(--k-leaf); border-color: var(--k-leaf); }
+.badge.ready   { color: #241a08; background: var(--k-amber); border-color: var(--k-amber-lo); }
+.badge.done    { color: var(--k-green); border-color: var(--k-green); }
+.badge.blocked { color: #fff; background: var(--k-red); border-color: var(--k-red); }
+
+/* --- the "more options" drawer -------------------------------------------------------------- */
+details.more { margin-top: 16px; border-top: 1px solid var(--k-line); padding-top: 4px; }
+details.more > summary {
+  list-style: none; cursor: pointer; padding: 10px 2px;
+  font-weight: 800; font-size: 14px; color: var(--k-leaf);
+  display: flex; align-items: baseline; gap: 8px; white-space: nowrap;
+}
+details.more > summary .more-hint { white-space: normal; }
+details.more > summary::-webkit-details-marker { display: none; }
+details.more > summary::before { content: "+"; display: inline-block; width: 1em; font-weight: 900; }
+details.more[open] > summary::before { content: "\2212"; }
+details.more > summary .more-hint { font-weight: 400; font-size: 12px; color: var(--k-ink-soft); }
+
+/* --- wallet, image drop, lists ----------------------------------------------------------- */
+.wallet-chip {
+  background: rgba(255, 255, 255, .9); color: var(--k-ink);
+  border: none; border-radius: 999px; padding: 6px 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .25);
+}
+.wallet-chip .bal { color: var(--k-ink); font-weight: 600; }
+.wallet-chip .dot.on { background: #34a853; }
+.drop { border: 2px dashed var(--k-vein); border-radius: 18px; background: rgba(255, 255, 255, .85); color: var(--k-leaf); font-size: 30px; }
+.drop:hover { background: #ffffff; }
+.drop.drag { border-style: solid; border-color: var(--k-amber); box-shadow: 0 0 0 4px rgba(227, 160, 58, .3); }
+.token-row, .list > * { border-bottom: 1px solid var(--k-line); }
+.token-row .sym { font-weight: 900; color: var(--k-leaf-deep); }
+.token-row .addr a { color: var(--k-ink-soft); }
+
+.status:not(:empty) { color: var(--k-ink); background: #ffffff; border-radius: 14px; padding: 10px 12px; }
+.status a { color: var(--k-leaf); }
+.ok, .status .ok { color: var(--k-green); font-weight: 800; }
+.err, .status .err { color: var(--k-red); font-weight: 800; }
+.warn, .status .warn { color: var(--k-amber-txt); font-weight: 800; }
+.modal .err { color: var(--k-red); }
+details.adv summary, details.dev summary { font-weight: 700; color: var(--k-leaf); }
+details.dev pre { background: #ffffff; border-radius: 10px; }
+.kv dt { font-weight: 800; color: var(--k-leaf); }
+.bar { background: #ffffff; border-radius: 999px; overflow: hidden; }
+.bar > div { background: linear-gradient(90deg, var(--k-leaf), var(--k-vein)); }
+hr { border: none; border-top: 1px solid var(--k-line); }
+table { border-collapse: separate; border-spacing: 0; width: 100%; }
+th { font-weight: 800; font-size: 12px; text-align: left; color: var(--k-leaf); padding: 6px 8px; border-bottom: 2px solid var(--k-line); }
+td { padding: 5px 8px; border-bottom: 1px solid var(--k-line); font-size: 13px; }
+tr:hover td { background: rgba(143, 191, 90, .15); }
+* { scrollbar-color: var(--k-leaf-mid) transparent; }
+
+@media (max-width: 560px) {
+  details.more > summary .more-hint { display: none; }
+  header { flex-wrap: wrap; row-gap: 8px; }
+  header > div { flex-wrap: wrap; row-gap: 6px; }
+  .menubar a, .menubar .mb-item { font-size: 13px; padding: 6px 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; }
+  button:active:not(:disabled), .btn:active:not(:disabled) { transform: none !important; }
+}
