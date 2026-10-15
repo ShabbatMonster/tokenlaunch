@@ -1272,6 +1272,10 @@ export { launchPump, pumpWarmup, pumpProbe, pumpStatus, pumpTokensForSol, pumpQu
 export { pumpTrade, pumpCurve, pumpCurveQuote } from './pump.js';
 export { pumpQuoteChain, pumpQuoteChainAccounts, MAX_CURVE_DEPTH } from './pump.js';
 export { inspectSolCoin, configParamsFromPoolConfig, diffPoolConfigs } from './solmimic.js';
+export {
+  launchStudio, studioCreateTx, studioRaise, studioVesting, studioClaimables, studioClaim, studioCreatorTokens,
+  STUDIO_QUOTES, STUDIO_MAX_CLAIMABLE_PCT,
+} from './jupstudio.js';
 import { pumpTrade, pumpCurve } from './pump.js';
 
 export const RAYDIUM_PLATFORM_ID = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
