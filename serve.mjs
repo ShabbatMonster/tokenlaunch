@@ -2,7 +2,7 @@
 // it from your browser any time. Rebuilds first (so the latest src/ is live),
 // then serves and opens the browser. Zero external deps (pure Node http).
 //
-//   node serve.mjs            # build + serve on http://localhost:8788 + open browser
+//   node serve.mjs            # build + serve on http://localhost:8080 + open browser
 //   node serve.mjs --no-open  # don't launch the browser
 //   PORT=9000 node serve.mjs  # custom port
 import { createServer } from 'node:http';
@@ -14,7 +14,7 @@ import { spawn, spawnSync } from 'node:child_process';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, 'docs');
-const PORT = Number(process.env.PORT) || 8788;
+const PORT = Number(process.env.PORT) || 8080;
 const OPEN = !process.argv.includes('--no-open');
 
 // rebuild so any src/ edits are reflected; if it fails, serve whatever's in docs/

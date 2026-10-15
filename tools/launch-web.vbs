@@ -1,5 +1,5 @@
 ' Starts the token-launcher local web server hidden (no console window) at login.
-' It rebuilds the site, serves it on http://localhost:8788, and opens your browser.
+' It rebuilds the site, serves it on http://localhost:8080, and opens your browser.
 ' A copy of this file is placed in the Windows Startup folder so it runs every boot.
 Dim sh, projectDir, node
 projectDir = "C:\Users\Evan\Desktop\tokenlaunch"
