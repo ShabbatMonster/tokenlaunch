@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bordrless · Timed Sell</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  .app-deploy { max-width: 760px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--fg-faint); font-size: 12px; margin-bottom: 18px; }
+  label { display:block; font-size: 11px; letter-spacing: .04em; color: var(--fg-soft); margin: 14px 0 5px; text-transform: uppercase; }
+  input, textarea, button { font-family: inherit; }
+  input[type=text], textarea { width: 100%; background: var(--bg-field); color: var(--fg); border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 11px; font-size: 13px; }
+  textarea { resize: vertical; min-height: 92px; font-family: ui-monospace, monospace; font-size: 12px; }
+  .row { display:flex; gap: 10px; }
+  .row > * { flex: 1; }
+  .btn { background: var(--bg-btn); color: var(--fg); border: 1px solid var(--line-hi); border-radius: var(--radius); padding: 9px 14px; font-size: 13px; cursor: pointer; }
+  .btn:hover { background: var(--bg-hover); }
+  .btn.primary { background: var(--fg); color: var(--bg-page); font-weight: 600; width: 100%; padding: 12px; margin-top: 12px; }
+  .hint { color: var(--fg-faint); font-size: 11px; }
+  .ok { color: #46b17b; } .err { color: var(--err); }
+  .panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; margin-top: 14px; background: var(--bg-panel); }
+  .hidden { display: none; }
+  #walletRows { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; max-height: 320px; overflow: auto; }
+  .wrow { display:flex; gap: 12px; align-items: center; font-size: 12px; padding: 4px 2px; border-bottom: 1px solid var(--line); }
+  .waddr { font-family: ui-monospace, monospace; color: var(--fg-soft); width: 90px; }
+  .wbal { width: 130px; text-align: right; color: var(--fg); }
+  .wstat { flex: 1; color: var(--fg-faint); }
+  #countdown { font-weight: 600; }
+  #status { margin-top: 14px; font-size: 13px; min-height: 20px; }
+  code { font-family: ui-monospace, monospace; font-size: 11px; color: var(--fg-soft); }
+</style>
+</head>
+<body>
+<div class="app-deploy">
+  <h1>Bordrless · Timed Sell</h1>
+  <div class="sub">Sell many wallets the instant an early-window lock lifts. Keys stay in this tab — nothing is uploaded.</div>
+
+  <label>Coin mint</label>
+  <div class="row">
+    <div style="flex:4"><input type="text" id="mint" spellcheck="false" placeholder="the bordrless.app token's mint address"></div>
+    <div style="flex:1"><button class="btn" id="loadBtn" style="width:100%">LOAD</button></div>
+  </div>
+  <div class="hint" id="coinInfo" style="margin-top:8px"></div>
+
+  <div id="armWrap" class="hidden">
+    <div class="panel">
+      <label>Private keys <span class="hint">one per line, base58 (Phantom export). Stay in this browser tab.</span></label>
+      <textarea id="keys" spellcheck="false" placeholder="key1&#10;key2&#10;key3…"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="parseBtn">LOAD WALLETS</button>
+        <button class="btn" id="checkBtn">CHECK SELLS</button>
+      </div>
+      <div class="hint" id="walletSummary" style="margin-top:8px"></div>
+      <div id="walletRows"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <div><label>Sell at (UTC) <span class="hint">read from the chain</span></label><input type="text" id="sellTime" spellcheck="false" placeholder="2026-10-16T00:08:28Z"></div>
+        <div style="flex:0 0 150px"><label>Start early (s)</label><input type="text" id="lead" value="2" spellcheck="false"></div>
+      </div>
+      <div class="row" style="margin-top:4px">
+        <div><label>Sell %</label><input type="text" id="pct" value="100" spellcheck="false"></div>
+        <div><label>Priority tip (SOL)</label><input type="text" id="tip" value="0.001" spellcheck="false"></div>
+        <div><label>Slippage bps</label><input type="text" id="slip" value="0" spellcheck="false"></div>
+      </div>
+      <label style="margin-top:12px">Extra RPCs <span class="hint">optional, one per line — more endpoints = faster landing</span></label>
+      <textarea id="rpcs" spellcheck="false" placeholder="https://your-fast-rpc…" style="min-height:52px"></textarea>
+      <div class="hint" style="margin-top:8px">The sell is a market exit (slippage 0 = accept any price — the point is to get out). It fires from <code>Start early</code> before the time and retries through the lock error every ~0.4s until each wallet confirms.</div>
+      <div id="countdown" style="margin-top:10px"></div>
+      <button class="btn primary" id="armBtn">ARM</button>
+    </div>
+  </div>
+
+  <div id="status"></div>
+</div>
+<script type="module" src="bordr-sell.js"></script>
+</body>
+</html>

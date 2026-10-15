@@ -4,6 +4,7 @@
 // dynamic import, so it's marked external in the main build (kept as a runtime
 // import of docs/solana.js rather than inlined).
 import esbuild from 'esbuild';
+import fs from 'node:fs';
 import { createRequire } from 'module';
 import { NodeModulesPolyfillPlugin } from '@esbuild-plugins/node-modules-polyfill';
 
@@ -115,6 +116,46 @@ await esbuild.build({
   ...base,
   entryPoints: ['src/arcswap-page.js'],
   outfile: 'docs/arc.js',
+});
+
+// Bordrless coordinated-sell page: web3.js + @bordrless/sdk, so the same
+// Node-globals treatment as the Solana bundle. @bordrless/shared ships only a
+// dist but its package.json points main at a src it does not publish, so fix
+// that in node_modules before bundling (reset by any reinstall).
+for (const pkg of ['shared', 'sdk']) {
+  const p = `node_modules/@bordrless/${pkg}/package.json`;
+  if (!fs.existsSync(p)) continue;
+  const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const fix = (s) => (typeof s === 'string' ? s.replace('./src/index.ts', './dist/index.js') : s);
+  const fixt = (s) => (typeof s === 'string' ? s.replace('./src/index.ts', './dist/index.d.ts') : s);
+  j.main = fix(j.main); j.types = fixt(j.types);
+  if (j.exports) for (const k of Object.keys(j.exports)) {
+    const v = j.exports[k];
+    if (typeof v === 'string') j.exports[k] = k.includes('types') ? fixt(v) : fix(v);
+    else if (v && typeof v === 'object') for (const kk of Object.keys(v)) v[kk] = kk.includes('types') ? fixt(v[kk]) : fix(v[kk]);
+  }
+  fs.writeFileSync(p, JSON.stringify(j, null, 2));
+}
+// The SDK reaches for three Node things the polyfill does not cover: a
+// createRequire that loads its IDL JSON, crypto.createHash('sha256'), and a
+// default export from @anchor-lang/core (which has only named ones). Shim each.
+const require2 = createRequire(import.meta.url);
+const bordrShims = {
+  name: 'bordr-shims',
+  setup(b) {
+    b.onResolve({ filter: /^(node:)?module$/ }, () => ({ path: require2.resolve('./src/bordr-shims/module.js') }));
+    b.onResolve({ filter: /^(node:)?crypto$/ }, () => ({ path: require2.resolve('./src/bordr-shims/crypto.js') }));
+    b.onResolve({ filter: /^@anchor-lang\/core$/ }, () => ({ path: require2.resolve('./src/bordr-shims/anchor-default.js') }));
+  },
+};
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/bordrSell-page.js'],
+  outfile: 'docs/bordr-sell.js',
+  inject: ['src/node-shim.js'],
+  define: { global: 'globalThis', 'process.env.NODE_ENV': '"production"' },
+  loader: { '.json': 'json' },
+  plugins: [bordrShims, singleBufferProcess, NodeModulesPolyfillPlugin()],
 });
 
 console.log('build complete');

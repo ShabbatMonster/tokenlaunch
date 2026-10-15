@@ -7,6 +7,8 @@
     "dev": "node build.mjs --dev"
   },
   "dependencies": {
+    "@bordrless/sdk": "^0.14.0",
+    "@bordrless/shared": "^0.14.0",
     "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.10",
     "@raydium-io/raydium-sdk-v2": "^0.2.60-alpha",
     "@solana/spl-token": "^0.4.15",
