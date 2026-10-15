@@ -3192,15 +3192,19 @@ function updateJupUI() {
       const f = jupForm();
       const S = await import('./solana.js');
       S.studioVesting(f.vesting);                       // validates the allocation
-      const { raise, symbol } = await S.studioRaise(f);
+      const [{ raise, symbol }, price] = await Promise.all([S.studioRaise(f), S.studioQuotePriceUsd(f.quote).catch(() => null)]);
       const pct = f.vesting.pct;
-      const low = symbol === 'USDC' && raise < 15000;
+      // Studio's floor is about $15,000 of the quote, whatever the quote is
+      const usd = price ? raise * price : null;
+      const low = usd != null && usd < S.STUDIO_MIN_RAISE_USD;
       const buy = Number($('jupDevBuy').value.trim() || 0);
-      line.innerHTML = `raises <b>${raise.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${esc(symbol)}</b> before graduating`
+      line.innerHTML = `raises <b>${raise.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${esc(symbol)}</b>`
+        + (usd != null && symbol !== 'USDC' ? ` (~$${Math.round(usd).toLocaleString()})` : '') + ' before graduating'
         + (buy > 0 ? ` · dev buy ${buy} SOL${f.quote === 'SOL' ? '' : ` (swapped to ${esc(f.quote)} first)`}` : '')
         + (buy > 0 && f.antiSniping ? ` · <span class="err">turn anti-sniping off to dev buy - your own buy would pay its 99% fee</span>` : '')
         + (pct ? ` · you get <b>${(1e9 * pct / 100).toLocaleString()}</b> tokens (${pct}%) ${f.vesting.months ? `vested over ${f.vesting.months} months` : 'the moment it migrates'}` : '')
-        + (low ? ` · <span class="err">Studio needs about 15,000 USDC - raise the graduation market cap</span>` : '');
+        + (low ? ` · <span class="err">Studio needs about $15,000 raised - raise the graduation market cap</span>`
+          + ` <button type="button" class="btn secondary" id="jupSetMin" style="padding:2px 10px;font-size:11px">SET MINIMUM</button>` : '');
     } catch (e) {
       line.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
     }
@@ -6611,6 +6615,20 @@ function init() {
       $('jupAllocOn').checked = false; $('jupAnti').checked = true; $('jupFee').value = '100';
     }
     updateJupUI();
+  });
+  // SET MINIMUM: the smallest graduation cap Studio will take, for these settings
+  $('jupLine').addEventListener('click', async (e) => {
+    if (e.target.id !== 'jupSetMin') return;
+    e.target.disabled = true;
+    e.target.textContent = 'working…';
+    try {
+      const S = await import('./solana.js');
+      const { minimum } = await S.studioMinGraduation(jupForm());
+      $('jupMigMc').value = String(minimum);
+      updateJupUI();
+    } catch (err) {
+      $('jupLine').innerHTML = '<span class="err">' + esc(err?.message || String(err)) + '</span>';
+    }
   });
   $('jupClaimLoad').addEventListener('click', () => loadJupClaims().catch((e) => { $('jupClaims').innerHTML = '<span class="err">' + esc(e.message) + '</span>'; }));
   $('jupClaims').addEventListener('click', (e) => {

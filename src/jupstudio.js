@@ -395,6 +395,37 @@ export async function studioRaise({ quote = 'USDC', initialMarketCap, migrationM
   return { raise: Number(raw) / 10 ** q.decimals, symbol: q.symbol, config: r };
 }
 
+/// Studio refuses a curve that raises less than about $15,000 of its quote -
+/// measured against create-tx: a JUP curve passed at a $15,098 raise and an
+/// equivalent one at $9,234 did not. For SOL and JUP that floor moves with
+/// the price, so it is priced live.
+export const STUDIO_MIN_RAISE_USD = 15_000;
+
+export async function studioQuotePriceUsd(quote) {
+  const q = typeof quote === 'string' ? STUDIO_QUOTES[quote] : quote;
+  if (q.symbol === 'USDC') return 1;
+  const j = await (await fetch(`https://lite-api.jup.ag/price/v3?ids=${q.address}`)).json();
+  const p = j?.[q.address]?.usdPrice;
+  if (!(p > 0)) throw new Error(`no live price for ${q.symbol}`);
+  return p;
+}
+
+/// The smallest graduation market cap (rounded up to a clean number) whose
+/// raise clears Studio's floor with 3% to spare, for the rest of the settings.
+export async function studioMinGraduation(opts, { headroom = 1.03 } = {}) {
+  const price = await studioQuotePriceUsd(opts.quote);
+  const target = (STUDIO_MIN_RAISE_USD / price) * headroom;
+  let lo = Number(opts.initialMarketCap) * 1.01, hi = Math.max(lo * 2, 1);
+  const raiseAt = async (m) => (await studioRaise({ ...opts, migrationMarketCap: m })).raise;
+  while ((await raiseAt(hi)) < target) { lo = hi; hi *= 2; if (hi > 1e12) throw new Error('no graduation cap reaches the floor'); }
+  for (let i = 0; i < 18 && hi / lo > 1.002; i++) {
+    const mid = (lo + hi) / 2;
+    if ((await raiseAt(mid)) >= target) hi = mid; else lo = mid;
+  }
+  const step = 10 ** Math.max(0, Math.floor(Math.log10(hi)) - 2);
+  return { minimum: Math.ceil(hi / step) * step, price, targetRaise: target };
+}
+
 /// Simulate a Studio claim transaction without sending it (tests, previews).
 /// `owner` is a wallet address: the claim is built for it and simulated with
 /// signature checks off, so no key is needed.

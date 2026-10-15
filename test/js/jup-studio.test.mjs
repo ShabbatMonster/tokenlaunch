@@ -14,7 +14,7 @@ import { Connection, Keypair, PublicKey, VersionedTransaction } from '@solana/we
 import bs58 from 'bs58';
 import { DynamicBondingCurveClient } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import { SOL_RPC } from '../../src/rpc.js';
-import { studioVesting, studioRaise, studioCreateTx, studioClaimables, studioClaimDryRun, studioCreatorTokens, studioBuildBuy, studioReservedName, studioImageProblem, studioPreflight, launchStudio } from '../../src/jupstudio.js';
+import { studioVesting, studioRaise, studioCreateTx, studioClaimables, studioClaimDryRun, studioCreatorTokens, studioBuildBuy, studioReservedName, studioImageProblem, studioPreflight, launchStudio, studioMinGraduation } from '../../src/jupstudio.js';
 
 const fails = [];
 const check = (ok, label, detail = '') => {
@@ -41,6 +41,13 @@ const low = await studioRaise({ initialMarketCap: 5000, migrationMarketCap: 7500
 const fixed = await studioRaise({ initialMarketCap: 10000, migrationMarketCap: 150000, vesting: { pct: 40 } });
 check(Math.round(meme.raise) === 15391, "Studio's Meme preset raises ~15,391 USDC, as their docs say", `${meme.raise}`);
 check(low.raise < 15000 && fixed.raise >= 15000, 'holding 40% back drops the raise below the floor at 5k->75k; 10k->150k clears it', `${low.raise.toFixed(0)} vs ${fixed.raise.toFixed(0)}`);
+
+// the floor is about $15,000 of the quote, so for JUP and SOL it is priced live;
+// SET MINIMUM's answer must be one Studio accepts
+const minJup = await studioMinGraduation({ quote: 'JUP', initialMarketCap: 10000, vesting: { pct: 10 } });
+let minOk = '';
+try { await studioCreateTx(bs58.encode(Keypair.generate().secretKey), { name: 'Min Probe', symbol: 'MINP', quote: 'JUP', initialMarketCap: 10000, migrationMarketCap: minJup.minimum, vesting: { pct: 10 } }); minOk = 'accepted'; } catch (e) { minOk = e.message; }
+check(minOk === 'accepted', 'the minimum graduation cap computed for a JUP pair is one Studio accepts', `${minJup.minimum} JUP at $${minJup.price.toFixed(3)}: ${minOk}`);
 
 // --- a launch, built by Studio for a throwaway wallet ------------------------------------------
 const kp = Keypair.generate();
