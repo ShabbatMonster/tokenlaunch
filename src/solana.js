@@ -249,7 +249,7 @@ async function readQuoteMint(connection, quote) {
 // Token program for the quote vault, which breaks Token-2022 quote mints — so we
 // call the instruction ourselves and pass the quote's real token program. Base
 // is always a fresh SPL mint (initializeVirtualPoolWithSplToken).
-async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quoteProgram, name, symbol, uri, badge = null }) {
+async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quoteProgram, name, symbol, uri, badge = null, baseToken2022 = false }) {
   const creator = client.creator;
   const pool = deriveDbcPoolAddress(quote, baseMint, config);
   const baseVault = deriveDbcTokenVaultAddress(pool, baseMint);
@@ -269,6 +269,23 @@ async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quote
   const extra = [];
   if (quoteProgram.equals(TOKEN_2022_PROGRAM_ID) && badge) {
     extra.push({ pubkey: badge, isSigner: false, isWritable: false });
+  }
+
+  // A config whose token_type is Token-2022 mints the base as Token-2022, through
+  // its own instruction: no Metaplex account, metadata lives on the mint. Only
+  // reached when mimicking such a config - our own configs are SPL.
+  if (baseToken2022) {
+    const tx = await creator.program.methods
+      .initializeVirtualPoolWithToken2022({ name, symbol, uri })
+      .accountsPartial({
+        pool, config, payer, creator: payer, baseMint,
+        poolAuthority: creator.poolAuthority, baseVault, quoteVault, quoteMint: quote,
+        tokenQuoteProgram: quoteProgram,
+        tokenProgram: TOKEN_2022_PROGRAM_ID,
+      })
+      .remainingAccounts(extra)
+      .transaction();
+    return { tx, pool };
   }
 
   const tx = await creator.program.methods
@@ -442,6 +459,12 @@ export async function launchMeteora(opts) {
   const {
     rpcUrl, secretKey, quoteMint, name, symbol, uri, params,
     devBuyQuote = 0, dryRun = false, onStatus,
+    // Mimic. configParams: another pool's config, already translated to
+    // create_config parameters (src/solmimic.js) - the same curve under a config
+    // whose fees are yours. reuseConfig: that pool's config itself - no new
+    // config, just a pool on theirs, with their fee split. baseToken2022 follows
+    // the config's token_type.
+    configParams = null, reuseConfig = null, baseToken2022 = false,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
 
@@ -453,18 +476,21 @@ export async function launchMeteora(opts) {
   const simulateAs = dryRun && opts.simulateAs ? new PublicKey(opts.simulateAs) : null;
   const actor = simulateAs ?? payer.publicKey;
   const client = new DynamicBondingCurveClient(connection, 'confirmed');
-  const feeClaimer = new PublicKey(params.feeClaimer);
+  const feeClaimer = params?.feeClaimer ? new PublicKey(params.feeClaimer) : actor;
   const quote = new PublicKey(quoteMint);
 
   const { program: quoteProgram, decimals: quoteDecimals, extensions: quoteExtensions } = await readQuoteMint(connection, quote);
   const config = Keypair.generate();
   const baseMint = Keypair.generate();
-  const curveConfig = buildLaunchConfig(quoteDecimals, params);
+  const curveConfig = configParams || (reuseConfig ? null : buildLaunchConfig(quoteDecimals, params));
 
   // priced and funding-checked before the first signature, so a dev buy that
   // cannot work fails while nothing has been spent
   const devBuyAmount = devBuyRaw(devBuyQuote, quoteDecimals);
   let devBuyPreview = null;
+  if (!devBuyAmount.isZero() && !params) {
+    throw new Error('a dev buy is not supported yet when mimicking a DBC curve - launch with 0 and buy right after');
+  }
   if (!devBuyAmount.isZero()) {
     devBuyPreview = previewMeteoraDevBuy({ quoteDecimals, params, devBuyQuote });
     if (devBuyPreview.completesCurve) {
@@ -477,6 +503,37 @@ export async function launchMeteora(opts) {
     say(`dev buy: ${devBuyQuote} → about ${devBuyPreview.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} `
       + `${symbol} (${devBuyPreview.pctOfSupply.toFixed(2)}% of supply, `
       + `${devBuyPreview.pctOfThreshold.toFixed(1)}% of the way to graduation), in the same tx as the pool`);
+  }
+
+  // Reusing the reference config: one transaction, the pool, on their config.
+  // The config exists, so even a dry run is the program's real verdict.
+  if (reuseConfig) {
+    const cfgKey = new PublicKey(reuseConfig);
+    const badgeKey = quoteProgram.equals(TOKEN_2022_PROGRAM_ID) ? meteoraTokenBadge(quote) : null;
+    const badge = badgeKey && await connection.getAccountInfo(badgeKey) ? badgeKey : null;
+    const { tx: poolTx, pool } = await buildCreatePoolTx(client, {
+      payer: actor, config: cfgKey, baseMint: baseMint.publicKey, quote, quoteProgram, name, symbol, uri, badge, baseToken2022,
+    });
+    addPriority(poolTx);
+    poolTx.feePayer = actor;
+    poolTx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+    if (dryRun) {
+      const sim = await connection.simulateTransaction(new VersionedTransaction(poolTx.compileMessage()), { sigVerify: false, replaceRecentBlockhash: true });
+      return {
+        dryRun: true, reused: true, config: cfgKey.toBase58(), mint: baseMint.publicKey.toBase58(), pool: pool.toBase58(),
+        simulationError: sim.value.err ? JSON.stringify(sim.value.err) : null, logs: sim.value.logs || [],
+      };
+    }
+    const pre = await connection.simulateTransaction(poolTx, [payer, baseMint]);
+    if (pre.value.err) {
+      throw new Error(`the pool would fail on that config: ${(pre.value.logs || []).find((l) => l.includes('Error')) || JSON.stringify(pre.value.err)}`);
+    }
+    say('minting token and opening the curve on the reference config…');
+    const poolSig = await sendAndConfirmTransaction(connection, poolTx, [payer, baseMint], { commitment: 'confirmed' });
+    return {
+      mint: baseMint.publicKey.toBase58(), config: cfgKey.toBase58(), pool: pool.toBase58(),
+      configSig: null, poolSig, creator: payer.publicKey.toBase58(), devBuy: null, reused: true,
+    };
   }
 
   say('creating bonding-curve config…');
@@ -504,14 +561,28 @@ export async function launchMeteora(opts) {
     // simulating as a wallet that has not signed: web3.js checks a legacy
     // transaction's signatures before sending it to simulate, so compile it to
     // a versioned one and let the node skip signature verification
+    // ask for the config account back, so a mimicked config can be diffed
+    // field by field against the one it copies
     const sim = simulateAs
-      ? await connection.simulateTransaction(new VersionedTransaction(createConfigTx.compileMessage()), { sigVerify: false, replaceRecentBlockhash: true })
-      : await connection.simulateTransaction(createConfigTx);
+      ? await connection.simulateTransaction(new VersionedTransaction(createConfigTx.compileMessage()), {
+        sigVerify: false, replaceRecentBlockhash: true,
+        accounts: { addresses: [config.publicKey.toBase58()], encoding: 'base64' },
+      })
+      : await connection.simulateTransaction(createConfigTx, undefined, [config.publicKey]);
+    let createdConfig = null;
+    const written = sim.value.accounts?.[0]?.data;
+    if (written) {
+      const raw = Buffer.from(Array.isArray(written) ? written[0] : written, 'base64');
+      const coder = (client.program || client.creator.program).coder;
+      try { createdConfig = coder.accounts.decode('poolConfig', raw); } catch {
+        try { createdConfig = coder.accounts.decode('PoolConfig', raw); } catch { /* left null */ }
+      }
+    }
     // The pool cannot be simulated before its config exists, but its shape can
     // still be checked - and the shape is exactly what was wrong.
     const { tx: poolTx, pool: dryPool } = await buildCreatePoolTx(client, {
       payer: actor, config: config.publicKey, baseMint: baseMint.publicKey,
-      quote, quoteProgram, name, symbol, uri, badge,
+      quote, quoteProgram, name, symbol, uri, badge, baseToken2022,
     });
     const poolIx = poolTx.instructions.find((ix) => ix.programId.equals(DBC_PROGRAM));
 
@@ -545,6 +616,7 @@ export async function launchMeteora(opts) {
       createPoolAccounts: poolIx ? poolIx.keys.map((k) => k.pubkey.toBase58()) : [],
       simulationError: sim.value.err ? JSON.stringify(sim.value.err) : null,
       logs: sim.value.logs || [],
+      createdConfig,
     };
   }
 
@@ -570,7 +642,7 @@ export async function launchMeteora(opts) {
   await waitForAccount(connection, config.publicKey);
   const { tx: createPoolTx, pool } = await buildCreatePoolTx(client, {
     payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
-    quote, quoteProgram, name, symbol, uri, badge,
+    quote, quoteProgram, name, symbol, uri, badge, baseToken2022,
   });
 
   // appended, not sent separately: in a tx of its own the buy would sit a block
@@ -1199,6 +1271,7 @@ export const RAYDIUM_QUOTES = {
 export { launchPump, pumpWarmup, pumpProbe, pumpStatus, pumpTokensForSol, pumpQuoteRegistry, inspectMint, quoteUiToRaw, PUMP_LOOKUP_TABLE, PUMP_QUOTE_REGISTRY } from './pump.js';
 export { pumpTrade, pumpCurve, pumpCurveQuote } from './pump.js';
 export { pumpQuoteChain, pumpQuoteChainAccounts, MAX_CURVE_DEPTH } from './pump.js';
+export { inspectSolCoin, configParamsFromPoolConfig, diffPoolConfigs } from './solmimic.js';
 import { pumpTrade, pumpCurve } from './pump.js';
 
 export const RAYDIUM_PLATFORM_ID = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
@@ -1712,6 +1785,11 @@ export async function launchRaydium(opts) {
   const {
     rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId,
     token2022, transferFeeBps, maxTransferFee, raiseTargetUi, onStatus,
+    // Mimic: a curve copied off another LaunchLab pool, applied exactly -
+    // { supply, totalSellA, totalFundRaisingB, totalLockedAmount, cliffPeriod,
+    // unlockPeriod } as raw integer strings - plus that pool's decimals and its
+    // CPMM creator-fee setting. A platform rule still has the last word.
+    curve, decimals = 6, creatorFeeOn,
     // Build and SIMULATE, then stop. The pad uses this to prove a community
     // window will actually accept the launch before anything is signed - an
     // allow window is somebody else's to close, so "it was open a moment ago"
@@ -1806,6 +1884,23 @@ export async function launchRaydium(opts) {
     }
   }
 
+  // A copied curve replaces whatever the raise logic above chose. It came off
+  // a live pool, so it already satisfied that pool's platform rule.
+  if (curve) {
+    curveOverride = {
+      supply: new BN(String(curve.supply)),
+      totalSellA: new BN(String(curve.totalSellA)),
+      totalFundRaisingB: new BN(String(curve.totalFundRaisingB)),
+    };
+  }
+  const vesting = curve && String(curve.totalLockedAmount || '0') !== '0'
+    ? {
+      totalLockedAmount: new BN(String(curve.totalLockedAmount)),
+      cliffPeriod: new BN(String(curve.cliffPeriod || '0')),
+      unlockPeriod: new BN(String(curve.unlockPeriod || '0')),
+    }
+    : {};
+
   // Where the platform's rule states the curve outright, the rule wins - a
   // launch that differs by one lamport is rejected with 6025, so there is
   // nothing to choose. Only equality constraints (op 0) are honoured; anything
@@ -1894,9 +1989,11 @@ export async function launchRaydium(opts) {
       programId,
       platformId: platformId ? new PublicKey(platformId) : undefined,
       mintA: pair.publicKey,
-      decimals: 6,
+      decimals,
       name, symbol, uri,
       ...curveOverride,
+      ...vesting,
+      ...(creatorFeeOn != null ? { creatorFeeOn } : {}),
       // CPMM, not legacy AMM v4 — v4 needs an OpenBook market per pair (extra cost,
       // and doesn't exist for arbitrary/stock/custom quotes anyway); CPMM works for
       // any pair and matches what live LaunchLab pools actually migrate to (verified
@@ -1969,11 +2066,17 @@ export async function launchRaydium(opts) {
     const quoteOwner = (await connection.getAccountInfo(configInfo.mintB))?.owner;
     if (quoteOwner && quoteOwner.equals(TOKEN_2022_PROGRAM_ID) && builder) {
       let swapped = 0;
+      // Only the QUOTE's slot. Every launchpad instruction lists the base token
+      // program and then the quote's, so the quote's is the LAST classic one:
+      // with an SPL base there are two and the first must stay - rewriting it
+      // too is what failed an SPL coin against NVDAx with ConstraintAddress
+      // (2012) on base_token_program - and with a Token-2022 base there is
+      // only the quote's left to rewrite.
       for (const ix of builder.instructions) {
         if (!ix.programId.equals(programId)) continue;
-        for (const k of ix.keys) {
-          if (k.pubkey.equals(TOKEN_PROGRAM_ID)) { k.pubkey = TOKEN_2022_PROGRAM_ID; swapped++; }
-        }
+        let last = -1;
+        ix.keys.forEach((k, i) => { if (k.pubkey.equals(TOKEN_PROGRAM_ID)) last = i; });
+        if (last >= 0) { ix.keys[last].pubkey = TOKEN_2022_PROGRAM_ID; swapped++; }
       }
       if (swapped) say(`quote is Token-2022 — pointed ${swapped} token-program slot(s) at it`);
     }
@@ -2062,6 +2165,8 @@ export async function launchRaydium(opts) {
         supply: (curveOverride.supply ?? null)?.toString() ?? null,
         totalSellA: (curveOverride.totalSellA ?? null)?.toString() ?? null,
         totalFundRaisingB: (curveOverride.totalFundRaisingB ?? null)?.toString() ?? null,
+        totalLockedAmount: vesting.totalLockedAmount?.toString() ?? '0',
+        decimals,
         migrateType: ruleMigrateType || migrateType || 'cpmm',
         quoteMint: configInfo.mintB.toBase58(),
         quoteDecimals: mintBInfo.decimals,
