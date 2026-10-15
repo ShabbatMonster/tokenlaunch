@@ -1,299 +1,178 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* ---------------------------------------------------------------------------
-   The launcher's one look: a dark deploy terminal, after the reference
-   "Token Deploy" panel - dense charcoal panels, near-black fields, small bold
-   uppercase labels, a grid of launchpad tabs with the active one tinted
-   green, and a full-width Deploy bar at the bottom.
+   The launcher's one look: black and white, sleek, the deploy panel centred.
 
-   The pages are navigated from a sidebar down the left edge; there is no top
-   bar. Behind everything is the caterpillar-cat photo, and on a wide screen
-   the column sits right so the cat stays in view.
-
-   Loaded AFTER each page's own <style>: it remaps the custom properties every
-   page is built on (--bg, --panel, --border, --text, --dim, --accent,
-   --danger) and adds the chrome. Dark in both colour schemes.
+   Loaded AFTER each page's own <style>. Everything is driven by the tokens
+   below - change a colour once here, not in twenty rules. New UI needs no CSS
+   of its own if it uses the page's existing pieces (label, input, select,
+   button, .btn.secondary, .mini, .pad, .status, .hint, .row), so adding a
+   feature is markup only. Only red survives the palette, for error text, so a
+   failure never reads like a success.
 --------------------------------------------------------------------------- */
 
 :root {
-  --t-shell:   #1e1f22;   /* sidebar, fields */
-  --t-panel:   #2b2d31;   /* the deploy panel */
-  --t-raised:  #313338;   /* buttons, tabs */
-  --t-line:    #3f4147;
-  --t-line-hi: #4e5058;
-  --t-text:    #f2f3f5;
-  --t-soft:    #b5bac1;
-  --t-faint:   #949ba4;
-  --t-green:   #1a7f45;   /* deep enough for white Deploy type at 5:1 */
-  --t-green-hi:#3fd47f;
-  --t-green-bg:#1d3628;
-  --t-green-ln:#2e7d4f;
-  --t-gold-bg: #3b3720;
-  --t-gold-ln: #a38f2a;
-  --t-gold:    #ead77a;
-  --t-blue:    #5865f2;
-  --t-red:     #f47b80;
-  --t-amber:   #f0b232;
+  --bg-page:  #000000;
+  --bg-panel: #0c0c0c;
+  --bg-field: #050505;
+  --bg-btn:   #161616;
+  --bg-hover: #222222;
+  --line:     #2a2a2a;
+  --line-hi:  #4a4a4a;
+  --fg:       #ffffff;
+  --fg-soft:  #b8b8b8;
+  --fg-faint: #8c8c8c;
+  --err:      #ff6b6b;
+  --side:     168px;
+  --radius:   8px;
 
-  --bg:     var(--t-shell);
-  --panel:  var(--t-panel);
-  --panel2: var(--t-shell);
-  --border: var(--t-line);
-  --text:   var(--t-text);
-  --dim:    var(--t-soft);
-  --accent: var(--t-green-hi);
-  --warn:   var(--t-amber);
-  --danger: var(--t-red);
+  /* the custom properties every page is built on */
+  --bg: var(--bg-page); --panel: var(--bg-panel); --panel2: var(--bg-field); --border: var(--line);
+  --text: var(--fg); --dim: var(--fg-soft); --accent: var(--fg); --warn: var(--fg-soft); --danger: var(--err);
 
-  --t-sans: "Inter", "Segoe UI", system-ui, sans-serif;
-  --t-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
-  --t-side: 176px;
+  --sans: "Inter", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
   color-scheme: dark;
 }
 
 body {
-  background: var(--t-shell) url("caterpillar-cat.webp") 22% 50% / cover no-repeat fixed;
-  color: var(--t-text);
-  font-family: var(--t-sans);
-  font-size: 14px;
-  padding: 18px 16px 24px calc(var(--t-side) + 16px);
+  background: var(--bg-page); color: var(--fg); font-family: var(--sans); font-size: 14px;
+  padding: 24px 16px 32px calc(var(--side) + 16px);
 }
-/* a wide screen gives the cat the room between the sidebar and the column */
-@media (min-width: 1100px) {
-  body { justify-content: flex-end; padding-right: max(24px, 5vw); }
-}
-.app-deploy { max-width: 760px; }
+.app-deploy { max-width: 720px; }
+::selection { background: var(--fg); color: var(--bg-page); }
+code, kbd, pre, .mono, .addr, .hint code, .status, .kv dd, .token-row .addr, .wallet-chip .bal { font-family: var(--mono); }
+a { color: var(--fg); text-underline-offset: 3px; }
+a:hover { color: var(--fg-soft); }
 
-::selection { background: var(--t-blue); color: #fff; }
-
-code, kbd, pre, .mono, .addr, .hint code, .status, .kv dd,
-.token-row .addr, .wallet-chip .bal { font-family: var(--t-mono); }
-
-/* --- the sidebar: the page buttons down the left edge -------------------------- */
+/* --- sidebar: the page buttons down the left edge ------------------------------ */
 .menubar {
-  position: fixed; top: 0; left: 0; bottom: 0; z-index: 20;
-  width: var(--t-side);
-  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
-  padding: 14px 10px;
-  background: rgba(30, 31, 34, .96);
-  border-right: 1px solid var(--t-line);
-  overflow-y: auto;
+  position: fixed; top: 0; left: 0; bottom: 0; z-index: 20; width: var(--side);
+  display: flex; flex-direction: column; gap: 2px; padding: 16px 10px;
+  background: var(--bg-page); border-right: 1px solid var(--line); overflow-y: auto;
 }
-.menubar a, .menubar .mb-item {
-  display: block;
-  font-family: var(--t-sans); font-weight: 600; font-size: 13px;
-  color: var(--t-soft); text-decoration: none;
-  padding: 9px 12px; border-radius: 6px;
-  border: 1px solid transparent;
-}
+.menubar a { display: block; color: var(--fg-faint); text-decoration: none; font-weight: 600; font-size: 13px; padding: 9px 12px; border-radius: var(--radius); }
 .menubar a u { text-decoration: none; }
-.menubar a:hover { color: var(--t-text); background: var(--t-panel); }
-.menubar a[aria-current="page"] { color: var(--t-green-hi); background: var(--t-green-bg); border-color: var(--t-green-ln); }
+.menubar a:hover { color: var(--fg); background: var(--bg-btn); }
+.menubar a[aria-current="page"] { color: var(--bg-page); background: var(--fg); }
 .menubar .mb-gap { display: none; }
 
-/* --- header: title left, keys and wallet right ------------------------------------ */
-header {
-  background: var(--t-panel); border: 1px solid var(--t-line); border-radius: 10px 10px 0 0;
-  padding: 10px 12px; margin-bottom: 0; gap: 10px; align-items: center;
-}
-header h1, .titlebar { font-family: var(--t-sans); font-weight: 700; font-size: 15px; letter-spacing: 0; color: var(--t-text); }
-header a {
-  color: var(--t-soft) !important; font-size: 12px !important; font-weight: 600;
-  background: var(--t-raised); border: 1px solid var(--t-line); border-radius: 6px; padding: 5px 9px;
-}
-header a:hover { color: var(--t-text) !important; border-color: var(--t-line-hi); }
-
-/* --- panels ---------------------------------------------------------------------------- */
-.card, .modal {
-  background: var(--t-panel);
-  border: 1px solid var(--t-line);
-  border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
-  padding: 12px;
-}
-header + .card { border-radius: 0 0 10px 10px; border-top: none; }
+/* --- header + panels -------------------------------------------------------------- */
+header { background: var(--bg-panel); border: 1px solid var(--line); border-bottom: none; border-radius: var(--radius) var(--radius) 0 0; padding: 12px 14px; margin: 0; gap: 10px; align-items: center; }
+header h1 { font-family: var(--sans); font-weight: 700; font-size: 15px; letter-spacing: 0; color: var(--fg); }
+header a { color: var(--fg-soft) !important; font-size: 12px !important; font-weight: 600; border: 1px solid var(--line); border-radius: var(--radius); padding: 5px 10px; }
+header a:hover { color: var(--fg) !important; border-color: var(--line-hi); }
+.card, .modal { background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+header + .card { border-radius: 0 0 var(--radius) var(--radius); }
 .card + .card { margin-top: 12px; }
-.overlay { background: rgba(0, 0, 0, .65); }
-.app > .note {
-  background: var(--t-panel); border: 1px solid var(--t-line); border-radius: 10px;
-  padding: 12px 14px; margin-top: 12px; color: var(--t-soft);
-}
+.app > .note { background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; margin-top: 12px; color: var(--fg-soft); }
+.overlay { background: rgba(0, 0, 0, .8); }
+.modal h2, .modal h3 { font-family: var(--sans); font-weight: 700; color: var(--fg); }
 
-label {
-  font-family: var(--t-sans); font-weight: 700; font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
-  color: var(--t-soft); margin: 12px 0 6px;
-}
-/* the pages zero a first label's top margin; in the dense form that butts
-   Website and Twitter against the field above */
-.deploy .row > div > label:first-child { margin-top: 12px; }
-label .hint { font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--t-faint); }
-.modal h2, .modal h3 { font-family: var(--t-sans); font-weight: 700; font-size: 16px; color: var(--t-text); }
-a { color: #8ea1ff; }
-a:hover { color: #b7c2ff; }
-.hint, .sub, .drop-hint, .fee-note, .dim, .note { color: var(--t-faint); opacity: 1; }
-.hint b, .fee-note b, .buy-preview b, .preview b, .quote b, .tokinfo b, .bals b { color: var(--t-text); }
+label { font-family: var(--sans); font-weight: 600; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-faint); margin: 14px 0 6px; }
+.deploy .row > div > label:first-child { margin-top: 14px; }
+label .hint { font-weight: 400; letter-spacing: 0; text-transform: none; }
+.hint, .sub, .drop-hint, .fee-note, .dim, .note { color: var(--fg-faint); opacity: 1; }
+.hint b, .fee-note b, .buy-preview b, .preview b, .quote b, .tokinfo b, .bals b { color: var(--fg); }
 
-/* --- fields: near-black, roomy, bold - the reference's name and symbol boxes ---------- */
+/* --- fields --------------------------------------------------------------------------- */
 input[type=text], input[type=password], input[type=number], input[type=url], input[type=search], textarea, select {
-  background: var(--t-shell); border: 1px solid var(--t-line); border-radius: 6px;
-  color: var(--t-text); font-family: var(--t-sans); font-size: 14px;
+  background: var(--bg-field); border: 1px solid var(--line); border-radius: var(--radius);
+  color: var(--fg); font-family: var(--sans); font-size: 14px;
 }
 input[type=text], input[type=password], input[type=number] { padding: 11px 12px; }
 .deploy #name, .deploy #symbol { font-size: 16px; font-weight: 600; padding: 13px 12px; }
-select { color: var(--t-text); padding: 9px 10px; }
-select option { background: var(--t-shell); color: var(--t-text); }
-input:focus, textarea:focus, select:focus { border-color: var(--t-line-hi); box-shadow: 0 0 0 2px rgba(88, 101, 242, .35); outline: none; }
-input::placeholder, textarea::placeholder { color: #6d717a; }
-input[readonly] { background: transparent; border-style: dashed; }
+select { color: var(--fg); padding: 9px 10px; }
+select option { background: var(--bg-field); color: var(--fg); }
+input:focus, textarea:focus, select:focus { border-color: var(--fg); outline: none; box-shadow: none; }
+input::placeholder, textarea::placeholder { color: #5c5c5c; }
 
-/* --- buttons ------------------------------------------------------------------------------ */
-button, .btn {
-  font-family: var(--t-sans); font-weight: 600; font-size: 13px;
-  color: var(--t-text); background: var(--t-raised);
-  border: 1px solid var(--t-line); border-radius: 6px;
+/* --- buttons: outlined; the selected and the primary ones invert -------------------- */
+button, .btn,
+.btn.secondary, .mini, .chip-edit-row .x, .tab, .chip, .pad {
+  font-family: var(--sans); font-weight: 600; font-size: 13px;
+  color: var(--fg); background: var(--bg-btn); border: 1px solid var(--line); border-radius: var(--radius);
   cursor: pointer; transition: background-color .12s ease, border-color .12s ease;
 }
-button:hover:not(:disabled), .btn:hover:not(:disabled):not(.disabled) { background: #383a40; border-color: var(--t-line-hi); }
-button:active:not(:disabled), .btn:active:not(:disabled):not(.disabled) { background: #2e3035; }
-button:disabled, .btn:disabled, .btn.disabled { opacity: .45; cursor: not-allowed; }
-button:focus-visible, .btn:focus-visible, a:focus-visible, .pad:focus-visible { outline: 2px solid var(--t-blue); outline-offset: 2px; }
+button:hover:not(:disabled), .btn:hover:not(:disabled), .pad:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--line-hi); }
+button:disabled, .btn:disabled, .btn.disabled { opacity: .4; cursor: not-allowed; }
+:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 
-/* the Deploy bar along the bottom */
-.launch-btn, #launchBtn {
-  color: #ffffff; background: var(--t-green);
-  font-family: var(--t-sans); font-size: 15px; font-weight: 700; letter-spacing: .01em;
-  border: 1px solid var(--t-green-ln); border-radius: 6px; padding: 13px;
-  margin-top: 14px;
+/* inverted = selected or primary */
+.pad.active, .pad[aria-pressed="true"], .tab.active, .mini.accent, .modal button.primary,
+.launch-btn, #launchBtn, .menubar a[aria-current="page"] {
+  color: var(--bg-page) !important; background: var(--fg) !important; border-color: var(--fg) !important;
 }
-.launch-btn:hover:not(:disabled), #launchBtn:hover:not(:disabled) { background: #15703c; }
-.launch-btn:disabled, #launchBtn:disabled { color: var(--t-faint); background: var(--t-raised); border-color: var(--t-line); opacity: 1; }
-
-/* VAMP sits in the toolbar under the image, as a small tool button */
-.toolbar { display: flex; gap: 8px; margin-top: 10px; }
-#vampBtn {
-  width: auto !important; margin: 0 !important; padding: 7px 12px !important;
-  background: var(--t-raised) !important; color: var(--t-text) !important;
-  border: 1px solid var(--t-line) !important; border-radius: 6px !important;
-  font-family: var(--t-sans) !important; font-weight: 600 !important; font-size: 12px !important; letter-spacing: 0 !important;
-}
-#vampBtn:hover { border-color: var(--t-line-hi) !important; background: #383a40 !important; }
-
-/* --- variants that out-specify the base rules ------------------------------
-   Two-class rules on the pages (.btn.secondary, .mini, .tab.active,
-   .modal button.primary...) beat a bare `button`, so each is restyled. */
-.btn.secondary, .mini, .chip-edit-row .x, .tab { color: var(--t-text); background: var(--t-raised); border: 1px solid var(--t-line); }
+.launch-btn, #launchBtn { font-size: 15px; font-weight: 700; padding: 13px; margin-top: 16px; }
+.launch-btn:hover:not(:disabled), #launchBtn:hover:not(:disabled) { background: #dcdcdc !important; }
+.btn.sell { color: var(--err); border-color: var(--err); }
+.btn.force { border-color: var(--line-hi); }
+.chip-edit-row .x:hover { color: var(--err); border-color: var(--err); }
 .mini { font-size: 11px; padding: 4px 9px; }
 .mini.wide { width: 100%; padding: 9px 0; }
-.mini.accent { color: var(--t-green-hi); background: var(--t-green-bg); border-color: var(--t-green-ln); }
-.chip-edit-row .x:hover { color: #fff; background: #a12d2f; border-color: var(--t-red); }
-.btn.sell { color: #fff; background: #a12d2f; border-color: var(--t-red); }
-.btn.force { color: var(--t-gold); background: var(--t-gold-bg); border-color: var(--t-gold-ln); }
-.modal button.primary { color: #fff; background: var(--t-green); border: 1px solid var(--t-green-ln); }
-.modal .ghost { background: none; border: none; color: var(--t-faint); text-decoration: underline; }
+.modal .ghost { background: none; border: none; color: var(--fg-faint); text-decoration: underline; }
 
-/* --- launchpad tabs: a grid, the active one tinted green ------------------------------- */
-.pad-grid {
-  display: grid; gap: 0;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  border: 1px solid var(--t-line); border-radius: 6px; overflow: hidden;
-}
-.pad {
-  font-family: var(--t-sans); font-weight: 600; font-size: 12.5px;
-  color: var(--t-soft); background: var(--t-raised);
-  border: 1px solid var(--t-line); border-radius: 6px; padding: 8px 12px;
-}
-.pad-grid .pad {
-  display: flex; align-items: center; justify-content: center; gap: 7px;
-  border-radius: 0; border: none; border-right: 1px solid var(--t-line); border-bottom: 1px solid var(--t-line);
-  padding: 9px 8px; min-width: 0;
-}
-.pad-grid .pad span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pad:hover:not(:disabled) { color: var(--t-text); background: #383a40; }
-.pad.active, .pad[aria-pressed="true"] {
-  color: var(--t-green-hi); background: var(--t-green-bg);
-  box-shadow: inset 0 0 0 1px var(--t-green-ln);
-}
-.pad:disabled { opacity: .45; }
-.pad input { color: inherit; font-family: var(--t-mono); background: transparent; }
-/* each launchpad wears its chain's colour, standing in for a logo */
-.pad[data-chain]::before { content: ""; flex: none; width: 9px; height: 9px; border-radius: 50%; background: #80848e; }
-.pad[data-chain="sol"]::before  { background: linear-gradient(135deg, #9945ff, #14f195); }
-.pad[data-chain="4663"]::before { background: #3fd47f; }
-.pad[data-chain="56"]::before   { background: #f0b90b; }
-.pad[data-chain="8453"]::before { background: #3b7bff; }
-.pad[data-chain="1"]::before    { background: #8c9ff5; }
-.pad[data-chain="5042"]::before { background: #ff7a45; }
+/* VAMP carries an inline gradient; make it an ordinary tool button */
+.toolbar { display: flex; gap: 8px; margin-top: 10px; }
+#vampBtn { width: auto !important; margin: 0 !important; padding: 7px 12px !important; background: var(--bg-btn) !important; color: var(--fg) !important; border: 1px solid var(--line) !important; border-radius: var(--radius) !important; font-family: var(--sans) !important; font-weight: 600 !important; font-size: 12px !important; letter-spacing: 0 !important; }
 
-/* dev buy: a row of equal amount chips, like the reference's 5 / 7 / 10 / 85 */
-#buyChips { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 8px; }
+/* --- launchpad tabs, dev-buy chips ---------------------------------------------------- */
+.pad-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.pad-grid .pad { padding: 9px 8px; min-width: 0; text-align: center; }
+.pad-grid .pad span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pad:disabled { opacity: .4; }
+.pad input { color: inherit; font-family: var(--mono); background: transparent; border: none; }
+#buyChips { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 6px; }
 #buyChips .pad { text-align: center; padding: 10px 6px; }
+.badge { font-weight: 600; font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px; color: var(--fg-soft); background: transparent; }
+.badge.active, .badge.ready, .badge.done { color: var(--bg-page); background: var(--fg); border-color: var(--fg); }
+.badge.blocked { color: var(--err); border-color: var(--err); }
 
-.tabs { gap: 6px; }
-.tab { padding: 7px 12px; }
-.tab.active { color: var(--t-green-hi); background: var(--t-green-bg); border-color: var(--t-green-ln); }
-.chip { font-family: var(--t-sans); border: 1px solid var(--t-line); border-radius: 6px; background: var(--t-raised); color: var(--t-text); }
-.chip:hover { border-color: var(--t-line-hi); }
-.badge { font-family: var(--t-sans); font-weight: 700; font-size: 11px; border: 1px solid var(--t-line); border-radius: 4px; padding: 1px 7px; background: var(--t-raised); color: var(--t-soft); }
-.badge.active  { color: var(--t-green-hi); background: var(--t-green-bg); border-color: var(--t-green-ln); }
-.badge.ready   { color: var(--t-gold); background: var(--t-gold-bg); border-color: var(--t-gold-ln); }
-.badge.done    { color: var(--t-green-hi); border-color: var(--t-green-ln); }
-.badge.blocked { color: var(--t-red); border-color: var(--t-red); }
-
-/* --- the per-launchpad settings read as option panels -------------------------------------- */
+/* --- per-launchpad settings, distro and description as quiet sub-panels ------------- */
 .deploy #solRow, .deploy #pumpRow, .deploy #raydiumRow, .deploy #clmmRow, .deploy #uniRow, .deploy #flapRow,
 .deploy #lunchRow, .deploy #hookeRow, .deploy #longRow, .deploy #v4curveRow, .deploy #ponsRow, .deploy #agencyRow,
-.deploy #distroBlock, .deploy #descBlock {
-  margin-top: 12px; padding: 4px 12px 12px;
-  background: rgba(30, 31, 34, .55); border: 1px solid var(--t-line); border-radius: 8px;
-}
-details.adv > summary, details.dev > summary {
-  margin-top: 10px; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--t-soft); cursor: pointer;
-}
+.deploy #distroBlock, .deploy #descBlock { margin-top: 14px; padding: 2px 12px 12px; border: 1px solid var(--line); border-radius: var(--radius); }
+details.adv > summary, details.dev > summary { margin-top: 10px; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-faint); cursor: pointer; }
 
-/* --- image: a centred "Select Image", then the box and its hint ----------------------------- */
-.select-image { text-align: center; font-weight: 700; font-size: 13px; color: var(--t-soft); margin: 14px 0 8px; }
+/* --- image ----------------------------------------------------------------------------- */
+.select-image { text-align: center; font-weight: 600; font-size: 13px; color: var(--fg-soft); margin: 16px 0 8px; }
 .image-row { display: flex; gap: 12px; align-items: center; }
-.drop { width: 62px; height: 62px; border: 1px dashed var(--t-line-hi); border-radius: 6px; background: var(--t-shell); color: var(--t-faint); font-size: 22px; }
-.drop:hover { border-color: var(--t-soft); }
-.drop.drag { border-style: solid; border-color: var(--t-green); }
+.drop { width: 62px; height: 62px; border: 1px dashed var(--line-hi); border-radius: var(--radius); background: var(--bg-field); color: var(--fg-faint); font-size: 22px; }
+.drop:hover, .drop.drag { border-color: var(--fg); }
 .drop-hint { margin-top: 0; font-size: 12px; }
 
-/* --- wallet, lists, status ---------------------------------------------------------------- */
-.wallet-chip { background: var(--t-raised); color: var(--t-text); border: 1px solid var(--t-line); border-radius: 6px; padding: 5px 10px; }
-.wallet-chip .bal { color: var(--t-text); font-weight: 600; }
-.wallet-chip .dot.on { background: var(--t-green-hi); }
-.token-row, .list > * { border-bottom: 1px solid var(--t-line); }
-.token-row .sym { font-weight: 700; color: var(--t-text); }
-.token-row .addr a { color: var(--t-faint); }
-.status:not(:empty) { color: var(--t-text); background: var(--t-shell); border: 1px solid var(--t-line); border-radius: 6px; padding: 9px 11px; }
-.status a { color: #8ea1ff; }
-.ok, .status .ok { color: var(--t-green-hi); font-weight: 700; }
-.err, .status .err { color: var(--t-red); font-weight: 700; }
-.warn, .status .warn { color: var(--t-amber); font-weight: 700; }
-.modal .err { color: var(--t-red); }
+/* --- wallet, lists, status ------------------------------------------------------------ */
+.wallet-chip { background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: var(--radius); padding: 5px 10px; }
+.wallet-chip .bal { color: var(--fg); }
+.wallet-chip .dot { background: var(--err); }
+.wallet-chip .dot.on { background: var(--fg); }
+.token-row, .list > * { border-bottom: 1px solid var(--line); }
+.token-row .sym { font-weight: 700; color: var(--fg); }
+.token-row .addr a { color: var(--fg-faint); }
+.status:not(:empty) { color: var(--fg); background: var(--bg-field); border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 11px; }
+.ok, .status .ok, .warn, .status .warn { color: var(--fg); font-weight: 700; }
+.err, .status .err, .modal .err { color: var(--err); font-weight: 700; }
 .diag { margin-top: 10px; }
 .diag .hint { font-size: 11px; }
-details.dev pre { background: var(--t-shell); border: 1px solid var(--t-line); border-radius: 6px; }
-.kv dt { font-weight: 700; color: var(--t-soft); }
-.bar { background: var(--t-shell); border: 1px solid var(--t-line); border-radius: 4px; }
-.bar > div { background: var(--t-green); }
-hr { border: none; border-top: 1px solid var(--t-line); }
+details.dev pre { background: var(--bg-field); border: 1px solid var(--line); border-radius: var(--radius); }
+.kv dt { font-weight: 600; color: var(--fg-faint); }
+.bar { background: var(--bg-field); border: 1px solid var(--line); border-radius: 4px; }
+.bar > div { background: var(--fg); }
+hr { border: none; border-top: 1px solid var(--line); }
 table { border-collapse: separate; border-spacing: 0; width: 100%; }
-th { font-weight: 700; font-size: 11px; text-transform: uppercase; text-align: left; color: var(--t-soft); padding: 6px 8px; border-bottom: 1px solid var(--t-line); }
-td { padding: 5px 8px; border-bottom: 1px solid var(--t-line); font-size: 13px; }
-tr:hover td { background: #32343a; }
-* { scrollbar-color: var(--t-line-hi) transparent; }
+th { font-weight: 600; font-size: 11px; text-transform: uppercase; text-align: left; color: var(--fg-faint); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+td { padding: 5px 8px; border-bottom: 1px solid var(--line); font-size: 13px; }
+tr:hover td { background: var(--bg-btn); }
+* { scrollbar-color: var(--line-hi) transparent; }
 
-/* --- phones: a narrow sidebar, everything else stacks ------------------------------------- */
+/* --- phones: a narrow sidebar ------------------------------------------------------------ */
 @media (max-width: 700px) {
-  :root { --t-side: 84px; }
-  body { padding-left: calc(var(--t-side) + 8px); padding-right: 8px; }
+  :root { --side: 84px; }
+  body { padding-left: calc(var(--side) + 8px); padding-right: 8px; }
   .menubar { padding: 10px 6px; }
-  .menubar a, .menubar .mb-item { font-size: 11px; padding: 8px 6px; text-align: center; }
+  .menubar a { font-size: 11px; padding: 8px 6px; text-align: center; }
   header { flex-wrap: wrap; row-gap: 8px; }
   header > div { flex-wrap: wrap; row-gap: 6px; }
   .pad-grid { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
 }
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition: none !important; }
-}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
