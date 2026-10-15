@@ -457,6 +457,8 @@ export async function studioClaimDryRun(connection, owner, kind, c) {
   const paths = {
     'dbc-fees': ['/dbc/fee/create-tx', { ownerWallet, poolAddress: c.dbcPoolAddress, maxQuoteAmount: Number(c.dbcFee?.unclaimed || 0) }],
     allocation: ['/vesting/create-claim', { ownerWallet, escrowAddress: c.vesting?.escrow }],
+    'damm-fees': ['/damm/v2/fee/create-tx', { ownerWallet, poolAddress: c.dammv2PoolAddress, mintAddress: c.mint }],
+    lp: ['/damm/v2/claim/create-tx', { ownerWallet, poolAddress: c.dammv2PoolAddress, mintAddress: c.mint }],
   };
   const [p, json] = paths[kind];
   const res = await api(p, { json });

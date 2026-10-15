@@ -113,10 +113,14 @@ check((await studioCreatorTokens(CREATOR)).includes(MINT), "a creator's Studio c
 const c = await studioClaimables(MINT, CREATOR);
 check(c.mine && c.graduated && c.dbcPoolAddress && c.dammv2PoolAddress, 'its pools, owner and graduation are read', `${c.dbcPoolAddress?.slice(0, 6)} / ${c.dammv2PoolAddress?.slice(0, 6)}`);
 check(c.vesting && BigInt(c.vesting.claimable) > 0n && c.vesting.mine, 'its migration allocation shows as claimable', `${Number(c.vesting.claimable) / 1e6} tokens`);
-for (const kind of ['allocation', 'dbc-fees']) {
+for (const kind of ['allocation', 'dbc-fees', 'damm-fees']) {
   const d = await studioClaimDryRun(connection, CREATOR, kind, c).catch((e) => ({ err: e.message }));
-  check(!d.err, `claiming the ${kind === 'allocation' ? 'allocation' : 'curve trading fees'} simulates clean for the creator`, d.err ? JSON.stringify(d.err).slice(0, 100) : (d.logs.find((l) => /Instruction: Claim/.test(l)) || '').replace('Program log: ', ''));
+  check(!d.err, `claiming the ${{ allocation: 'allocation', 'dbc-fees': 'curve trading fees', 'damm-fees': 'graduated pool fees' }[kind]} simulates clean for the creator`, d.err ? JSON.stringify(d.err).slice(0, 100) : (d.logs.find((l) => /Instruction: Claim/.test(l)) || '').replace('Program log: ', ''));
 }
+// LP is claimed through Studio only for coins under its creator proxy; this
+// older coin has none, so Studio refuses - and the panel offers no LP button
+const lp = await studioClaimDryRun(connection, CREATOR, 'lp', c).catch((e) => ({ thrown: e.message }));
+check(!c.ctoPdaAccount && /Proxy account not found/.test(lp.thrown || ''), 'LP on a coin with no creator proxy is refused by Studio, which is why no LP button is shown there', lp.thrown);
 const other = await studioClaimables(MINT, kp.publicKey.toBase58());
 check(other.mine === false, 'and to any other wallet the coin reads as not theirs');
 
@@ -150,6 +154,10 @@ const launchJ = MAIN.slice(MAIN.indexOf('async function launchJupStudio'), MAIN.
 check(HTML.includes('id="jupDevBuy"') && launchJ.indexOf('swapIntoQuote') > -1 && launchJ.indexOf('swapIntoQuote') < launchJ.indexOf('launchStudio(')
   && launchJ.indexOf('studioDevBuy') > launchJ.indexOf('launchStudio('), 'a dev buy: SOL swapped to the pair before the launch, bought the moment the pool lands');
 check(/if \(f\.antiSniping\) throw/.test(launchJ) && /graduate it on the spot/.test(launchJ), 'refused with anti-sniping on, or when it would fill the curve by itself');
+
+check(/if \(activePad\.family === 'jupstudio'\) return renderStudioClaims\(box\)/.test(MAIN) && /if \(activePad\.family === 'jupstudio'\) \{ await claimAllStudio\(btn\)/.test(MAIN),
+  'MY TOKENS · CLAIM FEES lists Studio coins, and CLAIM ALL claims every open reward on them');
+check(/c\.graduated && c\.dammv2PoolAddress && c\.ctoPdaAccount\) due\.push\('lp'\)/.test(MAIN), 'LP is only offered where Studio can build that claim');
 
 console.log('');
 process.exit(fails.length ? 1 : 0);

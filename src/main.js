@@ -3269,57 +3269,122 @@ async function launchJupStudio(pad, inp) {
 }
 
 // The claim panel: every reward Studio pays, per coin, each with its button.
-let jupClaimRows = [];
-async function loadJupClaims() {
-  const box = $('jupClaims');
-  if (!solKeyB58) { box.innerHTML = '<span class="err">load your SOL key to see your Studio rewards</span>'; return; }
+// Studio rewards, by mint: the same rows feed the STUDIO REWARDS panel in the
+// pad and the MY TOKENS · CLAIM FEES panel below the form.
+const jupClaimByMint = new Map();
+const JUP_FEE_KINDS = ['dbc-fees', 'damm-fees', 'allocation', 'lp'];
+
+async function studioRows(typed = '') {
   const S = await import('./solana.js');
   const me = S.solAddressFromSecret(solKeyB58);
-  box.textContent = 'reading Jupiter Studio…';
-  const typed = $('jupClaimMint').value.trim();
   const mints = typed ? [typed] : await S.studioCreatorTokens(me);
-  if (!mints.length) { box.textContent = 'this wallet has not launched anything on Jupiter Studio yet'; return; }
-  jupClaimRows = await Promise.all(mints.slice(0, 25).map((m) => S.studioClaimables(m, me).catch((e) => ({ mint: m, error: e.message }))));
+  const rows = await Promise.all(mints.slice(0, 25).map((m) => S.studioClaimables(m, me).catch((e) => ({ mint: m, error: e.message }))));
+  for (const r of rows) jupClaimByMint.set(r.mint, r);
+  return rows;
+}
+
+// What is claimable on a coin right now, by kind. LP is only offered where
+// Studio can build that claim: coins under its creator proxy (ctoPdaAccount),
+// as studio.jup.ag itself decides - older coins answer "Proxy account not found".
+function studioDue(c) {
+  if (!c || c.error || !c.mine) return [];
+  const due = [];
+  if (c.dbcFee && BigInt(c.dbcFee.unclaimed || 0) > 0n) due.push('dbc-fees');
+  if (c.dammFee && BigInt(c.dammFee.unclaimed || 0) > 0n) due.push('damm-fees');
+  if (c.vesting?.mine && c.vesting.claimable !== '0') due.push('allocation');
+  if (c.graduated && c.dammv2PoolAddress && c.ctoPdaAccount) due.push('lp');
+  return due;
+}
+
+function renderStudioRows(box, rows, { emptyText } = {}) {
+  if (!rows.length) { box.innerHTML = `<div class="empty">${esc(emptyText || 'this wallet has not launched anything on Jupiter Studio yet')}</div>`; return; }
   const fmt = (raw, dec) => (Number(raw) / 10 ** dec).toLocaleString(undefined, { maximumFractionDigits: 4 });
   const qDec = (c) => (c.dammFee?.quoteMint === 'So11111111111111111111111111111111111111112' ? 9 : 6);
   box.innerHTML = '';
-  for (const [i, c] of jupClaimRows.entries()) {
+  for (const c of rows) {
     const row = document.createElement('div');
     row.className = 'hint';
     row.style.cssText = 'font-size:12px;margin:6px 0;line-height:1.9';
     if (c.error) { row.innerHTML = `${esc(c.mint.slice(0, 8))}… <span class="err">${esc(c.error)}</span>`; box.appendChild(row); continue; }
-    const btn = (kind, label, on) => (on && c.mine ? ` <button type="button" class="btn secondary" data-jup="${i}:${kind}" style="padding:2px 10px;font-size:11px">${label}</button>` : '');
+    const due = new Set(studioDue(c));
+    const btn = (kind, label) => (due.has(kind) ? ` <button type="button" class="btn secondary" data-jup="${esc(c.mint)}:${kind}" style="padding:2px 10px;font-size:11px">${label}</button>` : '');
     const v = c.vesting;
     const parts = [];
-    if (c.dbcFee) parts.push(`curve fees ${fmt(c.dbcFee.unclaimed, qDec(c))}` + btn('dbc-fees', 'CLAIM', BigInt(c.dbcFee.unclaimed || 0) > 0n));
-    if (c.dammFee) parts.push(`pool fees ${fmt(c.dammFee.unclaimed, qDec(c))}` + btn('damm-fees', 'CLAIM', BigInt(c.dammFee.unclaimed || 0) > 0n));
+    if (c.dbcFee) parts.push(`curve fees ${fmt(c.dbcFee.unclaimed, qDec(c))}` + btn('dbc-fees', 'CLAIM'));
+    if (c.dammFee) parts.push(`pool fees ${fmt(c.dammFee.unclaimed, qDec(c))}` + btn('damm-fees', 'CLAIM'));
     else if (c.graduated && !c.mine) parts.push('pool fees: only its creator can see them');
     if (v) {
       const opens = new Date(v.cliffTime * 1000);
       parts.push(`allocation ${fmt(v.claimable, 6)} claimable of ${fmt(v.total, 6)}`
-        + (v.claimable === '0' && Date.now() < opens ? ` (opens ${opens.toLocaleDateString()})` : '')
-        + btn('allocation', 'CLAIM', v.mine && v.claimable !== '0'));
+        + (v.claimable === '0' && Date.now() < opens ? ` (opens ${opens.toLocaleDateString()})` : '') + btn('allocation', 'CLAIM'));
     } else if (!c.graduated) {
       parts.push('allocation: claimable once it migrates');
     }
-    if (c.graduated && c.dammv2PoolAddress) parts.push('graduated LP' + btn('lp', 'CLAIM LP', true));
+    if (c.graduated && c.dammv2PoolAddress) parts.push(c.ctoPdaAccount ? 'graduated LP' + btn('lp', 'CLAIM LP') : 'graduated LP: not claimable through Studio for this coin');
     row.innerHTML = `<b>${esc(c.mint.slice(0, 6))}…</b> ${c.graduated ? '(graduated)' : `(curve ${Math.round((c.progress || 0) * 100)}%)`}`
       + (c.mine ? '' : ` <span class="err">not launched by this wallet - nothing here is yours to claim</span>`) + ' · ' + parts.join(' · ');
     box.appendChild(row);
   }
 }
 
-async function jupClaim(i, kind, btn) {
-  const c = jupClaimRows[i];
+async function loadJupClaims() {
+  const box = $('jupClaims');
+  if (!solKeyB58) { box.innerHTML = '<span class="err">load your SOL key to see your Studio rewards</span>'; return; }
+  box.textContent = 'reading Jupiter Studio…';
+  renderStudioRows(box, await studioRows($('jupClaimMint').value.trim()));
+}
+
+// MY TOKENS · CLAIM FEES on the Studio pad
+async function renderStudioClaims(box) {
+  if (!solKeyB58) { box.innerHTML = '<div class="empty">load your SOL key to see your Studio coins</div>'; return; }
+  box.innerHTML = '<div class="empty">reading Jupiter Studio…</div>';
+  try { renderStudioRows(box, await studioRows('')); }
+  catch (e) { box.innerHTML = `<div class="empty">couldn't read Jupiter Studio: ${esc(e.message)}</div>`; }
+}
+
+async function jupClaim(mint, kind, btn) {
+  const c = jupClaimByMint.get(mint);
+  if (btn) btn.disabled = true;
+  try {
+    const S = await import('./solana.js');
+    setStatus(`claiming ${kind} on ${mint.slice(0, 6)}…`);
+    const sig = await S.studioClaim(solKeyB58, kind, c, activePad.rpc);
+    $('status').innerHTML = `<span class="ok">CLAIMED ✓</span> ${esc(kind)} on ${esc(mint.slice(0, 8))}… · <a href="https://solscan.io/tx/${esc(String(sig))}" target="_blank" rel="noopener">tx</a>`;
+    if (!$('jupClaims').classList.contains('hidden') && $('jupClaims').innerHTML) await loadJupClaims();
+    renderTokenList();
+  } catch (e) {
+    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    if (btn) btn.disabled = false;
+  }
+}
+
+// CLAIM ALL on the Studio pad: every claimable reward on every coin, one by
+// one, each simulated first. A claim that is not open yet (LP before its
+// unlock) is skipped with its reason rather than stopping the rest.
+async function claimAllStudio(btn) {
+  const out = $('claimStatus');
+  if (!solKeyB58) { out.innerHTML = '<span class="err">load your SOL key first</span>'; return; }
   btn.disabled = true;
   try {
     const S = await import('./solana.js');
-    setStatus(`claiming ${kind} on ${c.mint.slice(0, 6)}…`);
-    const sig = await S.studioClaim(solKeyB58, kind, c, activePad.rpc);
-    $('status').innerHTML = `<span class="ok">CLAIMED ✓</span> ${esc(kind)} on ${esc(c.mint.slice(0, 8))}… · <a href="https://solscan.io/tx/${esc(String(sig))}" target="_blank" rel="noopener">tx</a>`;
-    await loadJupClaims();
+    out.textContent = 'checking your Studio coins…';
+    const rows = await studioRows('');
+    const work = rows.flatMap((c) => studioDue(c).map((kind) => ({ c, kind })));
+    if (!work.length) { out.textContent = `nothing to claim across ${rows.length} Studio coin${rows.length === 1 ? '' : 's'}`; return; }
+    const done = [], skipped = [];
+    for (const [i, { c, kind }] of work.entries()) {
+      out.textContent = `claiming ${i + 1}/${work.length}: ${kind} on ${c.mint.slice(0, 6)}…`;
+      try { done.push({ c, kind, sig: await S.studioClaim(solKeyB58, kind, c, activePad.rpc) }); }
+      catch (e) { skipped.push({ c, kind, why: e.message }); }
+    }
+    out.innerHTML = `<span style="color:var(--accent)">CLAIMED ${done.length}/${work.length} ✓</span>`
+      + done.map((d) => ` · ${esc(d.kind)} ${esc(d.c.mint.slice(0, 6))}… <a href="https://solscan.io/tx/${esc(String(d.sig))}" target="_blank" rel="noopener">tx</a>`).join('')
+      + (skipped.length ? '<br><span class="err">' + skipped.map((x) => `${esc(x.kind)} on ${esc(x.c.mint.slice(0, 6))}…: ${esc(x.why)}`).join('<br>') + '</span>' : '');
+    refreshBalance();
+    renderTokenList();
   } catch (e) {
-    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    out.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+  } finally {
     btn.disabled = false;
   }
 }
@@ -4818,6 +4883,8 @@ async function renderTokenList() {
   const box = $('tokenList');
   // Solana / Meteora launches claim through the DBC partner-fee path, not a locker
   if (activePad.vm === 'sol' && activePad.family === 'meteora') return renderMeteoraClaims(box);
+  // Jupiter Studio pays curve fees, pool fees, the migration allocation and LP
+  if (activePad.family === 'jupstudio') return renderStudioClaims(box);
   if (!account) { box.innerHTML = '<div class="empty">unlock wallet to load your launches</div>'; return; }
   // Hooke keeps creator fees in the hook itself, per coin, in hXMAX
   if (activePad.family === 'hooke') return renderHookeClaims(box, activePad);
@@ -4856,6 +4923,7 @@ async function claimAllFees(btn) {
   const say = (m, err) => { out.innerHTML = err ? `<span class="err">${m}</span>` : m; };
   // Solana / Meteora claims run off the SOL key, not an EVM account
   if (activePad.vm === 'sol' && activePad.family === 'meteora') { await claimAllMeteora(btn); return; }
+  if (activePad.family === 'jupstudio') { await claimAllStudio(btn); return; }
   if (!account) { say('unlock wallet first', true); return; }
   if (activePad.family === 'hooke') { await claimAllHooke(activePad, btn); return; }
   const pad = claimPad();
@@ -6633,12 +6701,15 @@ function init() {
     }
   });
   $('jupClaimLoad').addEventListener('click', () => loadJupClaims().catch((e) => { $('jupClaims').innerHTML = '<span class="err">' + esc(e.message) + '</span>'; }));
-  $('jupClaims').addEventListener('click', (e) => {
-    const b = e.target.closest('button[data-jup]');
-    if (!b) return;
-    const [i, kind] = b.dataset.jup.split(':');
-    jupClaim(Number(i), kind, b);
-  });
+  // claim buttons in either Studio list
+  for (const id of ['jupClaims', 'tokenList']) {
+    $(id).addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-jup]');
+      if (!b) return;
+      const [mint, kind] = b.dataset.jup.split(':');
+      jupClaim(mint, kind, b);
+    });
+  }
   $('smLoad').addEventListener('click', async () => {
     const btn = $('smLoad');
     btn.disabled = true;
