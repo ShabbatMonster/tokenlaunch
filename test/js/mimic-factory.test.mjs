@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { decodeFunctionData, getAddress, keccak256, encodeAbiParameters, parseAbi, getContractAddress } from 'viem';
-import { mimicPublicClient, findLaunchTx, loadTemplate, buildCalldata, approvalsFor, parseParam, inferVanityRecipe, mineForRecipe, vanitySuffix, create2Salt } from '../../src/mimic.js';
+import { mimicPublicClient, findLaunchTx, loadTemplate, buildCalldata, approvalsFor, parseParam, inferVanityRecipe, mineForRecipe, vanitySuffix, create2Salt, noBuyEdits } from '../../src/mimic.js';
 import { mineCpu, patternFrom, matches } from '../../src/vanity.js';
 
 const pub = mimicPublicClient();
@@ -80,6 +80,30 @@ if (recipe) {
   const ok = await sim({ [recipe.salt.path]: m.value });
   check(!!ok && getAddress('0x' + ok.slice(26, 66)) === m.address, 'Hooke accepts the mined launch from a different wallet and creates exactly the mined address', ok ? '0x' + ok.slice(26, 66) : 'reverted');
   check(await sim({}) === null, 'and refuses the same launch with an unmined salt - the mining is what makes it work');
+
+  // no dev buy: the buy struct goes out as zeros, nothing is approved, and a
+  // wallet holding only ETH can launch
+  const nb = noBuyEdits(w);
+  check(Object.keys(nb).sort().join() === '6.0,6.1,6.2,6.3', 'no dev buy zeroes the whole buy struct (mode, amount, minimums) but keeps the deadline', Object.keys(nb).join());
+  check(approvalsFor(w, nb).length === 0, 'and leaves nothing to approve');
+  const free = await pub.call({ account: ME, to: w.factory, data: buildCalldata(w, v, { ...nb, [recipe.salt.path]: m.value }), value: w.value, stateOverride: [{ address: ME, balance: 10n ** 16n }] }).then((r) => r.data, () => null);
+  check(!!free && getAddress('0x' + free.slice(26, 66)) === m.address, 'Hooke accepts a no-dev-buy launch from a wallet holding only ETH', free ? '0x' + free.slice(26, 66) : 'reverted');
+}
+
+// the coin this was reported on: launched with a 68 hXMAX dev buy, mimicked with none
+{
+  const REF = '0xe6b34c84ea48d930717eeaf3248f0c9c6bd50000';
+  const h68 = await findLaunchTx(pub, REF);
+  const t68 = await loadTemplate(pub, h68, { token: REF });
+  check(t68.pulled.length === 1 && t68.pulled[0].symbol === 'hXMAX' && t68.pulled[0].amount === 68n * 10n ** 18n, 'a coin launched with a 68 hXMAX dev buy is loaded', `${t68.pulled.map((x) => x.symbol).join()}`);
+  check(approvalsFor(t68, noBuyEdits(t68)).length === 0, 'and mimicking it with no dev buy asks for no hXMAX');
+  const r68 = (await inferVanityRecipe(pub, t68)).recipe;
+  if (r68) {
+    const v68 = { name: 'No Buy', symbol: 'NOBUY', uri: 'ipfs://bafyNEW', you: ME, deadline: deadline() };
+    const m68 = await mineForRecipe(pub, r68, { ...v68, factory: t68.factory });
+    const out = await pub.call({ account: ME, to: t68.factory, data: buildCalldata(t68, v68, { ...noBuyEdits(t68), [r68.salt.path]: m68.value }), value: t68.value, stateOverride: [{ address: ME, balance: 10n ** 16n }] }).then((r) => r.data, (e) => 'ERR ' + (e.shortMessage || e.message));
+    check(!out.startsWith('ERR') && getAddress('0x' + out.slice(26, 66)) === m68.address, 'and that launch simulates clean from an ETH-only wallet', out.slice(0, 80));
+  } else check(false, 'the recipe is found for the 68 hXMAX coin too');
 }
 
 // salts hashed with the sender first are mined on the CPU through the same transform
@@ -140,6 +164,8 @@ check(['mimicToken', 'mimicTx', 'mimicLoad', 'mimicFactory', 'mimicValue', 'mimi
 check(['mimicVanity', 'mimicSuffix', 'mimicMine', 'mimicMineOn', 'mimicVanityInfo'].every((id) => HTML.includes(`id="${id}"`)),
   'a vanity block: the ending to mine for, MINE, an on/off switch and progress');
 const prep = MAIN.slice(MAIN.indexOf('async function mimicPrepare'), MAIN.indexOf('async function simulateMimic'));
+check(HTML.includes('id="mimicDevBuy"') && !/id="mimicDevBuy"[^>]*checked/.test(HTML) && /const noBuy = t\.pulled\.length > 0 && !\$\('mimicDevBuy'\)\.checked/.test(prep),
+  'the dev buy is off unless ticked, and off means the no-buy edits are applied');
 check(prep.indexOf('mimicMine(') > -1 && prep.indexOf('mimicMine(') < prep.indexOf('buildCalldata') && prep.indexOf('uploadJsonToIpfs') < prep.indexOf('mimicMine('),
   'the salt is mined after the metadata is pinned (it can feed the init code hash) and before the call is built');
 const launchFn = MAIN.slice(MAIN.indexOf('async function launchMimic'), MAIN.indexOf('async function updateHookeUI'));

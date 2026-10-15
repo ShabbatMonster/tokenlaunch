@@ -25,10 +25,12 @@
 //             inside the launch path. Not the token ordering - true launches
 //             fine whichever side of hXMAX the mined address sorts on.
 //   buy       { mode, amountIn, minTokensOut, minIntermediateOut, deadline }.
-//             A dev buy is MANDATORY: mode 0 reverts InvalidInitialBuy.
-//             mode 1 pays in hXMAX, mode 2 pays in USDG (routed USDG -> hXMAX ->
-//             token by the hook itself). Paid by transferFrom, so it needs an
-//             approval to the hook first.
+//             The dev buy is OPTIONAL: mode 0 with every amount 0 launches with
+//             no buy (several live coins did, and it simulates clean from a
+//             wallet holding only ETH). mode 1 pays in hXMAX, mode 2 pays in
+//             USDG (routed USDG -> hXMAX -> token by the hook itself); either
+//             with amountIn 0 reverts InvalidInitialBuy. Paid by transferFrom,
+//             so a buy needs an approval to the hook first.
 //   value     exactly launchFee() - 0.00025 ETH when decoded. Anything else,
 //             including fee + an ETH dev buy, reverts InvalidLaunchFee. ETH is
 //             not a payment mode.
@@ -86,7 +88,7 @@ export const HOOKE_FACTORY_ABI = parseAbi([
 ]);
 
 export const HOOKE_ERRORS = {
-  '0x4fb6a7b3': 'InvalidInitialBuy - a dev buy is required, in hXMAX or USDG',
+  '0x4fb6a7b3': 'InvalidInitialBuy - the dev buy does not match its mode (mode 0 = no buy with every amount 0; modes 1/2 need an amount)',
   '0x26e49117': 'InvalidLaunchFee - send exactly the launch fee, nothing more',
   '0x768dc598': 'InvalidFeeRecipient',
   '0x13be252b': 'InsufficientAllowance - USDG not approved to the hook',

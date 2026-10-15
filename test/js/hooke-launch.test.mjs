@@ -71,9 +71,9 @@ const funded = (tokenAddr, balBase, allowBase) => [
   { address: ME, balance: 10n ** 20n },
   { address: tokenAddr, stateDiff: [{ slot: slot(ME, balBase), value: BIG }, { slot: allowSlot(ME, HOOKE.hook, allowBase), value: BIG }] },
 ];
-const simulate = (mode, amountIn, overrides, value = st.launchFee) => pub.simulateContract({
+const simulate = (mode, amountIn, overrides, value = st.launchFee, minTokensOut = 1n) => pub.simulateContract({
   address: HOOKE.hook, abi: HOOKE_ABI, functionName: 'createMeme', account: ME, value, stateOverride: overrides,
-  args: hookeCreateArgs({ salt: mined.salt, name: 'Hooke Test', symbol: 'HKT', metadata: META, creator: ME, mode, amountIn, minTokensOut: 1n, deadline: deadline() }),
+  args: hookeCreateArgs({ salt: mined.salt, name: 'Hooke Test', symbol: 'HKT', metadata: META, creator: ME, mode, amountIn, minTokensOut, deadline: deadline() }),
 });
 // hXMAX is a plain OZ ERC20 (balances slot 0, allowances slot 1); USDG keeps them at 1 and 3
 const hx = await simulate(HOOKE_PAY.HXMAX.mode, 10n ** 18n, funded(HOOKE.hxmax, 0, 1));
@@ -85,8 +85,16 @@ check(usOut > 5e6 && usOut < 3e7, 'and buys a WOLFPACK-sized bag (WOLFPACK got ~
 
 // --- the refusals this module guards against -------------------------------------------
 const reverts = async (p) => { try { await p; return ''; } catch (e) { return String(e?.message || e); } };
-const noBuy = await reverts(simulate(0, 0n, funded(HOOKE.usdg, 1, 3)));
-check(/InvalidInitialBuy|0x4fb6a7b3/.test(noBuy), 'a launch with no dev buy is refused (InvalidInitialBuy)', noBuy.slice(0, 60));
+// no dev buy: mode 0 with every amount 0, from a wallet holding nothing but ETH
+// for the fee. Live coins launch this way (0x732700fe...0000, 0x96c21544...0000).
+const ethOnly = [{ address: ME, balance: 10n ** 16n }];
+const free = await simulate(0, 0n, ethOnly, st.launchFee, 0n).catch((e) => ({ error: String(e?.message || e) }));
+check(!free.error && getAddress(free.result[0]) === getAddress(mined.token) && free.result[1] === 0n,
+  'a launch with NO dev buy (mode 0, all zero) works from a wallet holding only ETH', free.error ? free.error.slice(0, 80) : 'no tokens bought');
+const minOut = await reverts(simulate(0, 0n, ethOnly, st.launchFee, 1n));
+check(/InvalidInitialBuy|0x4fb6a7b3/.test(minOut), 'but mode 0 with a nonzero minimum out is refused (InvalidInitialBuy) - every field must be 0', minOut.slice(0, 60));
+const zeroBuy = await reverts(simulate(HOOKE_PAY.USDG.mode, 0n, ethOnly, st.launchFee, 0n));
+check(/InvalidInitialBuy|0x4fb6a7b3/.test(zeroBuy), 'and so is a buy mode with an amount of 0', zeroBuy.slice(0, 60));
 const extra = await reverts(simulate(HOOKE_PAY.USDG.mode, 50_000_000n, funded(HOOKE.usdg, 1, 3), st.launchFee + 10n ** 16n));
 check(/InvalidLaunchFee|0x26e49117/.test(extra), 'and so is sending ETH beyond the fee - ETH is not a payment mode', extra.slice(0, 60));
 const unapproved = await reverts(simulate(HOOKE_PAY.USDG.mode, 50_000_000n, [{ address: ME, balance: 10n ** 20n }]));
@@ -126,7 +134,10 @@ check(/id: 'hooke-robinhood'[^}]*family: 'hooke'/.test(MAIN), 'the app lists a H
 check(/if \(pad\.family === 'hooke'\) \{\s*await launchHooke/.test(MAIN), 'and launching on it goes through launchHooke');
 check(/id="hookeRow"/.test(HTML) && /value="ETH"/.test(HTML) && /value="USDG"/.test(HTML) && /value="HXMAX"/.test(HTML),
   'with ETH, USDG and hXMAX as ways to pay the dev buy');
-check(/id="hookeBuy" value="50"/.test(HTML), 'defaulting to the 50 WOLFPACK used');
+check(/id="hookeBuy" value="0"/.test(HTML), 'defaulting to no dev buy');
+const launchH = MAIN.slice(MAIN.indexOf('async function launchHooke'), MAIN.indexOf('// --- Mimic'));
+check(/mode: devBuy \? pay\.mode : 0/.test(launchH) && /minTokensOut: devBuy \? minTokensOut : 0n/.test(launchH) && !/dev buy is required/.test(launchH),
+  'and with no amount it sends mode 0 with every field 0, and never asks for USDG or hXMAX');
 check(/hookeStatus\(pub\)[\s\S]{0,200}if \(!st\.ok\)/.test(MAIN), 'and it refuses to launch if the contracts moved');
 check(/getAddress\(result\[0\]\) !== getAddress\(predicted\)/.test(MAIN), 'or if the simulation would create anything but the mined address');
 
