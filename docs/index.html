@@ -513,6 +513,27 @@
       The launch fee is read live and sent exactly; the contract rejects any other amount.</div>
     </div>
 
+    <div id="mimicRow" class="hidden">
+      <label>TOKEN TO MIMIC <span class="hint">any Robinhood token launched from the factory you want to use</span></label>
+      <div class="row">
+        <div><input type="text" id="mimicToken" spellcheck="false" placeholder="0x… token address"></div>
+        <div style="flex:0 0 110px"><button type="button" class="btn secondary" id="mimicLoad" style="width:100%;height:100%">LOAD</button></div>
+      </div>
+      <label>OR ITS LAUNCH TX <span class="hint">optional - skips the search</span></label>
+      <input type="text" id="mimicTx" spellcheck="false" placeholder="0x… transaction hash">
+      <div class="hint" id="mimicInfo" style="font-size:12px;margin-top:8px"></div>
+      <div id="mimicBody" class="hidden">
+        <div class="row">
+          <div><label>FACTORY <span class="hint">the contract called - change it to aim the same call elsewhere</span></label><input type="text" id="mimicFactory" spellcheck="false"></div>
+          <div style="flex:0 0 160px"><label>ETH SENT</label><input type="text" id="mimicValue" spellcheck="false"></div>
+        </div>
+        <label>PARAMETERS <span class="hint">blank = automatic (your name, ticker, metadata, wallet, socials, a fresh deadline); type to override</span></label>
+        <div id="mimicParams"></div>
+        <div class="hint" id="mimicApprovals" style="font-size:12px;margin-top:8px"></div>
+        <button type="button" class="btn secondary" id="mimicSim" style="margin-top:10px">SIMULATE</button>
+      </div>
+    </div>
+
     <div id="longRow" class="hidden">
       <div class="row">
         <div><label>PAIR AGAINST (STOCK)</label><select id="longQuoteSelect"></select></div>

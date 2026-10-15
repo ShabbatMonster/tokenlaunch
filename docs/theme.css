@@ -130,7 +130,7 @@ button:disabled, .btn:disabled, .btn.disabled { opacity: .4; cursor: not-allowed
 
 /* --- per-launchpad settings, distro and description as quiet sub-panels ------------- */
 .deploy #solRow, .deploy #pumpRow, .deploy #raydiumRow, .deploy #clmmRow, .deploy #uniRow, .deploy #flapRow,
-.deploy #lunchRow, .deploy #hookeRow, .deploy #longRow, .deploy #v4curveRow, .deploy #ponsRow, .deploy #agencyRow,
+.deploy #lunchRow, .deploy #hookeRow, .deploy #mimicRow, .deploy #longRow, .deploy #v4curveRow, .deploy #ponsRow, .deploy #agencyRow,
 .deploy #distroBlock, .deploy #descBlock { margin-top: 14px; padding: 2px 12px 12px; border: 1px solid var(--line); border-radius: var(--radius); }
 details.adv > summary, details.dev > summary { margin-top: 10px; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-faint); cursor: pointer; }
 
