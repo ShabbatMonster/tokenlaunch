@@ -16,14 +16,18 @@
 //      that starts with the launcher's address
 //   4. rebuild, approve whatever the original pulled, simulate, then send
 //
-// What it cannot do is mine a vanity address: a factory that only accepts
-// addresses ending 0000 or 7777 (Hooke, flap) needs the CREATE2 inputs, which
-// the calldata alone does not reveal. Those keep their dedicated pads; here the
-// simulation reports the factory's refusal.
+// A factory that only accepts addresses ending 0000 or 7777 (Hooke, flap)
+// needs a mined salt. The CREATE2 inputs are not in the calldata, so
+// inferVanityRecipe works them out from the reference token - which contract
+// deployed it, its init code hash (a minimal-proxy clone's is fixed; otherwise
+// a view on the factory computes it), and how the calldata salt becomes the
+// CREATE2 salt - and keeps a recipe only if it reproduces the reference
+// address exactly. src/vanity.js then mines on the GPU (CPU fallback).
 
 import {
   createPublicClient, http, defineChain, parseAbi, parseAbiItem, decodeFunctionData, encodeFunctionData,
   getAddress, keccak256, toBytes, isAddress, isHex, formatEther, formatUnits,
+  getContractAddress, encodePacked, encodeAbiParameters, concat, toHex,
 } from 'viem';
 
 export const ROBINHOOD = defineChain({
@@ -208,16 +212,247 @@ export async function loadTemplate(pub, txHash, { token = null } = {}) {
       if (hit) { p.role = p.role || 'pay-amount'; p.pays = hit.token; }
     }
   }
-  const vanity = ref && /(0000|7777|4444|8888|ffff|1111|aaaa)$/i.test(ref);
+  const vanity = ref && vanitySuffix(ref);
   return {
     txHash, factory: getAddress(tx.to), from: getAddress(tx.from), value: tx.value, input: tx.input,
     selector: tx.input.slice(0, 10), signature: recovered?.signature ?? null, item: recovered?.item ?? null,
-    params, pulled, token: ref, name, symbol, minted, blockTime: block.timestamp,
+    params, pulled, token: ref, name, symbol, minted, blockTime: block.timestamp, vanity: vanity || null,
     warnings: [
       ...(recovered ? [] : ['the function could not be recovered from any signature directory - only the raw calldata can be repeated']),
-      ...(vanity ? [`the reference token's address ends in ${ref.slice(-4)}: this factory may require a mined vanity address, which Mimic cannot produce - if the simulation reverts, use the factory's dedicated pad`] : []),
+      ...(vanity ? [`the reference token's address ends in ${vanity}: this factory probably requires a mined vanity address`] : []),
     ],
   };
+}
+
+// --- vanity addresses -----------------------------------------------------------------
+/// The vanity ending of an address, if it has one: a run of 4+ of the same
+/// character, or one of the endings launchpads are known to mine for.
+export function vanitySuffix(address) {
+  const a = address.toLowerCase();
+  const run = a.match(/([0-9a-f])\1{3,}$/);
+  if (run) return run[0];
+  const known = a.match(/(dead|beef|cafe|babe|face|ba5e|b00b|1337)$/);
+  return known ? known[0] : null;
+}
+
+const CLONE_RE = /^0x363d3d373d3d3d363d73[0-9a-f]{40}5af43d82803e903d91602b57fd5bf3$/i;
+const CLONE_INIT_PREFIX = '0x3d602d80600a3d3981f3';
+const looksLikeAddress = (word) => /^0x0{24}[0-9a-f]{40}$/i.test(word) && !/^0x0{24}0{30}/i.test(word);
+
+/// Every PUSH4 in a contract's code - its function selectors among them.
+function pushedSelectors(code) {
+  const b = hexToBytesLite(code), out = new Set();
+  for (let i = 0; i < b.length; i++) {
+    const op = b[i];
+    if (op === 0x63 && i + 4 < b.length) out.add('0x' + [...b.slice(i + 1, i + 5)].map((x) => x.toString(16).padStart(2, '0')).join(''));
+    if (op >= 0x60 && op <= 0x7f) i += op - 0x5f;
+  }
+  return [...out];
+}
+const hexToBytesLite = (h) => Uint8Array.from(h.slice(2).match(/../g) || [], (x) => parseInt(x, 16));
+
+async function signaturesForMany(selectors) {
+  const out = {};
+  for (let i = 0; i < selectors.length; i += 80) {
+    const chunk = selectors.slice(i, i + 80);
+    try {
+      const j = await (await fetch(`https://api.openchain.xyz/signature-database/v1/lookup?function=${chunk.join(',')}&filter=true`)).json();
+      for (const [sel, list] of Object.entries(j?.result?.function || {})) if (list?.length) out[sel] = list.map((x) => x.name);
+    } catch { /* this chunk stays unknown */ }
+  }
+  return out;
+}
+
+async function limited(tasks, n = 6) {
+  const out = new Array(tasks.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (next < tasks.length) { const i = next++; out[i] = await tasks[i]().catch(() => null); }
+  }));
+  return out;
+}
+
+// How a calldata salt can become the CREATE2 salt. `who` is the launcher or
+// the factory (whichever called the deployer); both are re-bound for your launch.
+const SALT_TRANSFORMS = [
+  { kind: 'raw' },
+  { kind: 'keccak' },
+  { kind: 'packed', who: 'from' }, { kind: 'packed', who: 'factory' },
+  { kind: 'encode', who: 'from' }, { kind: 'encode', who: 'factory' },
+  { kind: 'packed-rev', who: 'from' }, { kind: 'packed-rev', who: 'factory' },
+  { kind: 'encode-rev', who: 'from' }, { kind: 'encode-rev', who: 'factory' },
+];
+
+/// The CREATE2 salt a calldata salt turns into, under a transform.
+export function create2Salt(salt, transform, { from, factory }) {
+  const who = transform.who === 'from' ? from : factory;
+  switch (transform.kind) {
+    case 'raw': return salt;
+    case 'keccak': return keccak256(salt);
+    case 'packed': return keccak256(encodePacked(['address', 'bytes32'], [who, salt]));
+    case 'encode': return keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'bytes32' }], [who, salt]));
+    case 'packed-rev': return keccak256(encodePacked(['bytes32', 'address'], [salt, who]));
+    case 'encode-rev': return keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'address' }], [salt, who]));
+    default: throw new Error('unknown salt transform ' + transform.kind);
+  }
+}
+
+// a view argument, re-bound for your launch: your name/ticker/metadata/wallet,
+// or the value it had
+function bindArg(src, v) {
+  if (src.k === 'name') return v.name;
+  if (src.k === 'symbol') return v.symbol;
+  if (src.k === 'uri') return v.uri;
+  if (src.k === 'from') return getAddress(v.you);
+  if (src.k === 'factory') return getAddress(v.factory);
+  return src.v;
+}
+
+/// Work out how this factory derives token addresses, from the reference
+/// launch: the deployer, the init code hash and the salt. Returns a recipe only
+/// if it reproduces the reference token's address exactly, else
+/// { recipe: null, reason }.
+export async function inferVanityRecipe(pub, t, { onProgress } = {}) {
+  if (!t.token) return { recipe: null, reason: 'no reference token to learn from' };
+  const target = getAddress(t.token);
+  const say = (m) => onProgress?.(m);
+
+  // salts: every bytes32 / uint256 argument that is not a known amount or time
+  const salts = t.params
+    .filter((p) => !p.array && (p.type === 'bytes32' || p.type === 'uint256') && p.value !== undefined && !['deadline', 'pay-amount'].includes(p.role))
+    .map((p) => ({ path: p.path.join('.'), type: p.type, raw: p.type === 'bytes32' ? p.value : toHex(p.value, { size: 32 }), prefixed: p.role === 'salt-prefix' }));
+  if (!salts.length) return { recipe: null, reason: 'the launch call has no salt argument to mine' };
+
+  // candidate deployers: the factory, every contract that logged in the
+  // launch, every address those logs mention, then whatever their zero-argument
+  // getters point at
+  say('finding the contract that deployed the token…');
+  const receipt = await pub.getTransactionReceipt({ hash: t.txHash });
+  const seen = new Set([t.factory.toLowerCase()]);
+  for (const l of receipt.logs) {
+    seen.add(l.address.toLowerCase());
+    const words = [...l.topics.slice(1), ...((l.data || '0x').slice(2).match(/.{64}/g) || []).map((w) => '0x' + w)];
+    for (const w of words) if (looksLikeAddress(w)) seen.add(('0x' + w.slice(26)).toLowerCase());
+  }
+  for (const p of t.params) if (p.type === 'address' && typeof p.value === 'string') seen.add(p.value.toLowerCase());
+  seen.delete(target.toLowerCase());
+  for (const x of t.pulled) seen.delete(x.token.toLowerCase());
+
+  const codes = new Map();
+  const loadCodes = async (addrs) => {
+    const fresh = addrs.filter((a) => !codes.has(a));
+    const got = await limited(fresh.map((a) => () => pub.getCode({ address: getAddress(a) })));
+    fresh.forEach((a, i) => codes.set(a, got[i] && got[i] !== '0x' ? got[i] : null));
+  };
+  await loadCodes([...seen]);
+  let contracts = [...seen].filter((a) => codes.get(a)).slice(0, 30);
+
+  // what the candidates' functions are called
+  say('reading the factory’s functions…');
+  const selOf = new Map(contracts.map((a) => [a, pushedSelectors(codes.get(a))]));
+  const sigs = await signaturesForMany([...new Set([...selOf.values()].flat())]);
+
+  // zero-argument getters: addresses widen the deployer search, 32-byte values
+  // that are not addresses or small numbers may be an init code hash
+  const constHashes = new Set();
+  const getterCalls = [];
+  for (const a of contracts) for (const sel of selOf.get(a)) for (const sig of sigs[sel] || []) {
+    if (sig.endsWith('()')) getterCalls.push({ a, sel, sig });
+  }
+  const getterOut = await limited(getterCalls.map((g) => () => pub.call({ to: getAddress(g.a), data: g.sel })));
+  const more = new Set();
+  getterOut.forEach((r) => {
+    const d = r?.data;
+    if (!d || d.length !== 66) return;
+    if (looksLikeAddress(d)) more.add(('0x' + d.slice(26)).toLowerCase());
+    else if (BigInt(d) > 2n ** 160n) constHashes.add(d);
+  });
+  more.delete(target.toLowerCase());
+  await loadCodes([...more]);
+  for (const a of more) if (codes.get(a) && !contracts.includes(a)) contracts.push(a);
+  contracts = contracts.slice(0, 40);
+  const added = contracts.filter((a) => !selOf.has(a));
+  for (const a of added) selOf.set(a, pushedSelectors(codes.get(a)));
+  Object.assign(sigs, await signaturesForMany([...new Set(added.flatMap((a) => selOf.get(a)))].filter((s) => !(s in sigs))));
+
+  // init code hashes to try. A minimal-proxy clone's is fixed by its code.
+  const hashes = [];      // { value, source }
+  const tokenCode = await pub.getCode({ address: target });
+  if (tokenCode && CLONE_RE.test(tokenCode)) hashes.push({ value: keccak256(concat([CLONE_INIT_PREFIX, tokenCode])), source: { kind: 'const', why: 'minimal-proxy clone' } });
+  for (const h of constHashes) hashes.push({ value: h, source: { kind: 'const', why: 'a constant on the factory' } });
+
+  // views that compute it from the launch's strings and addresses, e.g.
+  // Hooke's initCodeHash(name, symbol, minter)
+  say('asking the factory for its init code hash…');
+  const strs = [{ k: 'name', v: t.name }, { k: 'symbol', v: t.symbol }, ...t.params.filter((p) => p.role === 'uri').map((p) => ({ k: 'uri', v: p.value }))].filter((x) => x.v != null);
+  const addrSrc = [{ k: 'from', v: t.from }, { k: 'factory', v: t.factory },
+    ...contracts.filter((a) => a !== t.factory.toLowerCase()).map((a) => ({ k: 'lit', v: getAddress(a) }))];
+  const hashCalls = [];
+  const HASH_NAME = /init.?code|bytecode.?hash|creation.?code/i;
+  for (const a of contracts) for (const sel of selOf.get(a)) for (const sig of sigs[sel] || []) {
+    if (!HASH_NAME.test(sig) || sig.endsWith('()')) continue;
+    let item;
+    try { item = parseAbiItem(`function ${sig} view returns (bytes32)`); } catch { continue; }
+    const pools = item.inputs.map((inp) => inp.type === 'string' ? strs : inp.type === 'address' ? addrSrc : null);
+    if (pools.some((x) => !x)) continue;
+    // every assignment of sources to arguments, capped
+    let combos = [[]];
+    for (const pool of pools) combos = combos.flatMap((c) => pool.filter((s) => !c.includes(s)).map((s) => [...c, s])).slice(0, 400);
+    for (const c of combos) hashCalls.push({ a, item, c });
+  }
+  const hashOut = await limited(hashCalls.map((h) => () => pub.readContract({ address: getAddress(h.a), abi: [h.item], functionName: h.item.name, args: h.c.map((s) => s.v) })));
+  hashOut.forEach((v, i) => {
+    if (typeof v === 'string' && /^0x[0-9a-f]{64}$/i.test(v) && !hashes.some((h) => h.value === v)) {
+      const h = hashCalls[i];
+      hashes.push({ value: v, source: { kind: 'view', address: getAddress(h.a), item: h.item, args: h.c.map((s) => ({ k: s.k, v: s.v })) } });
+    }
+  });
+  if (!hashes.length) return { recipe: null, reason: 'could not find the init code hash - the factory exposes no view for it and the token is not a clone' };
+
+  // the combination that lands exactly on the reference token
+  say('matching the reference address…');
+  const env = { from: t.from, factory: t.factory };
+  for (const h of hashes) for (const d of contracts) for (const s of salts) for (const tr of SALT_TRANSFORMS) {
+    const salt = create2Salt(s.raw, tr, env);
+    if (getContractAddress({ opcode: 'CREATE2', from: getAddress(d), salt, bytecodeHash: h.value }) === target) {
+      return {
+        recipe: {
+          deployer: getAddress(d), hash: h.source.kind === 'const' ? { kind: 'const', value: h.value, why: h.source.why } : h.source,
+          referenceHash: h.value, salt: { path: s.path, type: s.type, prefixed: s.prefixed, transform: tr },
+          suffix: t.vanity || vanitySuffix(target) || '',
+        },
+      };
+    }
+  }
+  return { recipe: null, reason: `found ${hashes.length} init code hash candidate(s) but none reproduces ${target}` };
+}
+
+/// The init code hash for your launch: fixed, or the factory's view re-asked
+/// with your name, ticker, metadata and wallet.
+export async function recipeHash(pub, recipe, v) {
+  if (recipe.hash.kind === 'const') return recipe.hash.value;
+  const { address, item, args } = recipe.hash;
+  return pub.readContract({ address, abi: [item], functionName: item.name, args: args.map((a) => bindArg(a, v)) });
+}
+
+/// Mine a salt for your launch and return the calldata value to put in the
+/// salt argument, the address it lands on, and how it was mined.
+///   v: { name, symbol, uri, you, factory }
+export async function mineForRecipe(pub, recipe, v, { suffix = recipe.suffix, prefix = '', onProgress, signal } = {}) {
+  const { mineVanity, patternFrom } = await import('./vanity.js');
+  const initCodeHash = await recipeHash(pub, recipe, v);
+  const env = { from: getAddress(v.you), factory: getAddress(v.factory) };
+  const tr = recipe.salt.transform;
+  const res = await mineVanity({
+    deployer: recipe.deployer, initCodeHash, pattern: patternFrom({ suffix, prefix }),
+    saltPrefix: recipe.salt.prefixed ? v.you : null,
+    saltFn: tr.kind === 'raw' ? null : (s) => create2Salt(s, tr, env),
+    onProgress, signal,
+  });
+  const taken = await pub.getCode({ address: res.address });
+  if (taken && taken !== '0x') throw new Error(`mined ${res.address}, but a contract already lives there - mine again`);
+  const value = recipe.salt.type === 'uint256' ? BigInt(res.salt).toString() : res.salt;
+  return { ...res, initCodeHash, value };
 }
 
 // --- 4. rebuild --------------------------------------------------------------------------

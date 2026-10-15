@@ -530,6 +530,15 @@
         <label>PARAMETERS <span class="hint">blank = automatic (your name, ticker, metadata, wallet, socials, a fresh deadline); type to override</span></label>
         <div id="mimicParams"></div>
         <div class="hint" id="mimicApprovals" style="font-size:12px;margin-top:8px"></div>
+        <div id="mimicVanity" class="hidden">
+          <label>VANITY ADDRESS <span class="hint">mined on your GPU (the CPU if there is none) when you simulate or deploy</span></label>
+          <div class="row">
+            <div><input type="text" id="mimicSuffix" spellcheck="false" placeholder="address ends with, e.g. 0000"></div>
+            <div style="flex:0 0 110px"><button type="button" class="btn secondary" id="mimicMine" style="width:100%;height:100%">MINE</button></div>
+          </div>
+          <label style="margin-top:10px"><input type="checkbox" id="mimicMineOn" checked style="width:auto;margin-right:6px"> mine a salt for this launch</label>
+          <div class="hint" id="mimicVanityInfo" style="font-size:12px;margin-top:8px"></div>
+        </div>
         <button type="button" class="btn secondary" id="mimicSim" style="margin-top:10px">SIMULATE</button>
       </div>
     </div>
