@@ -69,7 +69,7 @@
         <div><label>Priority tip (SOL)</label><input type="text" id="tip" value="0.001" spellcheck="false"></div>
         <div><label>Slippage bps</label><input type="text" id="slip" value="0" spellcheck="false"></div>
       </div>
-      <div class="hint" style="margin-top:12px">The sell is a market exit (slippage 0 = accept any price — the point is to get out). It fires from <code>Start early</code> before the time and retries through the lock error every ~0.4s until each wallet confirms.</div>
+      <div class="hint" style="margin-top:12px">The sell is a market exit (slippage 0 = accept any price — the point is to get out). It retries every ~0.4s until each wallet confirms. <b>The priority tip is paid only from the unlock moment on</b> (gated by the chain clock): before then it sends zero-priority probes, so you don't burn the tip on attempts that revert while still locked. Raise the tip to land faster the instant it opens.</div>
       <div id="countdown" style="margin-top:10px"></div>
       <button class="btn primary" id="armBtn">ARM</button>
     </div>
