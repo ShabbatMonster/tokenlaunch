@@ -71,29 +71,29 @@ check(/\.app\s*\{[^}]*box-shadow:/.test(css) && !/\.app\s*\{[^}]*(padding|margin
   'the pinstripe around the column is box-shadow, taking no layout space');
 
 // --- wiring ------------------------------------------------------------------------------
+// Deco is one of the looks in the dropdown (Crescent is the default since the
+// presets landed; preset-skins.test.mjs owns the default and the full list).
 for (const page of PAGES) {
   const html = fs.readFileSync(path.join(docs, page), 'utf8');
-  const link = html.indexOf('<link id="skin" rel="stylesheet" href="deco.css">');
+  const link = html.indexOf('<link id="skin" rel="stylesheet"');
   const styleEnd = html.indexOf('</style>');
   check(link > styleEnd && styleEnd > -1 && html.indexOf('<script src="skin.js"></script>') > link,
-    `${page} loads deco.css after its own <style>, then skin.js`);
+    `${page} loads the skin after its own <style>, then skin.js`);
 }
-check(/var current = 'deco'/.test(skinJs), 'Deco is the default look');
-check(/ORDER = \['deco', 'petunia', 'riso', 'classic'\]/.test(skinJs), 'and the switcher cycles Deco, Petunia, Riso, Classic');
+check(/deco:\s*\{\s*href:\s*'deco\.css'/.test(skinJs) && /ORDER = \[[^\]]*'deco'/.test(skinJs), 'skin.js lists Deco');
 check(/\.menubar \.mb-skin\s*\{/.test(css), 'deco styles the switcher it adds to the masthead');
 {
   const html = fs.readFileSync(path.join(docs, 'index.html'), 'utf8').replace(/<script[^>]*src="(?!skin\.js)[^"]*"[^>]*><\/script>/g, '');
   const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'http://localhost/' });
   dom.window.eval(skinJs);
   dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
-  const btn = dom.window.document.querySelector('nav.menubar .mb-skin');
+  const sel = dom.window.document.querySelector('nav.menubar select.mb-skin');
   const link = dom.window.document.getElementById('skin');
-  check(!!btn && /Look: Deco/.test(btn.textContent), 'a first visit opens on Deco, and the switcher says so', btn?.textContent);
-  const seen = [link.getAttribute('href')];
-  for (let i = 0; i < 4 && btn; i++) { btn.click(); seen.push(link.getAttribute('href')); }
-  check(seen.join(' ') === 'deco.css petunia.css riso.css classic.css deco.css',
-    'clicking goes Deco -> Petunia -> Riso -> Classic -> Deco', seen.join(' -> '));
-  check(dom.window.localStorage.getItem('tokenlaunch.skin') === 'deco', 'and remembers where it stopped');
+  check(!!sel && [...sel.options].some((o) => o.value === 'deco' && o.textContent === 'Deco'), 'the dropdown offers Deco');
+  sel.value = 'deco';
+  sel.dispatchEvent(new dom.window.Event('change'));
+  check(link.getAttribute('href') === 'deco.css' && dom.window.localStorage.getItem('tokenlaunch.skin') === 'deco',
+    'choosing it loads deco.css and remembers the choice');
 }
 {
   const html = fs.readFileSync(path.join(docs, 'index.html'), 'utf8').replace(/<script[^>]*src="(?!skin\.js)[^"]*"[^>]*><\/script>/g, '');
