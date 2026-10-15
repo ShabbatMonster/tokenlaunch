@@ -4,9 +4,10 @@
 // order Name, Symbol, Website | Twitter, Select Image, a tool row, the
 // launchpad tabs as a grid, the settings, the dev-buy chips and a full-width
 // Deploy bar. Nothing is folded away, and the pages are buttons down the left
-// edge instead of a bar along the top. The caterpillar-cat photo stays behind
-// it. Judged by eye from headless-Chrome screenshots at 1400px and 390px; this
-// checks what breaks silently.
+// edge instead of a bar along the top. Black and white, centred, no
+// background picture, every colour a token in theme.css. Judged by eye from
+// headless-Chrome screenshots at 1400px and 390px; this checks what breaks
+// silently.
 //
 // Run: node test/js/launch-flow.test.mjs
 
@@ -40,12 +41,12 @@ check(['skin.js', 'classic.css', 'riso.css', 'petunia.css', 'deco.css', 'crescen
   'the old looks, their art, the switcher and the generator are gone');
 
 // --- the sidebar replaces the top bar ----------------------------------------------------
-check(/\.menubar\s*\{[^}]*position:\s*fixed;[^}]*left:\s*0;[^}]*bottom:\s*0;[^}]*width:\s*var\(--t-side\);[^}]*flex-direction:\s*column/.test(css),
+check(/\.menubar\s*\{[^}]*position:\s*fixed;[^}]*left:\s*0;[^}]*bottom:\s*0;[^}]*width:\s*var\(--side\);[^}]*flex-direction:\s*column/.test(css),
   'the page buttons run down the left edge, full height');
-check(/body\s*\{[^}]*padding:[^;]*calc\(var\(--t-side\) \+ 16px\)/.test(css) && !/body\s*\{[^}]*padding-top:\s*\d{2}px/.test(css),
+check(/body\s*\{[^}]*padding:[^;]*calc\(var\(--side\) \+ 16px\)/.test(css) && !/body\s*\{[^}]*padding-top:\s*\d{2}px/.test(css),
   'the body makes room on the left, and no longer pads for a bar on top');
-check(/\.menubar a\[aria-current="page"\]\s*\{[^}]*--t-green/.test(css), 'the current page is marked in the sidebar');
-check(/@media \(max-width: 700px\)\s*\{\s*:root\s*\{\s*--t-side:\s*\d+px/.test(css), 'on a phone the sidebar narrows instead of disappearing');
+check(/\.menubar a\[aria-current="page"\]\s*\{[^}]*background:\s*var\(--fg\)/.test(css), 'the current page is marked in the sidebar');
+check(/@media \(max-width: 700px\)\s*\{\s*:root\s*\{\s*--side:\s*\d+px/.test(css), 'on a phone the sidebar narrows instead of disappearing');
 
 // --- the deploy panel ----------------------------------------------------------------------
 const doc = new JSDOM(fs.readFileSync(path.join(docs, 'index.html'), 'utf8')).window.document;
@@ -72,32 +73,36 @@ check(ids.length === new Set(ids).size, 'no element id was duplicated in the mov
 check(/<div class="pads pad-grid" id="pads">/.test(fs.readFileSync(path.join(docs, 'index.html'), 'utf8')) && /\.pad-grid\s*\{[^}]*display:\s*grid/.test(css),
   'launchpads are a grid of tabs');
 check(!/padsOpen/.test(MAIN) && /if \(!pad\.enabled\) continue;/.test(MAIN), 'all live launchpads are shown at once, with no collapsing');
-check(/b\.dataset\.chain = padChain\(pad\)/.test(MAIN) && /b\.title = pad\.label/.test(MAIN), 'each tab carries its chain, and its full name as a tooltip');
-for (const chain of ['sol', '4663', '56', '8453', '1', '5042']) {
-  check(new RegExp(`\\.pad\\[data-chain="${chain}"\\]::before`).test(css), `chain ${chain} has its own colour dot`);
-}
+check(/b\.title = pad\.label/.test(MAIN), 'each tab carries its full name as a tooltip, for labels a cell cuts short');
 check(/#buyChips\s*\{[^}]*display:\s*grid/.test(css), 'the dev-buy amounts are a row of equal chips');
 
-// the photo stays behind it
-check(/body\s*\{[^}]*url\("caterpillar-cat\.webp"\)/.test(css) && fs.existsSync(path.join(docs, 'caterpillar-cat.webp')),
-  'the caterpillar-cat photo is still the background');
+// black and white, centred, no picture
+check(!/url\(/.test(css.replace(/@import url\([^)]*\);/, '')) && !fs.existsSync(path.join(docs, 'caterpillar-cat.webp')),
+  'there is no background picture, and the old photo is gone');
+check(!/justify-content:\s*flex-end/.test(css), 'the deploy panel sits centred, not pushed to one side');
+const tokens = Object.fromEntries([...css.matchAll(/--([a-z-]+):\s*(#[0-9a-f]{6})/gi)].map((m) => [m[1], m[2]]));
+const grey = (h) => h.slice(1, 3) === h.slice(3, 5) && h.slice(3, 5) === h.slice(5, 7);
+check(Object.entries(tokens).filter(([k]) => k !== 'err').every(([, v]) => grey(v)),
+  'every colour token is a grey - only error red is kept, so a failure never reads like a success',
+  Object.entries(tokens).filter(([, v]) => !grey(v)).map(([k, v]) => `${k} ${v}`).join(', '));
+check(/\.pad\.active[^{]*\{[^}]*background:\s*var\(--fg\)/.test(css) && /#launchBtn[^{]*\{[^}]*background:\s*var\(--fg\)/.test(css),
+  'the selected launchpad and Deploy invert to white');
 
 // --- legibility --------------------------------------------------------------------------------
 const hex = (h) => { const n = h.replace('#', ''); return [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16) / 255); };
 const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 const lum = (h) => { const [r, g, b] = hex(h).map(lin); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
 const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
-const t = Object.fromEntries([...css.matchAll(/--(t-[a-z-]+):\s*(#[0-9a-f]{6})/gi)].map((m) => [m[1], m[2]]));
+const t = tokens;
 for (const [what, fg, bg, min] of [
-  ['text in a field', t['t-text'], t['t-shell'], 7],
-  ['text on the panel', t['t-text'], t['t-panel'], 7],
-  ['labels on the panel', t['t-soft'], t['t-panel'], 4.5],
-  ['hints on the panel', t['t-faint'], t['t-panel'], 4.5],
-  ['the active launchpad tab', t['t-green-hi'], t['t-green-bg'], 4.5],
-  ['white on the Deploy bar', '#ffffff', t['t-green'], 4.5],
-  ['errors on the panel', t['t-red'], t['t-panel'], 4.5],
-  ['warnings on the panel', t['t-amber'], t['t-panel'], 4.5],
-  ['sidebar links', t['t-soft'], t['t-shell'], 4.5],
+  ['text in a field', t['fg'], t['bg-field'], 7],
+  ['text on the panel', t['fg'], t['bg-panel'], 7],
+  ['text on a button', t['fg'], t['bg-btn'], 7],
+  ['soft text on the panel', t['fg-soft'], t['bg-panel'], 4.5],
+  ['labels and hints on the panel', t['fg-faint'], t['bg-panel'], 4.5],
+  ['black on the inverted (selected / Deploy) buttons', t['bg-page'], t['fg'], 7],
+  ['errors on the panel', t['err'], t['bg-panel'], 4.5],
+  ['sidebar links', t['fg-faint'], t['bg-page'], 4.5],
 ]) {
   const r = ratio(fg, bg);
   check(r >= min, `${what} is at least ${min}:1`, `${r.toFixed(2)}:1 (${fg} on ${bg})`);
@@ -105,7 +110,7 @@ for (const [what, fg, bg, min] of [
 
 // --- coverage ------------------------------------------------------------------------------------
 check(/#vampBtn\s*\{[^}]*!important/.test(css), "VAMP's inline purple gradient is replaced");
-check(/\.app > \.note\s*\{[^}]*background:\s*var\(--t-panel\)/.test(css), 'notes sitting directly in the column get a panel, not the photo');
+check(/\.app > \.note\s*\{[^}]*background:\s*var\(--bg-panel\)/.test(css), 'notes sitting directly in the column get a panel like the cards');
 let stranded = [];
 for (const page of PAGES) {
   const html = fs.readFileSync(path.join(docs, page), 'utf8');
