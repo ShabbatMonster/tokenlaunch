@@ -544,6 +544,33 @@
       </div>
     </div>
 
+    <div id="solMimicRow" class="hidden">
+      <label>TOKEN TO MIMIC <span class="hint">a Solana coin from Raydium LaunchLab (raydium.io, bonk.fun, StonkFun) or Meteora DBC</span></label>
+      <div class="row">
+        <div><input type="text" id="smToken" spellcheck="false" placeholder="mint address"></div>
+        <div style="flex:0 0 110px"><button type="button" class="btn secondary" id="smLoad" style="width:100%;height:100%">LOAD</button></div>
+      </div>
+      <div class="hint" id="smInfo" style="font-size:12px;margin-top:8px"></div>
+      <div id="smBody" class="hidden">
+        <div class="hint" id="smSummary" style="font-size:12px;margin-top:8px;line-height:1.6"></div>
+        <div id="smLLOpts" class="hidden">
+          <div class="row" style="margin-top:8px">
+            <div><label>PLATFORM <span class="hint">takes the platform fee - the curve is identical on any of them</span></label><select id="smPlatform"></select></div>
+            <div style="flex:0 0 160px"><label>DEV BUY (<span id="smBuySym">SOL</span>)</label><input type="text" id="smDevBuy" value="0" placeholder="0 = none" spellcheck="false"></div>
+          </div>
+          <input type="text" id="smPlatformCustom" class="hidden" spellcheck="false" placeholder="platform id" style="margin-top:8px">
+        </div>
+        <div id="smDbcOpts" class="hidden">
+          <label style="margin-top:8px">CURVE CONFIG</label>
+          <select id="smDbcMode">
+            <option value="clone">clone it - your own config, the same curve, trading fees to you</option>
+            <option value="reuse">reuse theirs - a pool on their config, with their fee split</option>
+          </select>
+        </div>
+        <button type="button" class="btn secondary" id="smSim" style="margin-top:10px">SIMULATE</button>
+      </div>
+    </div>
+
     <div id="longRow" class="hidden">
       <div class="row">
         <div><label>PAIR AGAINST (STOCK)</label><select id="longQuoteSelect"></select></div>

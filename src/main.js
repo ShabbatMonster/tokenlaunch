@@ -1142,6 +1142,16 @@ const PADS = [
     // Paste that token; its launch call is recovered and decoded, your name,
     // ticker, metadata, wallet and socials are swapped in, and everything else
     // is editable. Simulated before anything is sent. See src/mimic.js.
+    // Solana Mimic - the same curve as a coin you can see. Reads the curve off a
+    // Raydium LaunchLab pool or a Meteora DBC config and launches through the
+    // existing paths with it. See src/solmimic.js.
+    id: 'mimic-sol', label: 'Mimic · Solana', vm: 'sol', enabled: true, family: 'solmimic',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://solscan.io/token/${t}`,
+    nativeSymbol: 'SOL',
+  },
+  {
     id: 'mimic-robinhood', label: 'Mimic · Any Factory', vm: 'evm', enabled: true, family: 'mimic',
     chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
     explorer: 'https://robinhoodchain.blockscout.com',
@@ -3017,6 +3027,11 @@ async function launchSol(pad, inp) {
   });
   const uri = IPFS_GW(metaHash);
 
+  if (pad.family === 'solmimic') {
+    await launchSolMimic(pad, { ...inp, uri });
+    return;
+  }
+
   if (pad.family === 'pump') {
     const devBuySol = $('pumpDevBuy').value.trim() || '0';
     setStatus('loading Solana module...');
@@ -3129,6 +3144,147 @@ async function launchSol(pad, inp) {
     `<a href="${pad.explorer}/tx/${res.poolSig}" target="_blank" rel="noopener">pool tx</a>` +
     (res.devBuy ? ` · dev buy ✓ ~${res.devBuy.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
       + ` ${esc(inp.symbol)} (${res.devBuy.pctOfSupply.toFixed(2)}% of supply)` : '');
+  refreshBalance();
+  renderTokenList();
+}
+
+// --- Solana Mimic -----------------------------------------------------------
+// The coin being copied, as inspectSolCoin read it, between LOAD and launch.
+let smRef = null;
+
+const RAYDIUM_PLATFORM = '4Bu96XjU84XjPDSpveTVf6LYGCkfW5FK7SNkREWcEfV4';
+const BONK_PLATFORM = 'FfYek5vEz23cMkWsdJwG2oa6EphsvXSHrGpdALN4g6W1';
+const smRaw = (raw, dec) => (Number(raw) / 10 ** dec).toLocaleString(undefined, { maximumFractionDigits: 4 });
+
+async function loadSolMimic(pad) {
+  const info = $('smInfo');
+  const mint = $('smToken').value.trim();
+  if (!isSolAddress(mint)) throw new Error('paste the mint address of the coin to mimic');
+  info.textContent = 'reading the coin…';
+  const S = await import('./solana.js');
+  const r = await S.inspectSolCoin(pad.rpc, mint, { onProgress: (m) => { info.textContent = m; } });
+  smRef = null;
+  $('smBody').classList.add('hidden');
+  if (!r.kind) { info.innerHTML = '<span class="err">' + esc(r.reason) + '</span>'; return null; }
+  smRef = r;
+
+  const coin = `${esc(r.name || '?')} / ${esc(r.symbol || '?')}`;
+  const tok = `${r.token2022 ? 'Token-2022' : 'SPL'}${r.transferFeeBps ? `, ${r.transferFeeBps / 100}% transfer fee` : ''}`;
+  if (r.kind === 'launchlab') {
+    const c = r.curve;
+    $('smSummary').innerHTML = `<b>${esc(r.program)}</b> · platform ${esc(r.platformName || r.platformId.slice(0, 8) + '…')}${r.platformCommunity ? ' (community)' : ''} · paired with <b>${esc(r.quoteSymbol)}</b><br>`
+      + `supply ${smRaw(c.supply, c.decimals)} · ${smRaw(c.totalSellA, c.decimals)} sold on the curve · raise ${smRaw(c.totalFundRaisingB, r.quoteDecimals)} ${esc(r.quoteSymbol)}`
+      + ` · ${c.decimals} decimals · ${tok} · migrates to ${r.migrateType.toUpperCase()}`
+      + (c.totalLockedAmount !== '0' ? ` · ${smRaw(c.totalLockedAmount, c.decimals)} vested` : '');
+    const sel = $('smPlatform');
+    sel.innerHTML = '';
+    const opts = [[r.platformId, `theirs - ${r.platformName || r.platformId.slice(0, 8) + '…'}`]];
+    if (r.platformId !== RAYDIUM_PLATFORM) opts.push([RAYDIUM_PLATFORM, 'raydium.io']);
+    if (r.platformId !== BONK_PLATFORM) opts.push([BONK_PLATFORM, 'bonk.fun']);
+    opts.push(['custom', 'another platform id…']);
+    for (const [v, t] of opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); }
+    $('smPlatformCustom').classList.add('hidden');
+    $('smBuySym').textContent = r.quoteSymbol;
+  } else {
+    const s = r.summary;
+    $('smSummary').innerHTML = `<b>${esc(r.program)}</b> · paired with <b>${esc(r.quoteSymbol)}</b> · config ${esc(r.config.slice(0, 8))}…<br>`
+      + `${s.supply ? `supply ${smRaw(s.supply, s.tokenDecimal)} · ` : ''}graduates at ${smRaw(s.migrationQuoteThreshold, r.quoteDecimals ?? 9)} ${esc(r.quoteSymbol)}`
+      + ` · ${s.tokenDecimal} decimals · ${r.baseToken2022 ? 'Token-2022' : 'SPL'} · ${s.curvePoints}-point curve`
+      + ` · creator gets ${s.creatorTradingFeePercentage}% of trading fees on their config`
+      + (s.poolCreationFee !== '0' ? ` · their config charges a ${smRaw(s.poolCreationFee, 9)} SOL pool-creation fee` : '')
+      + `<br>their fees go to ${esc(r.feeClaimer.slice(0, 8))}… - clone to make them yours`;
+  }
+  $('smLLOpts').classList.toggle('hidden', r.kind !== 'launchlab');
+  $('smDbcOpts').classList.toggle('hidden', r.kind !== 'dbc');
+  $('smBody').classList.remove('hidden');
+  info.innerHTML = `<span class="ok">loaded</span> ${coin}${r.graduated ? ' (graduated)' : ''} · <a href="${pad.site(r.mint)}" target="_blank" rel="noopener">solscan</a>`;
+  return r;
+}
+
+// Everything a launch (or a dry run) needs, from the loaded coin and the panel.
+function solMimicOpts(pad, r, inp) {
+  if (r.kind === 'launchlab') {
+    let platformId = $('smPlatform').value;
+    if (platformId === 'custom') platformId = $('smPlatformCustom').value.trim();
+    if (!isSolAddress(platformId)) throw new Error('enter a valid platform id');
+    return {
+      kind: 'launchlab',
+      opts: {
+        rpcUrl: pad.rpc, quoteMint: r.quoteMint, name: inp.name, symbol: inp.symbol, uri: inp.uri,
+        buyAmountUi: $('smDevBuy').value.trim() || '0',
+        migrateType: r.migrateType, platformId, token2022: r.token2022,
+        ...(r.token2022 && r.transferFeeBps ? { transferFeeBps: r.transferFeeBps, maxTransferFee: r.maxTransferFee } : {}),
+        curve: r.curve, decimals: r.curve.decimals, creatorFeeOn: r.creatorFeeOn,
+        onStatus: (m) => setStatus(m),
+      },
+    };
+  }
+  const mode = $('smDbcMode').value;
+  return {
+    kind: 'dbc',
+    mode,
+    opts: {
+      rpcUrl: pad.rpc, quoteMint: r.quoteMint, name: inp.name, symbol: inp.symbol, uri: inp.uri, params: null,
+      ...(mode === 'reuse' ? { reuseConfig: r.config } : { configParams: r.configParams }),
+      baseToken2022: r.baseToken2022,
+      onStatus: (m) => setStatus(m),
+    },
+  };
+}
+
+async function simulateSolMimic(pad) {
+  try {
+    if (!solKeyB58) throw new Error('load your SOL key first - the simulation runs as your wallet');
+    const r = smRef || await loadSolMimic(pad);
+    if (!r) return;
+    const S = await import('./solana.js');
+    const name = $('name').value.trim() || r.name || 'Mimic';
+    const symbol = $('symbol').value.trim() || r.symbol || 'MIMIC';
+    const { kind, mode, opts } = solMimicOpts(pad, r, { name, symbol, uri: 'https://ipfs.io/ipfs/bafkreimimicmimicmimicmimicmimicmimicmimicmimicmimicmimic' });
+    setStatus('simulating…');
+    if (kind === 'launchlab') {
+      const d = await S.launchRaydium({ ...opts, dryRun: true, ownerPubkey: S.solAddressFromSecret(solKeyB58) });
+      $('status').innerHTML = d.ok
+        ? `<span class="ok">SIMULATES CLEAN</span> · same curve: raise ${smRaw(d.curve.totalFundRaisingB, d.curve.quoteDecimals)} ${esc(r.quoteSymbol)}, ${smRaw(d.curve.totalSellA, d.curve.decimals)} on the curve`
+        : `<span class="err">LaunchLab would reject it:</span> ${esc(d.anchorError || JSON.stringify(d.err))}`;
+      return;
+    }
+    const d = await S.launchMeteora({ ...opts, secretKey: solKeyB58, dryRun: true });
+    if (d.simulationError) {
+      $('status').innerHTML = `<span class="err">Meteora would reject it:</span> ${esc((d.logs || []).find((l) => /Error/.test(l)) || d.simulationError)}`;
+      return;
+    }
+    if (mode === 'reuse') {
+      $('status').innerHTML = `<span class="ok">SIMULATES CLEAN</span> · a pool on their config ${esc(r.config.slice(0, 8))}… - their fee split applies`;
+      return;
+    }
+    const diff = d.createdConfig ? S.diffPoolConfigs(d.createdConfig, r.poolConfig) : null;
+    $('status').innerHTML = `<span class="ok">CONFIG SIMULATES CLEAN</span> · `
+      + (diff == null ? 'could not read the simulated config back to compare'
+        : diff.length ? `<span class="err">differs from theirs in: ${esc(diff.join(', '))}</span>`
+          : 'identical to theirs in every curve and fee field, with the fees going to you')
+      + ' · the pool goes out in a second transaction once the config exists';
+  } catch (e) {
+    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+  }
+}
+
+async function launchSolMimic(pad, inp) {
+  const r = smRef || await loadSolMimic(pad);
+  if (!r) throw new Error('that coin cannot be mimicked - see the note under the token field');
+  const S = await import('./solana.js');
+  const { kind, opts } = solMimicOpts(pad, r, inp);
+  const res = kind === 'launchlab'
+    ? await S.launchRaydium({ ...opts, secretKey: solKeyB58 })
+    : await S.launchMeteora({ ...opts, secretKey: solKeyB58 });
+  rememberLaunch(pad, res.mint, inp.symbol);
+  const sig = res.sig || res.poolSig;
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>`
+    + `${esc(r.program)} curve copied from ${esc(r.symbol || r.mint.slice(0, 6))}`
+    + (kind === 'dbc' ? (res.reused ? ' · on their config' : ` · your config ${esc(String(res.config).slice(0, 8))}…`) : '') + '<br>'
+    + `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">token on solscan</a>`
+    + (sig ? ` · <a href="${pad.explorer}/tx/${sig}" target="_blank" rel="noopener">launch tx</a>` : '');
   refreshBalance();
   renderTokenList();
 }
@@ -5106,6 +5262,8 @@ function applyPadUI(pad) {
   const lunch = pad.family === 'lunch';
   const hooke = pad.family === 'hooke';
   const mimic = pad.family === 'mimic';
+  const solMimic = pad.family === 'solmimic';
+  $('solMimicRow').classList.toggle('hidden', !solMimic);   // Solana Mimic: a curve copied off a coin
   $('supplyRow').classList.toggle('hidden', !pad.customSupply || sol);
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
@@ -6269,6 +6427,16 @@ function init() {
     finally { btn.disabled = false; }
   });
   $('mimicSim').addEventListener('click', () => simulateMimic(activePad));
+  $('smLoad').addEventListener('click', async () => {
+    const btn = $('smLoad');
+    btn.disabled = true;
+    try { await loadSolMimic(activePad); }
+    catch (e) { $('smInfo').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>'; }
+    finally { btn.disabled = false; }
+  });
+  $('smToken').addEventListener('input', () => { smRef = null; $('smBody').classList.add('hidden'); });
+  $('smSim').addEventListener('click', () => simulateSolMimic(activePad));
+  $('smPlatform').addEventListener('change', () => $('smPlatformCustom').classList.toggle('hidden', $('smPlatform').value !== 'custom'));
   // a new reference invalidates the loaded one
   for (const id of ['mimicToken', 'mimicTx']) $(id).addEventListener('input', () => { mimicTemplate = null; mimicRecipeP = null; mimicMined = null; $('mimicBody').classList.add('hidden'); });
   // MINE: try the miner now with the name and ticker typed so far; STOP while it runs
