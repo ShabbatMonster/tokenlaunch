@@ -1145,6 +1145,17 @@ const PADS = [
     // Solana Mimic - the same curve as a coin you can see. Reads the curve off a
     // Raydium LaunchLab pool or a Meteora DBC config and launches through the
     // existing paths with it. See src/solmimic.js.
+    // Jupiter Studio (studio.jup.ag): a Meteora DBC launchpad run by Jupiter's
+    // backend, driven through the same API its site uses. Allocation of up to
+    // 80% of supply claimable at migration, and a claim panel for everything
+    // Studio pays out. See src/jupstudio.js.
+    id: 'jup-studio', label: 'Jupiter Studio', vm: 'sol', enabled: true, family: 'jupstudio',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://jup.ag/tokens/${t}`,
+    nativeSymbol: 'SOL',
+  },
+  {
     id: 'mimic-sol', label: 'Mimic · Solana', vm: 'sol', enabled: true, family: 'solmimic',
     rpc: SOL_RPC,
     explorer: 'https://solscan.io',
@@ -3014,6 +3025,12 @@ function raydiumQuoteMint(pad) {
 async function launchSol(pad, inp) {
   if (!solKeyB58) throw new Error('no SOL key stored — re-import your wallet with a SOL private key');
 
+  // Jupiter Studio uploads the image and writes the metadata itself
+  if (pad.family === 'jupstudio') {
+    await launchJupStudio(pad, inp);
+    return;
+  }
+
   setStatus('uploading image + metadata to IPFS...');
   const imgHash = (await uploadToIpfs(logoBlob)).replace('ipfs://', '');
   const metaHash = await uploadJsonToIpfs({
@@ -3146,6 +3163,123 @@ async function launchSol(pad, inp) {
       + ` ${esc(inp.symbol)} (${res.devBuy.pctOfSupply.toFixed(2)}% of supply)` : '');
   refreshBalance();
   renderTokenList();
+}
+
+// --- Jupiter Studio ---------------------------------------------------------
+function jupForm() {
+  const quote = $('jupQuote').value;
+  const pct = $('jupAllocOn').checked ? Number($('jupAllocPct').value.trim() || 0) : 0;
+  return {
+    quote,
+    initialMarketCap: Number($('jupInitMc').value.replace(/,/g, '').trim()),
+    migrationMarketCap: Number($('jupMigMc').value.replace(/,/g, '').trim()),
+    feeBps: Number($('jupFee').value),
+    antiSniping: $('jupAnti').checked,
+    vesting: { pct, months: Number($('jupVest').value), cliffMonths: Number($('jupCliff').value), frequency: $('jupFreq').value },
+  };
+}
+
+let jupLineTimer = null;
+function updateJupUI() {
+  for (const el of document.querySelectorAll('.jupQSym')) el.textContent = $('jupQuote').value;
+  const vesting = $('jupAllocOn').checked;
+  $('jupVestRow').classList.toggle('hidden', !vesting);
+  $('jupCliff').disabled = $('jupFreq').disabled = $('jupVest').value === '0';
+  clearTimeout(jupLineTimer);
+  jupLineTimer = setTimeout(async () => {
+    const line = $('jupLine');
+    try {
+      const f = jupForm();
+      const S = await import('./solana.js');
+      S.studioVesting(f.vesting);                       // validates the allocation
+      const { raise, symbol } = await S.studioRaise(f);
+      const pct = f.vesting.pct;
+      const low = symbol === 'USDC' && raise < 15000;
+      line.innerHTML = `raises <b>${raise.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${esc(symbol)}</b> before graduating`
+        + (pct ? ` · you get <b>${(1e9 * pct / 100).toLocaleString()}</b> tokens (${pct}%) ${f.vesting.months ? `vested over ${f.vesting.months} months` : 'the moment it migrates'}` : '')
+        + (low ? ` · <span class="err">Studio needs about 15,000 USDC - raise the graduation market cap</span>` : '');
+    } catch (e) {
+      line.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    }
+  }, 300);
+}
+
+async function launchJupStudio(pad, inp) {
+  if (!logoBlob) throw new Error('Studio needs a logo image');
+  const S = await import('./solana.js');
+  const f = jupForm();
+  // Studio only takes x.com and t.me links, and http(s) sites
+  const twitter = /^https:\/\/(www\.)?x\.com\//.test(inp.twitter || '') ? inp.twitter : undefined;
+  const website = /^https?:\/\//.test(inp.website || '') ? inp.website : undefined;
+  const image = logoBlob.type ? logoBlob : new Blob([logoBlob], { type: 'image/png' });
+  const res = await S.launchStudio(solKeyB58, { ...f, name: inp.name, symbol: inp.symbol, twitter, website }, {
+    image, description: inp.description, onStatus: (m) => setStatus(m),
+  });
+  rememberLaunch(pad, res.mint, inp.symbol);
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>`
+    + `on Jupiter Studio${f.vesting.pct ? ` · ${f.vesting.pct}% of supply yours at migration - claim it under STUDIO REWARDS` : ''}<br>`
+    + `<a href="https://jup.ag/tokens/${res.mint}" target="_blank" rel="noopener">jup.ag</a> · `
+    + `<a href="https://studio.jup.ag/tokens/${res.mint}" target="_blank" rel="noopener">studio page</a> · `
+    + `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">token</a>`;
+  refreshBalance();
+  renderTokenList();
+}
+
+// The claim panel: every reward Studio pays, per coin, each with its button.
+let jupClaimRows = [];
+async function loadJupClaims() {
+  const box = $('jupClaims');
+  if (!solKeyB58) { box.innerHTML = '<span class="err">load your SOL key to see your Studio rewards</span>'; return; }
+  const S = await import('./solana.js');
+  const me = S.solAddressFromSecret(solKeyB58);
+  box.textContent = 'reading Jupiter Studio…';
+  const typed = $('jupClaimMint').value.trim();
+  const mints = typed ? [typed] : await S.studioCreatorTokens(me);
+  if (!mints.length) { box.textContent = 'this wallet has not launched anything on Jupiter Studio yet'; return; }
+  jupClaimRows = await Promise.all(mints.slice(0, 25).map((m) => S.studioClaimables(m, me).catch((e) => ({ mint: m, error: e.message }))));
+  const fmt = (raw, dec) => (Number(raw) / 10 ** dec).toLocaleString(undefined, { maximumFractionDigits: 4 });
+  const qDec = (c) => (c.dammFee?.quoteMint === 'So11111111111111111111111111111111111111112' ? 9 : 6);
+  box.innerHTML = '';
+  for (const [i, c] of jupClaimRows.entries()) {
+    const row = document.createElement('div');
+    row.className = 'hint';
+    row.style.cssText = 'font-size:12px;margin:6px 0;line-height:1.9';
+    if (c.error) { row.innerHTML = `${esc(c.mint.slice(0, 8))}… <span class="err">${esc(c.error)}</span>`; box.appendChild(row); continue; }
+    const btn = (kind, label, on) => (on && c.mine ? ` <button type="button" class="btn secondary" data-jup="${i}:${kind}" style="padding:2px 10px;font-size:11px">${label}</button>` : '');
+    const v = c.vesting;
+    const parts = [];
+    if (c.dbcFee) parts.push(`curve fees ${fmt(c.dbcFee.unclaimed, qDec(c))}` + btn('dbc-fees', 'CLAIM', BigInt(c.dbcFee.unclaimed || 0) > 0n));
+    if (c.dammFee) parts.push(`pool fees ${fmt(c.dammFee.unclaimed, qDec(c))}` + btn('damm-fees', 'CLAIM', BigInt(c.dammFee.unclaimed || 0) > 0n));
+    else if (c.graduated && !c.mine) parts.push('pool fees: only its creator can see them');
+    if (v) {
+      const opens = new Date(v.cliffTime * 1000);
+      parts.push(`allocation ${fmt(v.claimable, 6)} claimable of ${fmt(v.total, 6)}`
+        + (v.claimable === '0' && Date.now() < opens ? ` (opens ${opens.toLocaleDateString()})` : '')
+        + btn('allocation', 'CLAIM', v.mine && v.claimable !== '0'));
+    } else if (!c.graduated) {
+      parts.push('allocation: claimable once it migrates');
+    }
+    if (c.graduated && c.dammv2PoolAddress) parts.push('graduated LP' + btn('lp', 'CLAIM LP', true));
+    row.innerHTML = `<b>${esc(c.mint.slice(0, 6))}…</b> ${c.graduated ? '(graduated)' : `(curve ${Math.round((c.progress || 0) * 100)}%)`}`
+      + (c.mine ? '' : ` <span class="err">not launched by this wallet - nothing here is yours to claim</span>`) + ' · ' + parts.join(' · ');
+    box.appendChild(row);
+  }
+}
+
+async function jupClaim(i, kind, btn) {
+  const c = jupClaimRows[i];
+  btn.disabled = true;
+  try {
+    const S = await import('./solana.js');
+    setStatus(`claiming ${kind} on ${c.mint.slice(0, 6)}…`);
+    const sig = await S.studioClaim(solKeyB58, kind, c, activePad.rpc);
+    $('status').innerHTML = `<span class="ok">CLAIMED ✓</span> ${esc(kind)} on ${esc(c.mint.slice(0, 8))}… · <a href="https://solscan.io/tx/${esc(String(sig))}" target="_blank" rel="noopener">tx</a>`;
+    await loadJupClaims();
+  } catch (e) {
+    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    btn.disabled = false;
+  }
 }
 
 // --- Solana Mimic -----------------------------------------------------------
@@ -5264,6 +5398,9 @@ function applyPadUI(pad) {
   const mimic = pad.family === 'mimic';
   const solMimic = pad.family === 'solmimic';
   $('solMimicRow').classList.toggle('hidden', !solMimic);   // Solana Mimic: a curve copied off a coin
+  const jup = pad.family === 'jupstudio';
+  $('jupRow').classList.toggle('hidden', !jup);               // Jupiter Studio: curve, allocation, claims
+  if (jup) updateJupUI();
   $('supplyRow').classList.toggle('hidden', !pad.customSupply || sol);
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
@@ -6427,6 +6564,24 @@ function init() {
     finally { btn.disabled = false; }
   });
   $('mimicSim').addEventListener('click', () => simulateMimic(activePad));
+  for (const id of ['jupQuote', 'jupInitMc', 'jupMigMc', 'jupAllocOn', 'jupAllocPct', 'jupVest', 'jupCliff', 'jupFreq', 'jupFee', 'jupAnti']) {
+    $(id).addEventListener('input', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
+    $(id).addEventListener('change', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
+  }
+  $('jupPreset').addEventListener('change', () => {
+    if ($('jupPreset').value === 'meme') {
+      $('jupQuote').value = 'USDC'; $('jupInitMc').value = '5000'; $('jupMigMc').value = '75000';
+      $('jupAllocOn').checked = false; $('jupAnti').checked = true; $('jupFee').value = '100';
+    }
+    updateJupUI();
+  });
+  $('jupClaimLoad').addEventListener('click', () => loadJupClaims().catch((e) => { $('jupClaims').innerHTML = '<span class="err">' + esc(e.message) + '</span>'; }));
+  $('jupClaims').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-jup]');
+    if (!b) return;
+    const [i, kind] = b.dataset.jup.split(':');
+    jupClaim(Number(i), kind, b);
+  });
   $('smLoad').addEventListener('click', async () => {
     const btn = $('smLoad');
     btn.disabled = true;
