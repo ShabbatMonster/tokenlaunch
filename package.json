@@ -4,8 +4,7 @@
   "private": true,
   "scripts": {
     "build": "node build.mjs",
-    "dev": "node build.mjs --dev",
-    "serve": "node tools/serve.mjs"
+    "dev": "node build.mjs --dev"
   },
   "dependencies": {
     "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.10",
