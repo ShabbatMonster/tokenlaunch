@@ -3217,6 +3217,11 @@ async function launchJupStudio(pad, inp) {
   // thing left for afterwards is the one buy transaction.
   const devSol = Number($('jupDevBuy').value.trim() || 0);
   if (!(devSol >= 0)) throw new Error('dev buy must be a number of SOL (0 for none)');
+  // Studio answers every launch it would refuse with a bare "Internal server
+  // error", so catch its reasons here first - before any SOL is swapped
+  const image = logoBlob.type === 'image/gif' || !logoBlob.type ? await squareResize(logoBlob, 512) : logoBlob;
+  setStatus('checking the launch…');
+  await S.studioPreflight(solKeyB58, { name: inp.name, symbol: inp.symbol, image, rpc: pad.rpc, extraSol: devSol });
   let buyRaw = null;
   if (devSol > 0) {
     if (f.antiSniping) throw new Error('turn anti-sniping off to dev buy - the buy would land inside the anti-sniping window and pay up to 99% in fees');
@@ -3235,9 +3240,8 @@ async function launchJupStudio(pad, inp) {
   // Studio only takes x.com and t.me links, and http(s) sites
   const twitter = /^https:\/\/(www\.)?x\.com\//.test(inp.twitter || '') ? inp.twitter : undefined;
   const website = /^https?:\/\//.test(inp.website || '') ? inp.website : undefined;
-  const image = logoBlob.type ? logoBlob : new Blob([logoBlob], { type: 'image/png' });
   const res = await S.launchStudio(solKeyB58, { ...f, name: inp.name, symbol: inp.symbol, twitter, website }, {
-    image, description: inp.description, onStatus: (m) => setStatus(m),
+    image, description: inp.description, onStatus: (m) => setStatus(m), rpc: pad.rpc,
   });
   rememberLaunch(pad, res.mint, inp.symbol);
   let bought = '';

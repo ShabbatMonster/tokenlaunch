@@ -38,6 +38,47 @@ export const STUDIO_QUOTES = {
   JUP: { address: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN', decimals: 6, symbol: 'JUP' },
 };
 
+// Studio refuses names and tickers that pass for these (studio.jup.ag's own
+// rule): a ticker that IS one of the symbols, or a name that CONTAINS one of
+// the names, after upper-casing and dropping everything but A-Z0-9.
+const RESERVED_SYMBOLS = new Set(['JUP', 'JUPSOL', 'JLP', 'SOL', 'USDC', 'USDT', 'WBTC', 'WETH', 'BTC', 'ETH']);
+const RESERVED_NAMES = ['JUPITER', 'JUPSOL', 'SOLANA', 'USDCOIN', 'TETHER', 'WRAPPEDBTC', 'ETHEREUM'];
+const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+export const studioReservedName = ({ name, symbol }) => RESERVED_SYMBOLS.has(norm(symbol)) || RESERVED_NAMES.some((n) => norm(name).includes(n));
+
+/// Studio's logo rules: PNG, JPEG or WebP, 2MB at most, and the bytes must be
+/// the type they claim. Returns the problem, or null.
+export async function studioImageProblem(image) {
+  if (!image) return 'Studio needs a logo image';
+  const type = image.type === 'image/jpg' ? 'image/jpeg' : image.type;
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(type)) return `Studio takes PNG, JPEG or WebP logos, not ${image.type || 'this file'}`;
+  if (image.size > 2 * 1024 * 1024) return 'Studio caps the logo at 2MB';
+  const b = new Uint8Array(await image.slice(0, 16).arrayBuffer());
+  const real = b[0] === 137 && b[1] === 80 && b[2] === 78 && b[3] === 71 ? 'image/png'
+    : b[0] === 255 && b[1] === 216 && b[2] === 255 ? 'image/jpeg'
+      : b[0] === 82 && b[1] === 73 && b[2] === 70 && b[3] === 70 && b[8] === 87 && b[9] === 69 && b[10] === 66 && b[11] === 80 ? 'image/webp' : null;
+  if (real !== type) return `the logo says ${type} but its bytes are ${real || 'something else'}`;
+  return null;
+}
+
+/// About what a Studio launch costs in SOL: rent for the config, pool, two
+/// vaults, mint and metadata (~0.018), Jupiter's creator account, and fees.
+export const STUDIO_LAUNCH_SOL = 0.03;
+
+/// Everything Studio would refuse, checked before anything is spent: the name,
+/// the logo, and enough SOL for the launch plus any dev buy.
+export async function studioPreflight(secret, { name, symbol, image, rpc, extraSol = 0 }) {
+  if (studioReservedName({ name, symbol })) throw new Error('Studio refuses that name or ticker - it reads as JUP, SOL, USDC, USDT, BTC or ETH (or Jupiter, Solana, Tether, Ethereum in the name)');
+  const bad = await studioImageProblem(image);
+  if (bad) throw new Error(bad);
+  if (rpc) {
+    const conn = typeof rpc === 'string' ? new Connection(rpc, 'confirmed') : rpc;
+    const sol = (await conn.getBalance(keypairOf(secret).publicKey, 'confirmed')) / 1e9;
+    const need = STUDIO_LAUNCH_SOL + Number(extraSol || 0);
+    if (sol < need) throw new Error(`the SOL wallet holds ${sol.toFixed(4)} SOL - this launch needs about ${need.toFixed(3)} (${STUDIO_LAUNCH_SOL} for rent and fees${extraSol ? ` + ${extraSol} dev buy` : ''})`);
+  }
+}
+
 /// Studio's own presets ("Meme" is LOW).
 export const STUDIO_SUPPLY = 1_000_000_000;
 export const STUDIO_MAX_CLAIMABLE_PCT = 80;
@@ -109,6 +150,7 @@ export function studioCreateRequest(secret, {
   if (!name || !symbol) throw new Error('name and ticker are required');
   if (name.length > 32) throw new Error('Studio caps the name at 32 characters');
   if (symbol.length > 10) throw new Error('Studio caps the ticker at 10 characters');
+  if (studioReservedName({ name, symbol })) throw new Error('Studio refuses that name or ticker - it reads as JUP, SOL, USDC, USDT, BTC or ETH (or Jupiter, Solana, Tether, Ethereum in the name)');
   if (![100, 200].includes(Number(feeBps))) throw new Error('Studio trading fee is 1% or 2%');
   if (!(initialMarketCap > 0) || !(migrationMarketCap > initialMarketCap)) throw new Error('graduation market cap must be above the starting one');
   const timestamp = Date.now();
@@ -149,9 +191,23 @@ const signB64 = (secret, txB64) => {
 };
 
 /// Launch on Jupiter Studio. `image` is a Blob/File (the logo); returns the mint.
+///   rpc:          checked against first - balance, then a simulation of the
+///                 signed launch - because Studio answers any launch that would
+///                 fail on chain with a bare "Internal server error"
 ///   simulateWith: a Connection - simulate the signed launch and stop
-export async function launchStudio(secret, opts, { image, description, onStatus, simulateWith } = {}) {
+export async function launchStudio(secret, opts, { image, description, onStatus, simulateWith, rpc } = {}) {
   const say = (m) => onStatus?.(m);
+  if (!simulateWith) {
+    const bad = await studioImageProblem(image);
+    if (bad) throw new Error(bad);
+  }
+  const conn = rpc ? (typeof rpc === 'string' ? new Connection(rpc, 'confirmed') : rpc) : null;
+  if (conn) {
+    const sol = (await conn.getBalance(keypairOf(secret).publicKey, 'confirmed')) / 1e9;
+    if (sol < STUDIO_LAUNCH_SOL) {
+      throw new Error(`the SOL wallet holds ${sol.toFixed(4)} SOL - a Studio launch needs about ${STUDIO_LAUNCH_SOL} SOL for rent and fees`);
+    }
+  }
   say('asking Jupiter Studio to build the launch…');
   const { transaction, request } = await studioCreateTx(secret, { ...opts, imageContentType: image?.type || opts.imageContentType || 'image/png' });
   const { tx, b64: signed } = signB64(secret, transaction);
@@ -160,9 +216,20 @@ export async function launchStudio(secret, opts, { image, description, onStatus,
     return { dryRun: true, request, tx, err: sim.value.err, logs: sim.value.logs || [] };
   }
   if (!image) throw new Error('Studio needs a logo image');
+  if (conn) {
+    say('simulating the launch…');
+    const sim = await conn.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
+    if (sim.value.err) {
+      const why = sim.value.err === 'AccountNotFound' ? 'the SOL wallet has never been funded'
+        : (sim.value.logs || []).find((l) => /insufficient|Error Message|Error:/i.test(l))?.replace(/^Program log: /, '') || JSON.stringify(sim.value.err);
+      throw new Error('the launch would fail on chain, so Studio would refuse it: ' + why);
+    }
+  }
   say('submitting to Jupiter Studio…');
   const form = new FormData();
-  form.append('headerImage', image);
+  // a named file, as the Studio site sends it
+  const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[image.type] || 'png';
+  form.append('headerImage', typeof File !== 'undefined' && !(image instanceof File) ? new File([image], `logo.${ext}`, { type: image.type }) : image);
   if (description) form.append('content', description);
   form.append('transaction', signed);
   form.append('owner', keypairOf(secret).publicKey.toBase58());
