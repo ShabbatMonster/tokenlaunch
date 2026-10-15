@@ -13,17 +13,19 @@ import bs58 from 'bs58';
 import {
   loadBordrCoin, walletHolding, buildSignedSell, simulateSell, classifyError, pubkeyOfSecret,
 } from './bordrSell.js';
+import { HELIUS_RPCS, PUBLIC_RPC } from './rpc.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const short = (s) => s.slice(0, 4) + '…' + s.slice(-4);
 
-// RPCs the sells are blasted to in parallel. The first is the user's Helius (or
-// the public fallback); more can be pasted in. Jito is added if a tip is set.
-const DEFAULT_RPCS = [
-  (localStorage.getItem('solRpc') || '').trim(),
-  'https://api.mainnet-beta.solana.com',
-].filter(Boolean);
+// RPCs for reads and for blasting the sells. The app's own Helius endpoints go
+// first (the public RPC 403s on getAccountInfo, which is what the old default
+// hit); a key saved by the main app, and any pasted into the RPC box, come
+// before them. The public RPC is only a last resort.
+let savedRpc = '';
+try { savedRpc = (localStorage.getItem('solRpc') || '').trim(); } catch { /* private window */ }
+const DEFAULT_RPCS = [savedRpc, ...HELIUS_RPCS, PUBLIC_RPC].filter(Boolean);
 const JITO = [
   'https://mainnet.block-engine.jito.wtf/api/v1/transactions',
   'https://ny.mainnet.block-engine.jito.wtf/api/v1/transactions',
@@ -40,7 +42,22 @@ function rpcList() {
   const extra = $('rpcs').value.split(/\s+/).map((s) => s.trim()).filter((s) => /^https?:\/\//.test(s));
   return [...new Set([...extra, ...DEFAULT_RPCS])];
 }
-const primary = () => new Connection(rpcs[0] || DEFAULT_RPCS[0] || 'https://api.mainnet-beta.solana.com', 'confirmed');
+let readRpc = null;                 // the endpoint found working for reads
+const primary = () => new Connection(readRpc || rpcs[0] || DEFAULT_RPCS[0], 'confirmed');
+
+// The first RPC in the list that answers a read, so a 403 or a rate-limit on
+// one endpoint just moves to the next instead of failing the whole load.
+async function pickReadRpc() {
+  for (const url of rpcs) {
+    try {
+      const c = new Connection(url, 'confirmed');
+      await c.getLatestBlockhash('confirmed');
+      readRpc = url;
+      return url;
+    } catch { /* try the next */ }
+  }
+  throw new Error('no RPC answered - paste a working Solana RPC in the RPC box (the public one blocks these reads)');
+}
 
 function setStatus(m, cls = '') { $('status').innerHTML = cls ? `<span class="${cls}">${esc(m)}</span>` : esc(m); }
 
@@ -49,6 +66,8 @@ async function loadCoin() {
   const mint = $('mint').value.trim();
   if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) throw new Error('paste the coin mint address');
   rpcs = rpcList();
+  setStatus('finding a working RPC…');
+  await pickReadRpc();
   setStatus('reading the coin…');
   coin = await loadBordrCoin(primary(), mint);
   const unlock = coin.earlyUnlockAt;
