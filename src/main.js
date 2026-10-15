@@ -1138,6 +1138,17 @@ const PADS = [
     nativeSymbol: 'ETH', curve: null,
   },
   {
+    // Mimic - launch on whatever Robinhood factory another token came from.
+    // Paste that token; its launch call is recovered and decoded, your name,
+    // ticker, metadata, wallet and socials are swapped in, and everything else
+    // is editable. Simulated before anything is sent. See src/mimic.js.
+    id: 'mimic-robinhood', label: 'Mimic · Any Factory', vm: 'evm', enabled: true, family: 'mimic',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
+    nativeSymbol: 'ETH', curve: null,
+  },
+  {
     // lunch.fun - tax tokens paired against stocks on Robinhood chain. Defaults
     // match what the pad is for: HOOD as the pairing, 1%/1% tax, single-asset
     // holder rewards. Basket rewards are a toggle. See launchLunch().
@@ -1959,6 +1970,13 @@ async function launch() {
 
   setStatus('uploading image to IPFS...');
   const logo = await uploadToIpfs(logoBlob);
+
+  if (pad.family === 'mimic') {
+    await launchMimic(pad, { name, symbol, logo, description, twitter, website });
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
 
   if (pad.family === 'hooke') {
     await launchHooke(pad, { name, symbol, logo, description, twitter, website });
@@ -3721,6 +3739,177 @@ async function launchHooke(pad, { name, symbol, logo, description, twitter, webs
   return { token: predicted, hash };
 }
 
+// --- Mimic ------------------------------------------------------------------
+// The loaded template lives here between LOAD and LAUNCH.
+let mimicTemplate = null;
+
+const MIMIC_ROLE_HINT = {
+  name: 'auto: your name', symbol: 'auto: your ticker', uri: 'auto: your metadata', you: 'auto: your wallet',
+  'salt-prefix': 'auto: your wallet + the original salt', deadline: 'auto: now + 10 min',
+  twitter: 'auto: your Twitter (blank clears theirs)', website: 'auto: your website (blank clears theirs)',
+  telegram: 'auto: cleared', description: 'auto: your description', 'pay-amount': 'what the launch pays in',
+};
+
+async function loadMimic(pad) {
+  const info = $('mimicInfo');
+  const M = await import('./mimic.js');
+  const pub = M.mimicPublicClient(pad.rpc);
+  const token = $('mimicToken').value.trim();
+  let tx = $('mimicTx').value.trim();
+  if (!tx && !/^0x[0-9a-fA-F]{40}$/.test(token)) throw new Error('paste the token to mimic (0x… address), or its launch transaction');
+  if (tx && !/^0x[0-9a-fA-F]{64}$/.test(tx)) throw new Error('that launch transaction hash is not valid');
+  if (!tx) {
+    info.textContent = 'finding that token\u2019s launch…';
+    tx = await M.findLaunchTx(pub, token, { onProgress: (m2) => { info.textContent = m2; } });
+  }
+  info.textContent = 'decoding the launch…';
+  const t = await M.loadTemplate(pub, tx, { token: /^0x[0-9a-fA-F]{40}$/.test(token) ? token : null });
+  mimicTemplate = t;
+
+  $('mimicFactory').value = t.factory;
+  $('mimicValue').value = M.fmtEth(t.value);
+  const box = $('mimicParams');
+  box.innerHTML = '';
+  for (const p of t.params) {
+    const key = p.path.join('.');
+    const wrap = document.createElement('div');
+    const lab = document.createElement('label');
+    lab.innerHTML = `${esc(key)} · ${esc(p.name)} <span class="hint">${esc(p.type)}</span>`
+      + (p.role ? ` <span class="badge ready">${esc(p.role)}</span>` : '');
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.spellcheck = false;
+    inp.dataset.path = key;
+    const auto = p.role && p.role !== 'pay-amount' && p.role !== 'bytes32';
+    if (auto) { inp.value = ''; inp.placeholder = `${MIMIC_ROLE_HINT[p.role] || 'auto'} · was ${M.describeValue(p).slice(0, 60)}`; }
+    else inp.value = M.describeValue(p);
+    wrap.append(lab, inp);
+    box.appendChild(wrap);
+  }
+  $('mimicBody').classList.remove('hidden');
+  const pays = t.pulled.map((x) => `${M.fmtUnits(x.amount, x.decimals)} ${esc(x.symbol)}`).join(', ');
+  $('mimicApprovals').innerHTML = (pays ? `The original launch paid <b>${pays}</b>; Mimic approves whatever the pay-amount fields say before sending.` : 'The original launch paid no tokens - only the ETH above.')
+    + (t.warnings.length ? '<br><span class="err">' + t.warnings.map(esc).join('<br>') + '</span>' : '');
+  info.innerHTML = `<span class="ok">loaded</span> ${esc(t.name || '?')} / ${esc(t.symbol || '?')} · <code>${esc(t.signature || t.selector)}</code> on ${esc(t.factory.slice(0, 8))}… · `
+    + `<a href="${pad.explorer}/tx/${t.txHash}" target="_blank" rel="noopener">launch tx</a>`;
+  return t;
+}
+
+function mimicEdits() {
+  const edits = {};
+  for (const inp of document.querySelectorAll('#mimicParams input[data-path]')) {
+    if (inp.value.trim() !== '') edits[inp.dataset.path] = inp.value.trim();
+  }
+  return edits;
+}
+
+// Give the new metadata the same shape as the original's: ipfs://CID, a bare
+// CID, or a gateway URL.
+function mimicUriLike(original, hash) {
+  if (!original) return 'ipfs://' + hash;
+  if (/^ipfs:\/\//i.test(original)) return 'ipfs://' + hash;
+  if (/^(Qm|b[a-z2-7]{20})/.test(original) && !/\//.test(original)) return hash;
+  const m = original.match(/^(https?:\/\/[^]*?\/ipfs\/)/i);
+  if (m) return m[1] + hash;
+  return 'ipfs://' + hash;
+}
+
+async function mimicPrepare(pad, inp, { forReal }) {
+  const M = await import('./mimic.js');
+  const t = mimicTemplate || await loadMimic(pad);
+  const pub = publicClientFor(pad);
+  const factory = $('mimicFactory').value.trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(factory)) throw new Error('the factory address is not valid');
+  const value = parseEther(($('mimicValue').value.trim() || '0'));
+  const edits = mimicEdits();
+  let uri;
+  if (forReal) {
+    setStatus('publishing token metadata to IPFS...');
+    const meta = { name: inp.name, symbol: inp.symbol, description: inp.description, image: inp.logo };
+    if (inp.twitter) meta.twitter = inp.twitter;
+    if (inp.website) meta.website = inp.website;
+    const hash = await uploadJsonToIpfs(meta);
+    const originalUri = t.params.find((p) => p.role === 'uri')?.value;
+    uri = mimicUriLike(originalUri, hash);
+  }
+  const data = M.buildCalldata({ ...t, factory }, {
+    name: inp.name, symbol: inp.symbol, uri, you: account.address, description: inp.description,
+    deadline: BigInt(Math.floor(Date.now() / 1000) + 600), twitter: inp.twitter, website: inp.website,
+  }, edits);
+  const approvals = M.approvalsFor({ ...t, factory }, edits);
+  return { M, t, pub, factory, value, data, approvals };
+}
+
+async function simulateMimic(pad) {
+  const status = (m) => setStatus(m);
+  try {
+    if (!account) throw new Error('load your EVM key first - the simulation runs as your wallet');
+    const name = $('name').value.trim() || mimicTemplate?.name || 'Mimic';
+    const symbol = $('symbol').value.trim() || mimicTemplate?.symbol || 'MIMIC';
+    const { M, pub, factory, value, data, approvals } = await mimicPrepare(pad, { name, symbol, description: $('desc').value.trim() || undefined, twitter: $('twitter').value.trim(), website: $('website').value.trim() }, { forReal: false });
+    const short = [];
+    for (const a of approvals) {
+      const [bal, alw] = await Promise.all([
+        pub.readContract({ address: a.token, abi: M.MIMIC_ERC20, functionName: 'balanceOf', args: [account.address] }),
+        pub.readContract({ address: a.token, abi: M.MIMIC_ERC20, functionName: 'allowance', args: [account.address, a.spender] }),
+      ]);
+      if (bal < a.amount) short.push(`needs ${M.fmtUnits(a.amount, a.decimals)} ${a.symbol}, wallet has ${M.fmtUnits(bal, a.decimals)}`);
+      else if (alw < a.amount) short.push(`${a.symbol} will be approved to the factory at launch`);
+    }
+    status('simulating...');
+    const out = await M.simulateLaunch(pub, { account: account.address, to: factory, data, value });
+    const addr = out.length >= 66 ? '0x' + out.slice(26, 66) : null;
+    $('status').innerHTML = '<span class="ok">SIMULATES CLEAN</span>'
+      + (addr && /^0x[0-9a-f]{40}$/i.test(addr) && !/^0x0{40}$/i.test(addr) ? ` · would create <code>${addr}</code>` : '')
+      + (short.length ? '<br>' + short.map(esc).join('<br>') : '');
+  } catch (e) {
+    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+  }
+}
+
+async function launchMimic(pad, inp) {
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+  const { M, t, pub, factory, value, data, approvals } = await mimicPrepare(pad, inp, { forReal: true });
+
+  for (const a of approvals) {
+    const bal = await pub.readContract({ address: a.token, abi: M.MIMIC_ERC20, functionName: 'balanceOf', args: [account.address] });
+    if (bal < a.amount) throw new Error(`this launch pays ${M.fmtUnits(a.amount, a.decimals)} ${a.symbol}; the wallet has ${M.fmtUnits(bal, a.decimals)}`);
+    const alw = await pub.readContract({ address: a.token, abi: M.MIMIC_ERC20, functionName: 'allowance', args: [account.address, a.spender] });
+    if (alw < a.amount) {
+      setStatus(`approving ${a.symbol} to the factory...`);
+      const ah = await wallet.writeContract({ address: a.token, abi: M.MIMIC_ERC20, functionName: 'approve', args: [a.spender, a.amount] });
+      await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+    }
+  }
+
+  setStatus('simulating the launch...');
+  await M.simulateLaunch(pub, { account: account.address, to: factory, data, value });
+
+  setStatus('sending the launch...');
+  const hash = await wallet.sendTransaction({ to: factory, data, value });
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error('launch reverted: ' + hash);
+
+  // the new token: a fresh mint in this receipt that is not one of the tokens paid in
+  const TRANSFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+  const paid = new Set(approvals.map((a) => a.token.toLowerCase()));
+  const minted = [...new Set(receipt.logs
+    .filter((l) => l.topics[0] === TRANSFER && l.topics[1] === '0x' + '0'.repeat(64) && l.topics.length === 3 && !paid.has(l.address.toLowerCase()))
+    .map((l) => l.address))];
+  let token = minted[0] || null;
+  for (const m2 of minted) {
+    const nm = await pub.readContract({ address: m2, abi: M.MIMIC_ERC20, functionName: 'name' }).catch(() => null);
+    if (nm === inp.name) { token = m2; break; }
+  }
+  if (token) rememberLaunch(pad, token, inp.symbol);
+  $('status').innerHTML =
+    `<span class="ok">LAUNCHED ✓</span> ${token ? esc(token) : '(see tx)'}<br>` +
+    `via ${esc(factory)} · ${esc(t.signature || t.selector)}<br>` +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a>`;
+  return { token, hash };
+}
+
 // live line under the Hooke row: fee, pair, and what the wallet can pay with
 async function updateHookeUI(pad) {
   const sym = { ETH: 'USDG', USDG: 'USDG', HXMAX: 'hXMAX' }[$('hookePay').value] || 'USDG';
@@ -4823,6 +5012,7 @@ function applyPadUI(pad) {
   const long = pad.family === 'long';
   const lunch = pad.family === 'lunch';
   const hooke = pad.family === 'hooke';
+  const mimic = pad.family === 'mimic';
   $('supplyRow').classList.toggle('hidden', !pad.customSupply || sol);
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
@@ -4839,12 +5029,13 @@ function applyPadUI(pad) {
   $('longRow').classList.toggle('hidden', !long);       // long.xyz: stock numeraire + supply
   $('lunchRow').classList.toggle('hidden', !lunch);     // lunch.fun: pairing, tax, rewards, quote-buy
   $('hookeRow').classList.toggle('hidden', !hooke);     // Hooke: hXMAX pair, USDG/hXMAX dev buy
+  $('mimicRow').classList.toggle('hidden', !mimic);     // Mimic: any factory, recovered from a token
   if (hooke) updateHookeUI(pad);
   // B20 has no bonding curve / dev buy — you mint a fixed on-chain allocation. Its
   // "distributions" are the insider allocations (minted at creation, not transfers).
   // flap/pons-v2 have their own dev-buy field (in the pair token), so hide the ETH one.
-  $('devBuyBlock').classList.toggle('hidden', sol || uni || b20 || flap || ponsV2 || lunch || hooke);
-  $('distroBlock').classList.toggle('hidden', sol || uni || dyor || flap || hooke);
+  $('devBuyBlock').classList.toggle('hidden', sol || uni || b20 || flap || ponsV2 || lunch || hooke || mimic);
+  $('distroBlock').classList.toggle('hidden', sol || uni || dyor || flap || hooke || mimic);
   if (flap) updateFlapUI(pad);
   if (ponsV2) updatePonsUI(pad);
   if (v4curve) updateV4CurveUI(pad);
@@ -5977,6 +6168,16 @@ function init() {
 
   $('pumpQuote').addEventListener('change', () => { paintPumpDevSym(); paintPumpDepth(); });
   $('hookePay').addEventListener('change', () => { if (activePad.family === 'hooke') updateHookeUI(activePad); });
+  $('mimicLoad').addEventListener('click', async () => {
+    const btn = $('mimicLoad');
+    btn.disabled = true;
+    try { await loadMimic(activePad); }
+    catch (e) { $('mimicInfo').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>'; }
+    finally { btn.disabled = false; }
+  });
+  $('mimicSim').addEventListener('click', () => simulateMimic(activePad));
+  // a new reference invalidates the loaded one
+  for (const id of ['mimicToken', 'mimicTx']) $(id).addEventListener('input', () => { mimicTemplate = null; $('mimicBody').classList.add('hidden'); });
   $('pumpQuoteCustom').addEventListener('input', () => { paintPumpDevSym(); paintPumpDepth(); });
 
   for (const id of ['solSupply', 'solMigPct']) $(id).addEventListener('input', paintSolSupplyHint);
