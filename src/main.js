@@ -3740,8 +3740,12 @@ async function launchHooke(pad, { name, symbol, logo, description, twitter, webs
 }
 
 // --- Mimic ------------------------------------------------------------------
-// The loaded template lives here between LOAD and LAUNCH.
+// The loaded template lives here between LOAD and LAUNCH, with the vanity
+// recipe (if the reference address is a mined one) and the last mined salt.
 let mimicTemplate = null;
+let mimicRecipeP = null;
+let mimicMined = null;
+let mimicMineAbort = null;
 
 const MIMIC_ROLE_HINT = {
   name: 'auto: your name', symbol: 'auto: your ticker', uri: 'auto: your metadata', you: 'auto: your wallet',
@@ -3792,7 +3796,57 @@ async function loadMimic(pad) {
     + (t.warnings.length ? '<br><span class="err">' + t.warnings.map(esc).join('<br>') + '</span>' : '');
   info.innerHTML = `<span class="ok">loaded</span> ${esc(t.name || '?')} / ${esc(t.symbol || '?')} · <code>${esc(t.signature || t.selector)}</code> on ${esc(t.factory.slice(0, 8))}… · `
     + `<a href="${pad.explorer}/tx/${t.txHash}" target="_blank" rel="noopener">launch tx</a>`;
+
+  // a mined reference address: learn the factory's CREATE2 recipe in the background
+  mimicMined = null;
+  mimicRecipeP = null;
+  $('mimicVanity').classList.toggle('hidden', !t.vanity);
+  if (t.vanity) {
+    $('mimicSuffix').value = t.vanity;
+    const vi = $('mimicVanityInfo');
+    vi.textContent = 'working out how this factory picks addresses…';
+    mimicRecipeP = M.inferVanityRecipe(pub, t, { onProgress: (m2) => { vi.textContent = m2; } })
+      .catch((e) => ({ recipe: null, reason: e?.message || String(e) }));
+    mimicRecipeP.then(async (r) => {
+      if (mimicTemplate !== t) return;
+      if (!r.recipe) { vi.innerHTML = '<span class="err">cannot mine for this factory: ' + esc(r.reason) + '</span>'; return; }
+      const V = await import('./vanity.js');
+      const gpu = await V.gpuAvailable();
+      const h = r.recipe.hash.kind === 'const' ? r.recipe.hash.why : `${r.recipe.hash.item.name}() on ${r.recipe.deployer.slice(0, 8)}…`;
+      vi.innerHTML = `<span class="ok">recipe found</span> - deployer ${esc(r.recipe.deployer.slice(0, 8))}…, init code hash from ${esc(h)}, salt argument ${esc(r.recipe.salt.path)}`
+        + (r.recipe.salt.transform.kind === 'raw' ? '' : ` (hashed: ${esc(r.recipe.salt.transform.kind)})`)
+        + ` · mining on ${gpu && r.recipe.salt.transform.kind === 'raw' ? 'your GPU (' + esc(gpu.name) + ')' : 'the CPU'}`;
+      const salt = document.querySelector(`#mimicParams input[data-path="${r.recipe.salt.path}"]`);
+      if (salt) { salt.value = ''; salt.placeholder = 'auto: mined vanity salt · type one to override'; }
+    });
+  }
   return t;
+}
+
+// Mine (or reuse) a vanity salt for exactly these inputs.
+async function mimicMine(pad, v) {
+  const r = mimicRecipeP ? await mimicRecipeP : null;
+  if (!r?.recipe) throw new Error('this factory\'s address recipe could not be worked out' + (r?.reason ? ': ' + r.reason : ''));
+  const suffix = $('mimicSuffix').value.trim().toLowerCase().replace(/^0x/, '');
+  const key = JSON.stringify([v.name, v.symbol, v.uri, v.you, v.factory, suffix]);
+  if (mimicMined?.key === key) return mimicMined.res;
+  const M = await import('./mimic.js');
+  const vi = $('mimicVanityInfo');
+  mimicMineAbort?.abort();
+  const ctl = mimicMineAbort = new AbortController();
+  const res = await M.mineForRecipe(publicClientFor(pad), r.recipe, v, {
+    suffix, signal: ctl.signal,
+    onProgress: (p) => {
+      if (p.note) { vi.textContent = p.note; return; }
+      const rate = p.tries / Math.max(p.ms, 1) / 1000;
+      const msg = `mining …${suffix} on ${p.engine === 'gpu' ? 'GPU (' + (p.gpu || 'WebGPU') + ')' : 'CPU'}: ${(p.tries / 1e6).toFixed(1)}M tries, ${rate.toFixed(1)}M/s`;
+      vi.textContent = msg;
+      setStatus(msg);
+    },
+  });
+  vi.innerHTML = `<span class="ok">mined</span> <code>${esc(res.address)}</code> on the ${res.engine.toUpperCase()}${res.gpu ? ' (' + esc(res.gpu) + ')' : ''} in ${(res.ms / 1000).toFixed(2)}s`;
+  mimicMined = { key, res };
+  return res;
 }
 
 function mimicEdits() {
@@ -3832,12 +3886,21 @@ async function mimicPrepare(pad, inp, { forReal }) {
     const originalUri = t.params.find((p) => p.role === 'uri')?.value;
     uri = mimicUriLike(originalUri, hash);
   }
+  // vanity: mine a salt for this exact name/ticker/metadata/wallet/factory,
+  // unless one was typed into the salt field
+  let mined = null;
+  const recipe = mimicRecipeP ? (await mimicRecipeP).recipe : null;
+  if (t.vanity && recipe && $('mimicMineOn').checked && !edits[recipe.salt.path]) {
+    const originalUri = t.params.find((p) => p.role === 'uri')?.value;
+    mined = await mimicMine(pad, { name: inp.name, symbol: inp.symbol, uri: uri ?? originalUri, you: account.address, factory });
+    edits[recipe.salt.path] = String(mined.value);
+  }
   const data = M.buildCalldata({ ...t, factory }, {
     name: inp.name, symbol: inp.symbol, uri, you: account.address, description: inp.description,
     deadline: BigInt(Math.floor(Date.now() / 1000) + 600), twitter: inp.twitter, website: inp.website,
   }, edits);
   const approvals = M.approvalsFor({ ...t, factory }, edits);
-  return { M, t, pub, factory, value, data, approvals };
+  return { M, t, pub, factory, value, data, approvals, mined };
 }
 
 async function simulateMimic(pad) {
@@ -3846,7 +3909,7 @@ async function simulateMimic(pad) {
     if (!account) throw new Error('load your EVM key first - the simulation runs as your wallet');
     const name = $('name').value.trim() || mimicTemplate?.name || 'Mimic';
     const symbol = $('symbol').value.trim() || mimicTemplate?.symbol || 'MIMIC';
-    const { M, pub, factory, value, data, approvals } = await mimicPrepare(pad, { name, symbol, description: $('desc').value.trim() || undefined, twitter: $('twitter').value.trim(), website: $('website').value.trim() }, { forReal: false });
+    const { M, pub, factory, value, data, approvals, mined } = await mimicPrepare(pad, { name, symbol, description: $('desc').value.trim() || undefined, twitter: $('twitter').value.trim(), website: $('website').value.trim() }, { forReal: false });
     const short = [];
     for (const a of approvals) {
       const [bal, alw] = await Promise.all([
@@ -3861,6 +3924,7 @@ async function simulateMimic(pad) {
     const addr = out.length >= 66 ? '0x' + out.slice(26, 66) : null;
     $('status').innerHTML = '<span class="ok">SIMULATES CLEAN</span>'
       + (addr && /^0x[0-9a-f]{40}$/i.test(addr) && !/^0x0{40}$/i.test(addr) ? ` · would create <code>${addr}</code>` : '')
+      + (mined ? ` · mined <code>${mined.address}</code>${addr && addr.toLowerCase() !== mined.address.toLowerCase() ? ' <span class="err">(differs from what the factory returns)</span>' : ''}` : '')
       + (short.length ? '<br>' + short.map(esc).join('<br>') : '');
   } catch (e) {
     $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
@@ -6177,7 +6241,21 @@ function init() {
   });
   $('mimicSim').addEventListener('click', () => simulateMimic(activePad));
   // a new reference invalidates the loaded one
-  for (const id of ['mimicToken', 'mimicTx']) $(id).addEventListener('input', () => { mimicTemplate = null; $('mimicBody').classList.add('hidden'); });
+  for (const id of ['mimicToken', 'mimicTx']) $(id).addEventListener('input', () => { mimicTemplate = null; mimicRecipeP = null; mimicMined = null; $('mimicBody').classList.add('hidden'); });
+  // MINE: try the miner now with the name and ticker typed so far; STOP while it runs
+  $('mimicMine').addEventListener('click', async () => {
+    const btn = $('mimicMine');
+    if (btn.dataset.busy) { mimicMineAbort?.abort(); return; }
+    btn.dataset.busy = '1'; btn.textContent = 'STOP';
+    try {
+      if (!account) throw new Error('load your EVM key first - the salt is tied to your wallet');
+      const t = mimicTemplate || await loadMimic(activePad);
+      const originalUri = t.params.find((p) => p.role === 'uri')?.value;
+      await mimicMine(activePad, { name: $('name').value.trim() || t.name, symbol: $('symbol').value.trim() || t.symbol, uri: originalUri, you: account.address, factory: $('mimicFactory').value.trim() });
+    } catch (e) { $('mimicVanityInfo').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>'; }
+    finally { delete btn.dataset.busy; btn.textContent = 'MINE'; }
+  });
+  $('mimicSuffix').addEventListener('input', () => { mimicMined = null; });
   $('pumpQuoteCustom').addEventListener('input', () => { paintPumpDevSym(); paintPumpDepth(); });
 
   for (const id of ['solSupply', 'solMigPct']) $(id).addEventListener('input', paintSolSupplyHint);

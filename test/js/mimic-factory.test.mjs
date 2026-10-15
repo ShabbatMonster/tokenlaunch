@@ -6,7 +6,9 @@
 // two real launches:
 //
 //   WOLFPACK (Hooke)  - discovery from the token alone, every role, the USDG it
-//                       paid, the vanity-address warning
+//                       paid, and its 0000 address: the CREATE2 recipe is
+//                       inferred, a salt mined for a new coin, and the factory
+//                       accepts that launch (and refuses an unmined one)
 //   a live Pons v2    - rebuilt as a different coin from a different wallet,
 //                       and the factory accepts it in simulation
 //
@@ -14,8 +16,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { decodeFunctionData, getAddress } from 'viem';
-import { mimicPublicClient, findLaunchTx, loadTemplate, buildCalldata, approvalsFor, parseParam } from '../../src/mimic.js';
+import { decodeFunctionData, getAddress, keccak256, encodeAbiParameters, parseAbi, getContractAddress } from 'viem';
+import { mimicPublicClient, findLaunchTx, loadTemplate, buildCalldata, approvalsFor, parseParam, inferVanityRecipe, mineForRecipe, vanitySuffix, create2Salt } from '../../src/mimic.js';
+import { mineCpu, patternFrom, matches } from '../../src/vanity.js';
 
 const pub = mimicPublicClient();
 const fails = [];
@@ -51,6 +54,43 @@ check(args[0].slice(42) === w.params[0].value.slice(42), 'keeping the rest of th
 check(args[6].amountIn === 75_000_000n || args[6][1] === 75_000_000n, 'an edited field is applied');
 const ap = approvalsFor(w, { '6.1': '75000000' });
 check(ap.length === 1 && ap[0].amount === 75_000_000n && ap[0].spender === w.factory, 'and the USDG approval follows the edited amount, to the factory');
+
+// --- WOLFPACK's vanity address: infer the recipe, mine, launch -------------------------
+check(vanitySuffix(WOLFPACK) === '0000' && vanitySuffix('0x5199ea953d71d6a5413be1b2efecd26aacab7777') === '7777' && vanitySuffix('0x5199ea953d71d6a5413be1b2efecd26aacab1234') === null,
+  'vanity endings are recognised (and a plain address is not one)');
+const { recipe, reason } = await inferVanityRecipe(pub, w);
+check(!!recipe, 'the CREATE2 recipe is worked out from the reference token alone', reason || '');
+if (recipe) {
+  check(recipe.deployer === getAddress('0xe0cbefb318a7cdbce6330dc7fab6fadc679cd6d1'), 'the deployer is the contract behind the factory, not the one called');
+  check(recipe.hash.kind === 'view' && recipe.hash.item.name === 'initCodeHash' && recipe.hash.args.map((a) => a.k).join() === 'name,symbol,factory',
+    'the init code hash comes from initCodeHash(name, symbol, minter), re-asked with your values', recipe.hash.args?.map((a) => a.k).join());
+  check(recipe.salt.path === '0' && recipe.salt.prefixed && recipe.salt.transform.kind === 'raw', 'the salt is argument 0, used raw, prefixed with the launcher');
+  const v = { name: 'Mimic Test', symbol: 'MIMIC', uri: 'ipfs://bafyNEW', you: ME, deadline: deadline() };
+  const m = await mineForRecipe(pub, recipe, { ...v, factory: w.factory });
+  check(m.address.toLowerCase().endsWith('0000') && m.salt.toLowerCase().startsWith(ME.toLowerCase()), 'a salt is mined: the address ends in 0000 and the salt starts with your wallet', `${m.address} in ${m.tries} tries`);
+  const HOOKE_VIEW = parseAbi(['function computeAddress(bytes32 salt, string name, string symbol, address minter) view returns (address)']);
+  const onChain = await pub.readContract({ address: recipe.deployer, abi: HOOKE_VIEW, functionName: 'computeAddress', args: [m.salt, v.name, v.symbol, w.factory] });
+  check(getAddress(onChain) === m.address, "the factory's own computeAddress agrees with the mined address", onChain);
+  // USDG keeps balances at slot 1 and allowances at slot 3
+  const slot = (a, s) => keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [a, BigInt(s)]));
+  const allowSlot = (o, sp, s) => keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'bytes32' }], [sp, slot(o, s)]));
+  const BIG = '0x' + 'f'.repeat(30).padStart(64, '0');
+  const ov = [{ address: ME, balance: 10n ** 20n }, { address: w.pulled[0].token, stateDiff: [{ slot: slot(ME, 1), value: BIG }, { slot: allowSlot(ME, w.factory, 3), value: BIG }] }];
+  const sim = (edits) => pub.call({ account: ME, to: w.factory, data: buildCalldata(w, v, edits), value: w.value, stateOverride: ov }).then((r) => r.data, () => null);
+  const ok = await sim({ [recipe.salt.path]: m.value });
+  check(!!ok && getAddress('0x' + ok.slice(26, 66)) === m.address, 'Hooke accepts the mined launch from a different wallet and creates exactly the mined address', ok ? '0x' + ok.slice(26, 66) : 'reverted');
+  check(await sim({}) === null, 'and refuses the same launch with an unmined salt - the mining is what makes it work');
+}
+
+// salts hashed with the sender first are mined on the CPU through the same transform
+{
+  const env = { from: ME, factory: w.factory };
+  const tr = { kind: 'encode', who: 'from' };
+  const hash = '0x' + '11'.repeat(32), dep = '0x' + '33'.repeat(20);
+  const r = await mineCpu({ deployer: dep, initCodeHash: hash, pattern: patternFrom({ suffix: '777' }), saltFn: (s) => create2Salt(s, tr, env) });
+  const addr = getContractAddress({ opcode: 'CREATE2', from: dep, salt: create2Salt(r.salt, tr, env), bytecodeHash: hash });
+  check(addr === r.address && matches(addr, patternFrom({ suffix: '777' })), 'a factory that hashes the salt with the sender is mined through that hash', addr);
+}
 
 // --- a live Pons v2 launch, rebuilt and simulated -------------------------------------
 const PONS = '0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e';
@@ -97,6 +137,11 @@ check(/id: 'mimic-robinhood'[^}]*family: 'mimic'/.test(MAIN), 'the app lists a M
 check(/if \(pad\.family === 'mimic'\) \{\s*await launchMimic/.test(MAIN), 'launching on it goes through launchMimic');
 check(['mimicToken', 'mimicTx', 'mimicLoad', 'mimicFactory', 'mimicValue', 'mimicParams', 'mimicSim'].every((id) => HTML.includes(`id="${id}"`)),
   'with a token field, an optional tx field, LOAD, an editable factory and value, the parameter editor and SIMULATE');
+check(['mimicVanity', 'mimicSuffix', 'mimicMine', 'mimicMineOn', 'mimicVanityInfo'].every((id) => HTML.includes(`id="${id}"`)),
+  'a vanity block: the ending to mine for, MINE, an on/off switch and progress');
+const prep = MAIN.slice(MAIN.indexOf('async function mimicPrepare'), MAIN.indexOf('async function simulateMimic'));
+check(prep.indexOf('mimicMine(') > -1 && prep.indexOf('mimicMine(') < prep.indexOf('buildCalldata') && prep.indexOf('uploadJsonToIpfs') < prep.indexOf('mimicMine('),
+  'the salt is mined after the metadata is pinned (it can feed the init code hash) and before the call is built');
 const launchFn = MAIN.slice(MAIN.indexOf('async function launchMimic'), MAIN.indexOf('async function updateHookeUI'));
 check(launchFn.indexOf('simulateLaunch') > -1 && launchFn.indexOf('simulateLaunch') < launchFn.indexOf('sendTransaction'), 'a launch is simulated before it is sent');
 check(launchFn.indexOf('approve') > -1 && launchFn.indexOf('approve') < launchFn.indexOf('sendTransaction'), 'and whatever the original paid in is approved first');
