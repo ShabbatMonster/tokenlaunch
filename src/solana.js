@@ -167,33 +167,61 @@ export function meteoraTokenBadge(mint) {
   )[0];
 }
 
-/// Is this mint allowed as a DBC quote? Classic SPL mints need no badge.
+/// Token-2022 extensions Meteora's DBC accepts on a quote WITHOUT a badge.
+///
+/// The badge is a gate on dangerous extensions, not on Token-2022 itself. A
+/// metadata-only Token-2022 mint - which is every pump.fun coin - is accepted
+/// bare: proven by simulating a badge-less create_config against LPEPE and
+/// EJUe9f9b (accepted) and against JACKPOT, whose only extra is a transfer hook
+/// (refused, InvalidTokenBadge), and by a live launch (6ANt9RWB…, 2026-10-15)
+/// whose config and pool carried no badge at all. Extensions outside this set
+/// are not assumed either way: the launch simulates create_config first and
+/// reports Meteora's own answer.
+export const DBC_BADGE_FREE_EXTENSIONS = new Set(['metadataPointer', 'tokenMetadata']);
+
+/// Is this mint allowed as a DBC quote, and does it need its badge attached?
+/// Classic SPL mints need no badge; neither do metadata-only Token-2022 mints.
 export async function meteoraQuoteAllowed(rpcUrl, mint) {
   const connection = new Connection(rpcUrl, 'confirmed');
-  const { program, decimals } = await readQuoteMint(connection, new PublicKey(mint));
+  const { program, decimals, extensions } = await readQuoteMint(connection, new PublicKey(mint));
   const isToken2022 = program.equals(TOKEN_2022_PROGRAM_ID);
-  if (!isToken2022) return { allowed: true, isToken2022, decimals, badge: null, reason: null };
+  if (!isToken2022) return { allowed: true, isToken2022, decimals, extensions, badge: null, badgeExists: false, needsBadge: false, reason: null, note: null };
   const badge = meteoraTokenBadge(mint);
-  const info = await connection.getAccountInfo(badge);
+  const badgeExists = !!(await connection.getAccountInfo(badge));
+  const gated = extensions.filter((e) => !DBC_BADGE_FREE_EXTENSIONS.has(e));
+  const needsBadge = gated.length > 0;
+  let note;
+  if (badgeExists) note = 'quote is Token-2022 and badged by Meteora — ok';
+  else if (!needsBadge) note = 'quote is Token-2022 with only metadata extensions — Meteora needs no badge for it';
+  else note = `quote is Token-2022 with ${gated.join(', ')} and no Meteora badge — `
+    + 'Meteora may refuse it; the config is simulated before anything is sent';
   return {
-    allowed: !!info, isToken2022, decimals, badge: badge.toBase58(),
-    reason: info ? null
-      : 'Meteora has not badged this Token-2022 mint, so its DBC will not accept it as a quote. '
-        + 'Only Meteora can create a badge (create_token_badge is admin-gated), so this needs asking them.',
+    allowed: true, isToken2022, decimals, extensions, badge: badge.toBase58(), badgeExists, needsBadge,
+    likelyRefused: needsBadge && !badgeExists, reason: null, note,
   };
 }
 
-/// Append the badge to a create_config the SDK just built.
+/// Explain an InvalidTokenBadge refusal in terms of the quote's extensions.
+function badgeRefusal(quote, extensions) {
+  const gated = (extensions || []).filter((e) => !DBC_BADGE_FREE_EXTENSIONS.has(e));
+  return `Meteora refused ${quote.toBase58()} as a quote (InvalidTokenBadge): it is Token-2022 with `
+    + `${gated.join(', ') || 'extensions'} that Meteora only accepts from a badged mint, and it has no badge. `
+    + 'Creating a badge is admin-gated, so either ask Meteora to badge it or pick a quote they accept - '
+    + 'any pump.fun coin works, since those carry only metadata extensions.';
+}
+
+/// Append the badge to a create_config the SDK just built - when one exists.
+/// Returns the badge, or null when there is none to attach (classic SPL, or a
+/// Token-2022 mint Meteora takes bare).
 async function attachTokenBadge(connection, tx, quote, quoteProgram, say) {
   if (!quoteProgram.equals(TOKEN_2022_PROGRAM_ID)) return null;
   const badge = meteoraTokenBadge(quote);
   const info = await connection.getAccountInfo(badge);
   if (!info) {
-    throw new Error(
-      `Meteora has not badged ${quote.toBase58()} as a DBC quote token. Its create_config checks for a `
-      + `token badge at ${badge.toBase58()} and there is none, which is the InvalidTokenBadge error. `
-      + 'Creating one is admin-gated, so either ask Meteora to badge it or pick a quote they already have.',
-    );
+    // no badge to pass: a metadata-only mint does not need one, and for any
+    // other mint the pre-send simulation returns Meteora's verdict
+    if (say) say('quote is Token-2022 without a Meteora badge - sending create_config without one');
+    return null;
   }
   const target = tx.instructions.find(
     (ix) => ix.programId.equals(DBC_PROGRAM) && Buffer.from(ix.data).subarray(0, 8).equals(CREATE_CONFIG_DISC),
@@ -213,14 +241,15 @@ async function readQuoteMint(connection, quote) {
   if (!v) throw new Error('quote mint not found on-chain');
   const decimals = v.data?.parsed?.info?.decimals;
   if (decimals == null) throw new Error('quote mint is not a valid SPL/Token-2022 mint');
-  return { program: v.owner, decimals };
+  const extensions = (v.data?.parsed?.info?.extensions || []).map((e) => e.extension);
+  return { program: v.owner, decimals, extensions };
 }
 
 // build the create-pool tx directly. The SDK's createPool hardcodes the classic
 // Token program for the quote vault, which breaks Token-2022 quote mints — so we
 // call the instruction ourselves and pass the quote's real token program. Base
 // is always a fresh SPL mint (initializeVirtualPoolWithSplToken).
-async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quoteProgram, name, symbol, uri }) {
+async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quoteProgram, name, symbol, uri, badge = null }) {
   const creator = client.creator;
   const pool = deriveDbcPoolAddress(quote, baseMint, config);
   const baseVault = deriveDbcTokenVaultAddress(pool, baseMint);
@@ -234,9 +263,12 @@ async function buildCreatePoolTx(client, { payer, config, baseMint, quote, quote
   // 0x17c0). A real pool init against a Token-2022 quote carries SEVENTEEN
   // accounts: the sixteen the IDL declares, then the badge. Read off
   // 3Di3sA4EVXPEuVEgmNVKF1..., an xStock-quoted pool.
+  // Only when the badge exists: a metadata-only Token-2022 quote (a pump.fun
+  // coin) opens its vault with the sixteen declared accounts and nothing more,
+  // as the live pool init in 6ANt9RWB…'s launch did.
   const extra = [];
-  if (quoteProgram.equals(TOKEN_2022_PROGRAM_ID)) {
-    extra.push({ pubkey: meteoraTokenBadge(quote), isSigner: false, isWritable: false });
+  if (quoteProgram.equals(TOKEN_2022_PROGRAM_ID) && badge) {
+    extra.push({ pubkey: badge, isSigner: false, isWritable: false });
   }
 
   const tx = await creator.program.methods
@@ -415,11 +447,16 @@ export async function launchMeteora(opts) {
 
   const connection = new Connection(rpcUrl, 'confirmed');
   const payer = keypairFromSecret(secretKey);
+  // A dry run can simulate as another, funded wallet, so Meteora's own checks run
+  // instead of the simulation stopping at AccountNotFound on an empty test key.
+  // Only ever used with dryRun: nothing is sent, and nothing signs for it.
+  const simulateAs = dryRun && opts.simulateAs ? new PublicKey(opts.simulateAs) : null;
+  const actor = simulateAs ?? payer.publicKey;
   const client = new DynamicBondingCurveClient(connection, 'confirmed');
   const feeClaimer = new PublicKey(params.feeClaimer);
   const quote = new PublicKey(quoteMint);
 
-  const { program: quoteProgram, decimals: quoteDecimals } = await readQuoteMint(connection, quote);
+  const { program: quoteProgram, decimals: quoteDecimals, extensions: quoteExtensions } = await readQuoteMint(connection, quote);
   const config = Keypair.generate();
   const baseMint = Keypair.generate();
   const curveConfig = buildLaunchConfig(quoteDecimals, params);
@@ -444,10 +481,10 @@ export async function launchMeteora(opts) {
 
   say('creating bonding-curve config…');
   const createConfigTx = await client.partner.createConfig({
-    payer: payer.publicKey,
+    payer: actor,
     config: config.publicKey,
     feeClaimer,                       // all trading fees claimable here
-    leftoverReceiver: payer.publicKey,
+    leftoverReceiver: actor,
     quoteMint: quote,
     ...curveConfig,
   });
@@ -461,15 +498,20 @@ export async function launchMeteora(opts) {
     const target = createConfigTx.instructions.find(
       (ix) => ix.programId.equals(DBC_PROGRAM) && Buffer.from(ix.data).subarray(0, 8).equals(CREATE_CONFIG_DISC),
     );
-    createConfigTx.feePayer = payer.publicKey;
+    createConfigTx.feePayer = actor;
     createConfigTx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
-    createConfigTx.sign(payer, config);
-    const sim = await connection.simulateTransaction(createConfigTx);
+    if (simulateAs) createConfigTx.partialSign(config); else createConfigTx.sign(payer, config);
+    // simulating as a wallet that has not signed: web3.js checks a legacy
+    // transaction's signatures before sending it to simulate, so compile it to
+    // a versioned one and let the node skip signature verification
+    const sim = simulateAs
+      ? await connection.simulateTransaction(new VersionedTransaction(createConfigTx.compileMessage()), { sigVerify: false, replaceRecentBlockhash: true })
+      : await connection.simulateTransaction(createConfigTx);
     // The pool cannot be simulated before its config exists, but its shape can
     // still be checked - and the shape is exactly what was wrong.
     const { tx: poolTx, pool: dryPool } = await buildCreatePoolTx(client, {
-      payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
-      quote, quoteProgram, name, symbol, uri,
+      payer: actor, config: config.publicKey, baseMint: baseMint.publicKey,
+      quote, quoteProgram, name, symbol, uri, badge,
     });
     const poolIx = poolTx.instructions.find((ix) => ix.programId.equals(DBC_PROGRAM));
 
@@ -477,7 +519,7 @@ export async function launchMeteora(opts) {
     let firstBuyAccounts = [];
     if (!devBuyAmount.isZero()) {
       const buyIxs = await buildFirstBuyIxs(client, {
-        payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
+        payer: actor, config: config.publicKey, baseMint: baseMint.publicKey,
         quote, quoteProgram, pool: dryPool, amountIn: devBuyAmount,
       });
       const swapIx = buyIxs.find((ix) => ix.programId.equals(DBC_PROGRAM));
@@ -485,16 +527,18 @@ export async function launchMeteora(opts) {
       poolTx.add(...buyIxs);
     }
     addPriority(poolTx);
-    poolTx.feePayer = payer.publicKey;
+    poolTx.feePayer = actor;
     poolTx.recentBlockhash = createConfigTx.recentBlockhash;
-    poolTx.sign(payer, baseMint);
+    if (simulateAs) poolTx.partialSign(baseMint); else poolTx.sign(payer, baseMint);
 
     return {
       dryRun: true,
       devBuy: devBuyPreview,
       firstBuyAccounts,
       poolTxInstructions: poolTx.instructions.length,
-      poolTxBytes: poolTx.serialize().length,
+      // measured without requiring every signature, since a simulate-as run
+      // has no signature from the wallet it simulates as
+      poolTxBytes: poolTx.serialize({ requireAllSignatures: false, verifySignatures: false }).length,
       quoteProgram: quoteProgram.toBase58(),
       tokenBadge: badge ? badge.toBase58() : null,
       createConfigAccounts: target.keys.map((k) => k.pubkey.toBase58()),
@@ -505,13 +549,28 @@ export async function launchMeteora(opts) {
   }
 
 
+  // Ask Meteora before paying for it. A Token-2022 quote without a badge is
+  // fine when it carries only metadata extensions and refused otherwise; the
+  // simulation is the program's own answer, so an unknown extension is never
+  // blocked on a guess and a gated one never costs a failed transaction.
+  {
+    createConfigTx.feePayer = payer.publicKey;
+    createConfigTx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+    const pre = await connection.simulateTransaction(createConfigTx, [payer, config]);
+    if (pre.value.err) {
+      const code = pre.value.err?.InstructionError?.[1]?.Custom;
+      if (code === 6080) throw new Error(badgeRefusal(quote, quoteExtensions));
+      const anchor = (pre.value.logs || []).find((l) => l.includes('Error'));
+      throw new Error(`create_config would fail: ${anchor || JSON.stringify(pre.value.err)}`);
+    }
+  }
   const configSig = await sendAndConfirmTransaction(connection, createConfigTx, [payer, config], { commitment: 'confirmed' });
   say(`config created (${configSig.slice(0, 8)}…); minting token + opening curve…`);
 
   await waitForAccount(connection, config.publicKey);
   const { tx: createPoolTx, pool } = await buildCreatePoolTx(client, {
     payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
-    quote, quoteProgram, name, symbol, uri,
+    quote, quoteProgram, name, symbol, uri, badge,
   });
 
   // appended, not sent separately: in a tx of its own the buy would sit a block
