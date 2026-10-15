@@ -147,9 +147,9 @@
   </nav>
 
 
-<div class="app" id="appRoot" style="display:none">
+<div class="app app-deploy" id="appRoot" style="display:none">
   <header>
-    <h1>LAUNCHER</h1>
+    <h1>Token Deploy</h1>
     <div style="display:flex;gap:10px;align-items:center">
       <a id="keysLink" style="color:var(--dim);font-size:12px;text-decoration:none;cursor:pointer" title="import / update keys">🔑 keys</a>
       <div class="wallet-chip" id="walletChip" title="wallet">
@@ -160,36 +160,35 @@
     </div>
   </header>
 
-  <div class="card">
-    <label>1 · LAUNCHPAD</label>
-    <div class="pads" id="pads"></div>
+  <div class="card deploy">
+    <label>NAME</label>
+    <input type="text" id="name" autocomplete="off" spellcheck="false" placeholder="Token name">
 
-    <label>2 · YOUR COIN</label>
-    <div style="display:flex; gap:12px; align-items:flex-start;">
+    <label>SYMBOL</label>
+    <input type="text" id="symbol" autocomplete="off" spellcheck="false" placeholder="TICKER">
+
+    <div class="row">
+      <div><label>WEBSITE (OPT.)</label><input type="text" id="website" placeholder="https://example.com"></div>
+      <div><label>TWITTER</label><input type="text" id="twitter" placeholder="https://x.com/..."></div>
+    </div>
+
+    <div class="select-image">Select Image</div>
+    <div class="image-row">
       <div class="drop" id="drop">+</div>
-      <div class="drop-hint">click, drag, or just paste (ctrl+v) an image anywhere</div>
+      <div class="drop-hint">click, drag, or paste (ctrl+v) an image</div>
     </div>
     <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
 
-
-    <div class="row">
-      <div>
-        <label>NAME</label>
-        <input type="text" id="name" autocomplete="off" spellcheck="false">
-      </div>
-      <div style="flex:0 0 130px">
-        <label>TICKER</label>
-        <input type="text" id="symbol" autocomplete="off" spellcheck="false">
-      </div>
+    <div class="toolbar">
+      <button type="button" id="vampBtn"
+        style="width:100%;margin:10px 0 2px;padding:9px;background:linear-gradient(90deg,#7c3aed,#db2777);color:#fff;border:none;border-radius:8px;font:inherit;font-weight:600;letter-spacing:1px;cursor:pointer">
+        🧛 VAMP — copy a token's CA, then click to steal its name/ticker/pic/socials
+      </button>
+      <div class="hint" id="vampHint" style="font-size:11px;margin:0 0 8px"></div>
     </div>
 
-    <details class="more" id="moreOptions">
-      <summary>More options <span class="more-hint">vamp · socials · dev buy · pairing · launchpad settings</span></summary>
-    <button type="button" id="vampBtn"
-      style="width:100%;margin:10px 0 2px;padding:9px;background:linear-gradient(90deg,#7c3aed,#db2777);color:#fff;border:none;border-radius:8px;font:inherit;font-weight:600;letter-spacing:1px;cursor:pointer">
-      🧛 VAMP — copy a token's CA, then click to steal its name/ticker/pic/socials
-    </button>
-    <div class="hint" id="vampHint" style="font-size:11px;margin:0 0 8px"></div>
+    <label>LAUNCHPAD</label>
+    <div class="pads pad-grid" id="pads"></div>
 
     <div class="row hidden" id="supplyRow">
       <div>
@@ -249,7 +248,7 @@
           starting price.</div></div>
       </div>
 
-      <details class="adv" id="solParams">
+      <details class="adv" id="solParams" open>
         <summary>bonding-curve parameters (pump.fun defaults)</summary>
         <div class="row">
           <div><label>FEE (BPS)</label><input type="text" id="solFeeBps" value="100" spellcheck="false"></div>
@@ -408,7 +407,7 @@
         <div><label>FEE WALLET</label><input type="text" id="uniFeeWallet" value="0xbE8af7E12B536aB55fbaf92EDbb512972e0504dA" spellcheck="false"></div>
       </div>
       <div class="hint" style="font-size:11px;margin-top:4px">supply pooled vs your ETH on Uniswap V2 · <b>LP burnt</b> · not mintable · no owner. Fee &gt; 0 taxes each buy/sell to the wallet (mainnet); set 0 for a plain no-fee token.</div>
-      <details class="adv">
+      <details class="adv" open>
         <summary>slippage</summary>
         <label>SLIPPAGE (%)</label>
         <input type="text" id="uniSlippage" value="2">
@@ -575,17 +574,6 @@
       </div>
     </div>
 
-    <div class="row">
-      <div><label>TWITTER (OPT.)</label><input type="text" id="twitter" placeholder="https://x.com/..."></div>
-      <div><label>WEBSITE (OPT.)</label><input type="text" id="website" placeholder="https://..."></div>
-    </div>
-
-    <div id="devBuyBlock">
-      <label>DEV BUY</label>
-      <div class="pads" id="buyChips"></div>
-      <div class="buy-preview" id="buyPreview"></div>
-    </div>
-
     <div id="distroBlock">
     <label>DISTRO</label>
     <div class="pads">
@@ -603,7 +591,7 @@
     </div>
     </div>
 
-    <details class="adv" id="descBlock">
+    <details class="adv" id="descBlock" open>
       <summary>description · fee recipient</summary>
       <label>DESCRIPTION</label>
       <textarea id="desc" rows="2">aaaaaaaaaa</textarea>
@@ -612,17 +600,21 @@
       <div class="hint" style="font-size:11px;margin-top:4px">creator trading fees route here. leave empty = your wallet.</div>
     </details>
 
+    <div id="devBuyBlock">
+      <label>DEV BUY</label>
+      <div class="pads" id="buyChips"></div>
+      <div class="buy-preview" id="buyPreview"></div>
+    </div>
 
-      <label>DIAGNOSTICS</label>
+    <button class="launch-btn" id="launchBtn">Deploy</button>
+    <div class="fee-note" id="feeNote"></div>
+    <div class="status" id="status"></div>
+    <div class="diag">
     <div class="hint" id="abyssLine" style="font-size:11px;margin-bottom:4px;cursor:pointer"
          title="click to re-check whether Abyss Launch has opened"></div>
     <div class="hint" id="rpcLine" style="font-size:11px;margin-bottom:6px;cursor:pointer"
          title="click to re-check every endpoint"></div>
-    </details>
-
-    <button class="launch-btn" id="launchBtn">LAUNCH</button>
-    <div class="fee-note" id="feeNote"></div>
-    <div class="status" id="status"></div>
+    </div>
   </div>
 
   <div class="card" style="margin-top:14px">

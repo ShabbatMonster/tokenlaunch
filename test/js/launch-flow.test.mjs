@@ -1,11 +1,12 @@
-// One look, one short launch flow.
+// The deploy panel: one look, every launch option open, pages in a sidebar.
 //
-// The site used to carry seven switchable looks; it now has a single one
-// (docs/theme.css) over a photo background, and the launcher's form is three
-// steps - pick a launchpad, give the coin an image, a name and a ticker,
-// LAUNCH - with everything optional folded into one "More options" drawer.
-// Judged by eye from headless-Chrome screenshots at 1280px and 390px, closed
-// and opened. This checks what breaks silently.
+// Modelled on a reference "Token Deploy" panel: a dense dark form in the
+// order Name, Symbol, Website | Twitter, Select Image, a tool row, the
+// launchpad tabs as a grid, the settings, the dev-buy chips and a full-width
+// Deploy bar. Nothing is folded away, and the pages are buttons down the left
+// edge instead of a bar along the top. The caterpillar-cat photo stays behind
+// it. Judged by eye from headless-Chrome screenshots at 1400px and 390px; this
+// checks what breaks silently.
 //
 // Run: node test/js/launch-flow.test.mjs
 
@@ -26,7 +27,7 @@ const check = (ok, label, detail = '') => {
   if (!ok) fails.push(label);
 };
 
-// --- one look, everywhere ----------------------------------------------------------
+// --- one look, everywhere -------------------------------------------------------------
 for (const page of PAGES) {
   const html = fs.readFileSync(path.join(docs, page), 'utf8');
   const link = html.indexOf('<link rel="stylesheet" href="theme.css">');
@@ -34,83 +35,77 @@ for (const page of PAGES) {
   check(link > styleEnd && styleEnd > -1, `${page} loads theme.css after its own <style>`);
   check(!/skin\.js|id="skin"|(classic|riso|petunia|deco|crescent|byakko|babel)\.css/.test(html), `${page} has no trace of the old looks`);
 }
-const gone = ['skin.js', 'classic.css', 'riso.css', 'petunia.css', 'deco.css', 'crescent.css', 'byakko.css', 'babel.css', 'petunia.svg', 'deco-frame.svg', 'crescent-scene.svg', 'byakko-ribbons.svg', 'babel-scene.svg'];
-check(gone.every((f) => !fs.existsSync(path.join(docs, f))), 'the old looks, their art and the switcher are removed');
-check(!fs.existsSync(path.join(root, 'tools', 'skin-art.mjs')), 'and so is their art generator');
+check(['skin.js', 'classic.css', 'riso.css', 'petunia.css', 'deco.css', 'crescent.css', 'byakko.css', 'babel.css']
+  .every((f) => !fs.existsSync(path.join(docs, f))) && !fs.existsSync(path.join(root, 'tools', 'skin-art.mjs')),
+  'the old looks, their art, the switcher and the generator are gone');
 
-// --- the photo ------------------------------------------------------------------------
-const photo = path.join(docs, 'caterpillar-cat.webp');
-const head = fs.existsSync(photo) ? fs.readFileSync(photo).subarray(0, 12) : Buffer.alloc(0);
-check(head.subarray(0, 4).toString() === 'RIFF' && head.subarray(8, 12).toString() === 'WEBP', 'the background photo is a real WebP');
-check(fs.statSync(photo).size < 200 * 1024, 'and small enough to load fast', `${(fs.statSync(photo).size / 1024).toFixed(0)}KB`);
-check(/body\s*\{[^}]*url\("caterpillar-cat\.webp"\)[^}]*cover[^}]*fixed/.test(css), 'it fills the window behind everything');
-check(/@media \(min-width: 1000px\)\s*\{\s*body\s*\{\s*justify-content:\s*flex-end/.test(css),
-  'and on a wide screen the column moves right so the cat stays in view');
-check(/backdrop-filter:\s*blur/.test(css) && /\.card, \.modal \{[^}]*background:\s*var\(--k-glass\)/.test(css),
-  'cards are frosted glass over the photo');
+// --- the sidebar replaces the top bar ----------------------------------------------------
+check(/\.menubar\s*\{[^}]*position:\s*fixed;[^}]*left:\s*0;[^}]*bottom:\s*0;[^}]*width:\s*var\(--t-side\);[^}]*flex-direction:\s*column/.test(css),
+  'the page buttons run down the left edge, full height');
+check(/body\s*\{[^}]*padding:[^;]*calc\(var\(--t-side\) \+ 16px\)/.test(css) && !/body\s*\{[^}]*padding-top:\s*\d{2}px/.test(css),
+  'the body makes room on the left, and no longer pads for a bar on top');
+check(/\.menubar a\[aria-current="page"\]\s*\{[^}]*--t-green/.test(css), 'the current page is marked in the sidebar');
+check(/@media \(max-width: 700px\)\s*\{\s*:root\s*\{\s*--t-side:\s*\d+px/.test(css), 'on a phone the sidebar narrows instead of disappearing');
 
-// --- the launch flow ---------------------------------------------------------------------
+// --- the deploy panel ----------------------------------------------------------------------
 const doc = new JSDOM(fs.readFileSync(path.join(docs, 'index.html'), 'utf8')).window.document;
-const card = doc.getElementById('launchBtn').closest('.card');
-const labels = [...card.querySelectorAll(':scope > label')].map((l) => l.textContent.trim());
-check(labels[0] === '1 · LAUNCHPAD' && labels[1] === '2 · YOUR COIN', 'the form opens with two numbered steps', labels.join(' | '));
-const more = doc.getElementById('moreOptions');
-check(!!more && more.tagName === 'DETAILS' && !more.hasAttribute('open'), 'everything optional is in one drawer, closed by default');
-const optional = ['vampBtn', 'supplyRow', 'quoteRow', 'solRow', 'agencyRow', 'pumpRow', 'raydiumRow', 'clmmRow', 'uniRow', 'flapRow',
-  'lunchRow', 'hookeRow', 'longRow', 'v4curveRow', 'ponsRow', 'twitter', 'website', 'devBuyBlock', 'distroBlock', 'descBlock', 'abyssLine', 'rpcLine'];
-const strayed = optional.filter((id) => !doc.getElementById(id) || !more.contains(doc.getElementById(id)));
-check(strayed.length === 0, 'the drawer holds vamp, socials, dev buy, distro, description, every launchpad\'s settings and the diagnostics',
-  strayed.length ? 'outside: ' + strayed.join(', ') : `${optional.length} pieces`);
-const essential = ['pads', 'drop', 'name', 'symbol', 'launchBtn', 'feeNote', 'status'];
-const hidden = essential.filter((id) => !doc.getElementById(id) || more.contains(doc.getElementById(id)));
-check(hidden.length === 0, 'and the essentials stay in view', hidden.join(', ') || essential.join(', '));
-check(more.compareDocumentPosition(doc.getElementById('launchBtn')) & 4, 'LAUNCH comes after the drawer, so options are set before it');
+check(doc.querySelector('header h1')?.textContent === 'Token Deploy', 'the panel is titled Token Deploy');
+check([...doc.querySelectorAll('header a')].map((a) => a.id).join() === 'keysLink' && !!doc.querySelector('header #walletChip'),
+  'its header carries keys and the wallet, as the reference carries its wallet');
+const card = doc.querySelector('.card.deploy');
+const order = ['name', 'symbol', 'website', 'twitter', 'drop', 'vampBtn', 'pads', 'supplyRow', 'pumpRow', 'hookeRow',
+  'distroBlock', 'descBlock', 'devBuyBlock', 'launchBtn', 'feeNote', 'status', 'abyssLine', 'rpcLine'];
+const all = card ? [...card.querySelectorAll('*')] : [];
+const pos = order.map((id) => all.indexOf(doc.getElementById(id)));
+check(pos.every((x) => x >= 0) && pos.every((x, i) => i === 0 || x > pos[i - 1]),
+  'the form runs Name, Symbol, Website | Twitter, image, tools, launchpads, settings, dev buy, Deploy', pos.join(','));
+check(!doc.getElementById('moreOptions') && [...card.querySelectorAll('details')].every((d) => d.open),
+  'every launch option is open: no drawer, and every remaining section starts expanded',
+  [...card.querySelectorAll('details')].map((d) => (d.id || d.className) + (d.open ? ':open' : ':closed')).join(' '));
+check(doc.getElementById('launchBtn').textContent.trim() === 'Deploy', 'the launch button reads Deploy');
+check(doc.querySelector('.select-image')?.textContent.trim() === 'Select Image', 'the image box is captioned Select Image');
+check(doc.getElementById('vampBtn').closest('.toolbar') !== null, 'VAMP sits in the tool row under the image');
 const ids = [...doc.querySelectorAll('[id]')].map((e) => e.id);
 check(ids.length === new Set(ids).size, 'no element id was duplicated in the move');
-const headerLinks = [...doc.querySelectorAll('header a')].map((a) => a.id || a.getAttribute('href'));
-check(headerLinks.join(',') === 'keysLink' && !!doc.querySelector('header #walletChip'), 'the header keeps only keys and the wallet; the menu bar links the pages');
 
-// the launchpad picker: only the one in use until you ask to change it
-check(/if \(!pad\.enabled\) continue;/.test(MAIN), 'launchpads that are not live are not offered at all');
-check(/if \(!padsOpen && pad !== activePad\) continue;/.test(MAIN), 'the picker shows only the launchpad in use until opened');
-check(/padsOpen = false;\s*\n\s*applyPadUI\(pad\)/.test(MAIN), 'and closes again once one is chosen');
-check(/toggle\.textContent = padsOpen \? 'close' : 'change'/.test(MAIN) && /aria-expanded/.test(MAIN), 'with a change/close control that reports its state');
+// launchpads: every live one, as a grid of tabs, each wearing its chain
+check(/<div class="pads pad-grid" id="pads">/.test(fs.readFileSync(path.join(docs, 'index.html'), 'utf8')) && /\.pad-grid\s*\{[^}]*display:\s*grid/.test(css),
+  'launchpads are a grid of tabs');
+check(!/padsOpen/.test(MAIN) && /if \(!pad\.enabled\) continue;/.test(MAIN), 'all live launchpads are shown at once, with no collapsing');
+check(/b\.dataset\.chain = padChain\(pad\)/.test(MAIN) && /b\.title = pad\.label/.test(MAIN), 'each tab carries its chain, and its full name as a tooltip');
+for (const chain of ['sol', '4663', '56', '8453', '1', '5042']) {
+  check(new RegExp(`\\.pad\\[data-chain="${chain}"\\]::before`).test(css), `chain ${chain} has its own colour dot`);
+}
+check(/#buyChips\s*\{[^}]*display:\s*grid/.test(css), 'the dev-buy amounts are a row of equal chips');
 
-// --- legibility ------------------------------------------------------------------------------
+// the photo stays behind it
+check(/body\s*\{[^}]*url\("caterpillar-cat\.webp"\)/.test(css) && fs.existsSync(path.join(docs, 'caterpillar-cat.webp')),
+  'the caterpillar-cat photo is still the background');
+
+// --- legibility --------------------------------------------------------------------------------
 const hex = (h) => { const n = h.replace('#', ''); return [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16) / 255); };
 const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 const lum = (h) => { const [r, g, b] = hex(h).map(lin); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
 const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
-const t = Object.fromEntries([...css.matchAll(/--(k-[a-z-]+):\s*(#[0-9a-f]{6})/gi)].map((m) => [m[1], m[2]]));
-// the glass is 80% near-white over a photo; check against a conservative
-// worst case - the glass composited over the darkest leaf green
-const glass = '#d2d6cd';
+const t = Object.fromEntries([...css.matchAll(/--(t-[a-z-]+):\s*(#[0-9a-f]{6})/gi)].map((m) => [m[1], m[2]]));
 for (const [what, fg, bg, min] of [
-  ['body text on the glass', t['k-ink'], glass, 7],
-  ['hints on the glass', t['k-ink-soft'], glass, 4.5],
-  ['green labels on the glass', t['k-leaf'], glass, 4.5],
-  ['success text on white', t['k-green'], '#ffffff', 4.5],
-  ['error text on white', t['k-red'], '#ffffff', 4.5],
-  ['warning text on white', t['k-amber-txt'], '#ffffff', 4.5],
-  ['white type on green buttons and the selected launchpad', '#ffffff', t['k-leaf'], 4.5],
-  ['dark type on the amber LAUNCH at its darkest', '#241a08', t['k-amber-lo'], 4.5],
-  ['white menu links on the dark leaf glass', '#f2f6ee', '#24341f', 7],
+  ['text in a field', t['t-text'], t['t-shell'], 7],
+  ['text on the panel', t['t-text'], t['t-panel'], 7],
+  ['labels on the panel', t['t-soft'], t['t-panel'], 4.5],
+  ['hints on the panel', t['t-faint'], t['t-panel'], 4.5],
+  ['the active launchpad tab', t['t-green-hi'], t['t-green-bg'], 4.5],
+  ['white on the Deploy bar', '#ffffff', t['t-green'], 4.5],
+  ['errors on the panel', t['t-red'], t['t-panel'], 4.5],
+  ['warnings on the panel', t['t-amber'], t['t-panel'], 4.5],
+  ['sidebar links', t['t-soft'], t['t-shell'], 4.5],
 ]) {
   const r = ratio(fg, bg);
   check(r >= min, `${what} is at least ${min}:1`, `${r.toFixed(2)}:1 (${fg} on ${bg})`);
 }
-check(/header h1[^{]*\{[^}]*text-shadow/.test(css), 'the title over the photo carries a shadow so it reads on any part of it');
-// swap, arc and the migrate pages put explanatory notes straight in the column;
-// on the photo those were unreadable until they got glass of their own
-const notePages = PAGES.filter((p) => {
-  const d = new JSDOM(fs.readFileSync(path.join(docs, p), 'utf8')).window.document;
-  return d.querySelector('.app > .note');
-});
-check(notePages.length > 0 && /\.app > \.note\s*\{[^}]*background:\s*var\(--k-glass\)[^}]*backdrop-filter/.test(css),
-  'notes sitting directly in the column get their own glass', notePages.join(', '));
 
-// --- coverage ---------------------------------------------------------------------------------
-check(/#vampBtn\s*\{[^}]*!important/.test(css), "VAMP's inline purple gradient is brought into the palette");
+// --- coverage ------------------------------------------------------------------------------------
+check(/#vampBtn\s*\{[^}]*!important/.test(css), "VAMP's inline purple gradient is replaced");
+check(/\.app > \.note\s*\{[^}]*background:\s*var\(--t-panel\)/.test(css), 'notes sitting directly in the column get a panel, not the photo');
 let stranded = [];
 for (const page of PAGES) {
   const html = fs.readFileSync(path.join(docs, page), 'utf8');
@@ -121,8 +116,6 @@ for (const page of PAGES) {
 }
 check(stranded.length === 0, 'no page defines a button-ish two-class rule the theme leaves unstyled',
   stranded.length ? stranded.join(' | ') : `${PAGES.length} pages scanned`);
-check(/\.menubar\s*\{[^}]*position:\s*fixed/.test(css) && /body\s*\{[^}]*padding-top:/.test(css), 'the menu bar is fixed and the body pads for it');
-check(/@media \(max-width: 560px\)\s*\{[^@]*header\s*\{\s*flex-wrap:\s*wrap/.test(css), 'on a phone the header wraps instead of widening the page');
 
 console.log('');
 process.exit(fails.length ? 1 : 0);
