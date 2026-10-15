@@ -3089,13 +3089,14 @@ async function launchSol(pad, inp) {
   setStatus('loading Solana module...');
   const { launchMeteora, meteoraQuoteAllowed } = await import('./solana.js');
 
-  // Meteora only accepts a Token-2022 quote it has badged, and the check lives
-  // deep inside create_config - it surfaces as a bare "custom program error:
-  // 0x17c0". Ask first so the reason is readable instead.
+  // Meteora gates Token-2022 quotes with risky extensions behind a badge, and
+  // the check lives deep inside create_config as a bare "custom program error:
+  // 0x17c0". Read the quote first so the status says which case this is;
+  // launchMeteora simulates create_config before sending either way.
   setStatus('checking the quote token is one Meteora accepts...');
   const gate = await meteoraQuoteAllowed(pad.rpc, quoteMint);
   if (!gate.allowed) throw new Error(gate.reason);
-  if (gate.isToken2022) setStatus(`quote is Token-2022 and badged by Meteora — ok`);
+  if (gate.note) setStatus(gate.note);
   const res = await launchMeteora({
     rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint,
     name: inp.name, symbol: inp.symbol, uri, params,
