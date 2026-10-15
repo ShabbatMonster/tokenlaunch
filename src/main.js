@@ -4777,21 +4777,35 @@ function setStatus(msg, isErr = false) {
   $('status').innerHTML = isErr ? `<span class="err">${esc(msg)}</span>` : msg;
 }
 
+// The picker shows only the launchpad in use, with a "change" control that
+// opens the full list; choosing one closes it again. Pads that are not live
+// yet are left out entirely - they cannot be chosen, so listing them is noise.
+let padsOpen = false;
+
 function renderPads() {
   const box = $('pads');
   box.innerHTML = '';
   for (const pad of PADS) {
+    if (!pad.enabled) continue;
+    if (!padsOpen && pad !== activePad) continue;
     const b = document.createElement('button');
     b.className = 'pad' + (pad === activePad ? ' active' : '');
-    b.textContent = pad.enabled ? pad.label : pad.label + ' (soon)';
-    b.disabled = !pad.enabled;
+    b.textContent = pad.label;
     b.onclick = () => {
       activePad = pad;
+      padsOpen = false;
       applyPadUI(pad);
       renderPads(); renderBuyChips(); refreshFeeNote(); refreshBalance(); renderTokenList();
     };
     box.appendChild(b);
   }
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'pad pad-toggle';
+  toggle.textContent = padsOpen ? 'close' : 'change';
+  toggle.setAttribute('aria-expanded', String(padsOpen));
+  toggle.onclick = () => { padsOpen = !padsOpen; renderPads(); };
+  box.appendChild(toggle);
 }
 
 // show/hide the per-pad input sections + wallet for the active pad
