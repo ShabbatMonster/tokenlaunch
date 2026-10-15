@@ -152,25 +152,22 @@ function minOutFor(amountIn) {
 }
 
 // --- firing -----------------------------------------------------------------
-// Fire one wallet's sell. `tipMicro` is the priority fee to put on THIS attempt
-// (micro-lamports per compute unit). The priority fee is charged on any tx that
-// lands - including one that lands and reverts with EarlyLocked before the
-// unlock - so the loop passes 0 for the pre-unlock probes and the real tip only
-// once the chain clock is at the unlock. A probe that lands early then costs
-// only the ~0.000005 SOL base fee, not the tip.
-async function fireWallet(w, i, keys, amountIn, blockhash, tipMicro) {
-  const built = buildSignedSell({ keys, secret: w.secret, amountIn, minOut: minOutFor(amountIn), blockhash, priorityMicroLamports: tipMicro });
-  const raw = built.serialized;
-  const b64 = typeof Buffer !== 'undefined' ? Buffer.from(raw).toString('base64') : btoa(String.fromCharCode(...raw));
-  const sig = bs58.encode(built.tx.signatures[0]);
+// Blast one already-signed transaction (base64) to every RPC at once, and to
+// Jito once the real tip is on (before that it would just be noise). Resending
+// the SAME bytes is safe: the network deduplicates by signature, so it lands at
+// most once however many times this is called.
+async function blastRaw(b64, tipMicro) {
   const sends = [];
-  for (const url of rpcs) {
-    sends.push(fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction', params: [b64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }] }) }).catch(() => null));
-  }
-  // only broadcast to Jito once the real tip is on (otherwise it is just noise)
+  for (const url of rpcs) sends.push(fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction', params: [b64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }] }) }).catch(() => null));
   if (tipMicro > 0) for (const url of JITO) sends.push(fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction', params: [b64, { encoding: 'base64' }] }) }).catch(() => null));
   await Promise.allSettled(sends);
-  return sig;
+}
+
+function markSold(w, i, sig) {
+  w.sig = sig;
+  wstat(i, 'SOLD ✓', 'ok');
+  const el = w.row?.querySelector('.wstat');
+  if (el) el.innerHTML = `<span class="ok">SOLD ✓</span> <a href="https://solscan.io/tx/${sig}" target="_blank" rel="noopener">tx</a>`;
 }
 
 async function armAndFire() {
@@ -186,9 +183,13 @@ async function armAndFire() {
   const conn = primary();
   const confirmed = new Set();
 
-  // keep a fresh blockhash so pre-built txs never go stale
+  // one fresh blockhash to start; NOT auto-refreshed, because changing the
+  // blockhash changes the signed bytes and so the signature, and a new
+  // signature is a second transaction that could also land and charge the tip
+  // again. Each wallet reuses ONE signed, tipped transaction - identical bytes
+  // resent are deduplicated by the network, so it lands (and is tipped) at most
+  // once - and is only rebuilt after the old one can no longer land.
   let blockhash = (await conn.getLatestBlockhash('confirmed')).blockhash;
-  const bhTimer = setInterval(async () => { try { blockhash = (await conn.getLatestBlockhash('confirmed')).blockhash; } catch {} }, 10_000);
 
   // the lock uses the CHAIN clock, which can lag the PC clock, so track the
   // offset and gate the real tip on chain time: the big tip goes on only from
@@ -209,6 +210,9 @@ async function armAndFire() {
   while (!abort && Date.now() < when - lead) await sleep(Math.min(250, when - lead - Date.now()));
 
   // fire-and-retry loop: resend every round until each wallet confirms or errors
+  // A blockhash is good for ~60s; rebuild a wallet's tx only once the old one
+  // is past that, so the old and new tipped txs never both land.
+  const BH_LIFE_MS = 62_000;
   let round = 0;
   while (firing && !abort && confirmed.size < ready.length) {
     round++;
@@ -216,20 +220,33 @@ async function armAndFire() {
     // lead); before that, probes go out at zero priority so a reverted landing
     // costs only the base fee, not the tip
     const tipMicro = chainNow() >= when - tipLeadMs ? fullTip : 0;
-    await Promise.all(ready.map(async (w, idx) => {
+    await Promise.all(ready.map(async (w) => {
       const i = wallets.indexOf(w);
       if (confirmed.has(w.pubkey)) return;
       const amountIn = (w.balance * BigInt(Math.round(pct * 100))) / 10000n;
       try {
-        const sig = await fireWallet(w, i, coin.keys, amountIn, blockhash, tipMicro);
+        // (re)build this wallet's signed tx only when the tip phase changes
+        // (0 -> full, once) or the blockhash has expired; otherwise resend the
+        // exact same bytes so the network dedups it to a single landing.
+        const needNew = !w.fire || w.fire.tip !== tipMicro || (Date.now() - w.fire.builtAt > BH_LIFE_MS);
+        if (needNew) {
+          // before replacing a tipped tx, make sure the old one did not already
+          // land (so we never fire a second tipped tx that lands and re-tips)
+          if (w.fire && w.fire.tip > 0) {
+            const prev = await conn.getSignatureStatus(w.fire.sig).catch(() => null);
+            if (prev?.value && !prev.value.err) { confirmed.add(w.pubkey); markSold(w, i, w.fire.sig); return; }
+          }
+          if (needNew && Date.now() - (w.fire?.builtAt || 0) > BH_LIFE_MS) blockhash = (await conn.getLatestBlockhash('confirmed')).blockhash;
+          const built = buildSignedSell({ keys: coin.keys, secret: w.secret, amountIn, minOut: minOutFor(amountIn), blockhash, priorityMicroLamports: tipMicro });
+          const raw = built.serialized;
+          w.fire = { b64: typeof Buffer !== 'undefined' ? Buffer.from(raw).toString('base64') : btoa(String.fromCharCode(...raw)), sig: bs58.encode(built.tx.signatures[0]), tip: tipMicro, builtAt: Date.now() };
+        }
+        await blastRaw(w.fire.b64, tipMicro);
         wstat(i, tipMicro > 0 ? `firing with tip (round ${round})…` : `probing — not yet unlocked (round ${round})`, '');
-        const st = await conn.getSignatureStatus(sig);
+        const st = await conn.getSignatureStatus(w.fire.sig);
         const s = st?.value;
         if (s && !s.err && (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized')) {
-          confirmed.add(w.pubkey);
-          wstat(i, `SOLD ✓`, 'ok');
-          w.sig = sig;
-          const el = w.row?.querySelector('.wstat'); if (el) el.innerHTML = `<span class="ok">SOLD ✓</span> <a href="https://solscan.io/tx/${sig}" target="_blank" rel="noopener">tx</a>`;
+          confirmed.add(w.pubkey); markSold(w, i, w.fire.sig);
         } else if (s?.err) {
           const c = classifyError(s.err, []);
           if (!c.retry) { confirmed.add(w.pubkey); wstat(i, 'failed: ' + c.message, 'err'); }
