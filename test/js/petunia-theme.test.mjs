@@ -79,12 +79,12 @@ check(/\.menubar \.mb-skin\s*\{/.test(css), 'petunia styles the switcher it adds
   const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'http://localhost/' });
   dom.window.eval(skinJs);
   dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
-  const btn = dom.window.document.querySelector('nav.menubar .mb-skin');
+  const sel = dom.window.document.querySelector('nav.menubar select.mb-skin');
   const link = dom.window.document.getElementById('skin');
-  let reached = link.getAttribute('href') === 'petunia.css';
-  for (let i = 0; i < 4 && btn && !reached; i++) { btn.click(); reached = link.getAttribute('href') === 'petunia.css'; }
-  check(reached, 'clicking the switcher reaches petunia.css');
-  check(/Look: Petunia/.test(btn.textContent), 'and its label then names Petunia', btn.textContent);
+  check(!!sel && [...sel.options].some((o) => o.value === 'petunia' && o.textContent === 'Petunia'), 'the dropdown offers Petunia');
+  sel.value = 'petunia';
+  sel.dispatchEvent(new dom.window.Event('change'));
+  check(link.getAttribute('href') === 'petunia.css', 'choosing it loads petunia.css');
   check(dom.window.document.documentElement.dataset.skin === 'petunia', 'with the page tagged as Petunia');
 }
 // a saved choice beats the default

@@ -57,19 +57,18 @@ check(/riso:\s*\{\s*href:\s*'riso\.css'/.test(skinJs) && /ORDER = \[[^\]]*'riso'
 check((skinJs.match(/try {/g) || []).length >= 2, 'reading and saving the choice both survive blocked storage');
 check(/\.menubar \.mb-skin\s*\{/.test(css), 'riso styles the switcher it adds to the masthead');
 
-// the switcher really reaches Riso: run skin.js in a page and click through
+// the switcher really reaches Riso: run skin.js in a page and choose it
 {
   const html = fs.readFileSync(path.join(docs, 'index.html'), 'utf8').replace(/<script[^>]*src="(?!skin\.js)[^"]*"[^>]*><\/script>/g, '');
   const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'http://localhost/' });
   dom.window.eval(skinJs);
   dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
-  const btn = dom.window.document.querySelector('nav.menubar .mb-skin');
+  const sel = dom.window.document.querySelector('nav.menubar select.mb-skin');
   const link = dom.window.document.getElementById('skin');
-  // click until Riso comes up rather than counting - the cycle's length and
-  // starting point belong to whichever look is the default
-  const seen = [link.getAttribute('href')];
-  for (let i = 0; i < 6 && btn && link.getAttribute('href') !== 'riso.css'; i++) { btn.click(); seen.push(link.getAttribute('href')); }
-  check(!!btn && link.getAttribute('href') === 'riso.css', 'clicking the switcher reaches riso.css', seen.join(' -> '));
+  check(!!sel && [...sel.options].some((o) => o.value === 'riso'), 'the dropdown offers Riso');
+  sel.value = 'riso';
+  sel.dispatchEvent(new dom.window.Event('change'));
+  check(link.getAttribute('href') === 'riso.css', 'choosing it loads riso.css');
   check(dom.window.localStorage.getItem('tokenlaunch.skin') === 'riso',
     'and the choice is remembered');
 }
