@@ -510,13 +510,32 @@ export function buildCalldata(template, values, edits = {}) {
 }
 
 /// Approvals the rebuilt call needs, from what the original pulled; an edited
-/// amount argument that matched a pulled amount sets the new amount.
+/// amount argument that matched a pulled amount sets the new amount, and an
+/// amount of 0 needs no approval at all.
 export function approvalsFor(template, edits = {}) {
   return template.pulled.map((t) => {
     const p = template.params.find((x) => x.role === 'pay-amount' && x.pays === t.token);
     const edited = p && edits[p.path.join('.')];
     return { ...t, amount: edited ? BigInt(edited) : t.amount, spender: template.factory };
-  });
+  }).filter((a) => a.amount > 0n);
+}
+
+/// Edits that launch with no dev buy. Every pay-amount goes to 0, and with it
+/// the other numbers in the same struct (mode, minimum out...) - a buy struct
+/// of zeros is how factories spell "no buy" (Hooke: mode 0, amounts 0). A
+/// top-level amount takes its minimum-out siblings with it. Deadlines stay.
+export function noBuyEdits(template) {
+  const edits = {};
+  const isNum = (q) => /^u?int\d*$/.test(q.type) && q.role !== 'deadline';
+  for (const p of template.params.filter((x) => x.role === 'pay-amount')) {
+    edits[p.path.join('.')] = '0';
+    const parent = p.path.slice(0, -1).join('.');
+    for (const q of template.params) {
+      if (q.path.length !== p.path.length || q.path.slice(0, -1).join('.') !== parent || !isNum(q)) continue;
+      if (p.path.length > 1 || /min|out|slippage/i.test(q.name)) edits[q.path.join('.')] = '0';
+    }
+  }
+  return edits;
 }
 
 /// Simulate the launch as `account`. Returns the raw return data, or throws

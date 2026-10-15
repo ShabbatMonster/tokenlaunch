@@ -3656,9 +3656,11 @@ async function launchHooke(pad, { name, symbol, logo, description, twitter, webs
   const payKey = $('hookePay').value;                      // ETH | USDG | HXMAX
   const pay = payKey === 'HXMAX' ? H.HOOKE_PAY.HXMAX : H.HOOKE_PAY.USDG;
   const payToken = payKey === 'HXMAX' ? H.HOOKE.hxmax : H.HOOKE.usdg;
-  const buyStr = $('hookeBuy').value.trim();
-  if (!(+buyStr > 0)) throw new Error('the dev buy is required by the contract - set an amount');
+  // blank or 0 = no dev buy (mode 0): the launch costs only the ETH fee
+  const buyStr = $('hookeBuy').value.trim() || '0';
+  if (!/^\d*\.?\d+$/.test(buyStr)) throw new Error('the dev buy must be a number (0 or blank for none)');
   const amountIn = parseUnits(buyStr, pay.decimals);
+  const devBuy = amountIn > 0n;
   const slip = Math.min(50, Math.max(0, +($('hookeSlippage').value || 2)));
   const creatorRaw = $('hookeCreator').value.trim();
   if (creatorRaw && !/^0x[0-9a-fA-F]{40}$/.test(creatorRaw)) throw new Error('creator fee address is not a valid address');
@@ -3680,9 +3682,10 @@ async function launchHooke(pad, { name, symbol, logo, description, twitter, webs
   const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 600);
   const ethBal = await pub.getBalance({ address: account.address });
 
-  // fund the dev buy
-  const have = await pub.readContract({ address: payToken, abi: H.HOOKE_ERC20, functionName: 'balanceOf', args: [account.address] });
-  if (payKey === 'ETH' && have < amountIn) {
+  // fund the dev buy, if there is one
+  const have = devBuy ? await pub.readContract({ address: payToken, abi: H.HOOKE_ERC20, functionName: 'balanceOf', args: [account.address] }) : 0n;
+  if (!devBuy) { /* nothing to fund or approve */ }
+  else if (payKey === 'ETH' && have < amountIn) {
     const need = amountIn - have;
     const sw = await H.buildEthToUsdg(pub, { recipient: account.address, usdgOut: need, deadline: deadline() });
     if (ethBal < sw.value + st.launchFee) {
@@ -3697,8 +3700,8 @@ async function launchHooke(pad, { name, symbol, logo, description, twitter, webs
   }
   if (ethBal < st.launchFee) throw new Error(`need ${formatEther(st.launchFee)} ETH for the launch fee`);
 
-  const allowance = await pub.readContract({ address: payToken, abi: H.HOOKE_ERC20, functionName: 'allowance', args: [account.address, H.HOOKE.hook] });
-  if (allowance < amountIn) {
+  const allowance = devBuy ? await pub.readContract({ address: payToken, abi: H.HOOKE_ERC20, functionName: 'allowance', args: [account.address, H.HOOKE.hook] }) : 0n;
+  if (devBuy && allowance < amountIn) {
     setStatus(`approving ${pay.symbol} to the Hooke hook...`);
     const ah = await wallet.writeContract({ address: payToken, abi: H.HOOKE_ERC20, functionName: 'approve', args: [H.HOOKE.hook, amountIn] });
     await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
@@ -3706,7 +3709,7 @@ async function launchHooke(pad, { name, symbol, logo, description, twitter, webs
 
   // price the dev buy, then set the minimum from it
   const argsFor = (minTokensOut) => H.hookeCreateArgs({
-    salt, name, symbol, metadata, creator, mode: pay.mode, amountIn, minTokensOut, deadline: deadline(),
+    salt, name, symbol, metadata, creator, mode: devBuy ? pay.mode : 0, amountIn, minTokensOut: devBuy ? minTokensOut : 0n, deadline: deadline(),
   });
   setStatus('simulating the launch...');
   let quoted;
@@ -3732,7 +3735,7 @@ async function launchHooke(pad, { name, symbol, logo, description, twitter, webs
   rememberLaunch(pad, predicted, symbol);
   $('status').innerHTML =
     `<span style="color:var(--accent)">LAUNCHED ✓</span> ${predicted}<br>` +
-    `paired against hXMAX · dev buy ${esc(buyStr)} ${esc(pay.symbol)} → ~${Number(formatUnits(quoted, 18)).toLocaleString(undefined, { maximumFractionDigits: 0 })} ${esc(symbol)}` +
+    `paired against hXMAX · ` + (devBuy ? `dev buy ${esc(buyStr)} ${esc(pay.symbol)} → ~${Number(formatUnits(quoted, 18)).toLocaleString(undefined, { maximumFractionDigits: 0 })} ${esc(symbol)}` : 'no dev buy') +
     ` · address mined in ${tries.toLocaleString()} tries<br>` +
     `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a> · ` +
     `<a href="${pad.explorer}/token/${predicted}" target="_blank" rel="noopener">token</a>`;
@@ -3792,7 +3795,10 @@ async function loadMimic(pad) {
   }
   $('mimicBody').classList.remove('hidden');
   const pays = t.pulled.map((x) => `${M.fmtUnits(x.amount, x.decimals)} ${esc(x.symbol)}`).join(', ');
-  $('mimicApprovals').innerHTML = (pays ? `The original launch paid <b>${pays}</b>; Mimic approves whatever the pay-amount fields say before sending.` : 'The original launch paid no tokens - only the ETH above.')
+  $('mimicDevBuyWrap').classList.toggle('hidden', !t.pulled.length);
+  $('mimicDevBuy').checked = false;
+  mimicSyncDevBuy();
+  $('mimicApprovals').innerHTML = (pays ? `The original launch paid <b>${pays}</b> (its dev buy). Yours has none unless you tick <b>include a dev buy</b>; then Mimic approves whatever the pay-amount fields say before sending.` : 'The original launch paid no tokens - only the ETH above.')
     + (t.warnings.length ? '<br><span class="err">' + t.warnings.map(esc).join('<br>') + '</span>' : '');
   info.innerHTML = `<span class="ok">loaded</span> ${esc(t.name || '?')} / ${esc(t.symbol || '?')} · <code>${esc(t.signature || t.selector)}</code> on ${esc(t.factory.slice(0, 8))}… · `
     + `<a href="${pad.explorer}/tx/${t.txHash}" target="_blank" rel="noopener">launch tx</a>`;
@@ -3849,6 +3855,21 @@ async function mimicMine(pad, v) {
   return res;
 }
 
+// With the dev buy off, the fields it would zero are greyed out.
+function mimicSyncDevBuy() {
+  const t = mimicTemplate;
+  if (!t) return;
+  const on = $('mimicDevBuy').checked;
+  import('./mimic.js').then((M) => {
+    for (const path of Object.keys(M.noBuyEdits(t))) {
+      const inp = document.querySelector(`#mimicParams input[data-path="${path}"]`);
+      if (!inp) continue;
+      inp.disabled = !on;
+      inp.title = on ? '' : 'no dev buy - sent as 0';
+    }
+  });
+}
+
 function mimicEdits() {
   const edits = {};
   for (const inp of document.querySelectorAll('#mimicParams input[data-path]')) {
@@ -3876,6 +3897,9 @@ async function mimicPrepare(pad, inp, { forReal }) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(factory)) throw new Error('the factory address is not valid');
   const value = parseEther(($('mimicValue').value.trim() || '0'));
   const edits = mimicEdits();
+  // no dev buy unless asked for: the buy fields go out as zeros
+  const noBuy = t.pulled.length > 0 && !$('mimicDevBuy').checked;
+  if (noBuy) Object.assign(edits, M.noBuyEdits(t));
   let uri;
   if (forReal) {
     setStatus('publishing token metadata to IPFS...');
@@ -3900,16 +3924,17 @@ async function mimicPrepare(pad, inp, { forReal }) {
     deadline: BigInt(Math.floor(Date.now() / 1000) + 600), twitter: inp.twitter, website: inp.website,
   }, edits);
   const approvals = M.approvalsFor({ ...t, factory }, edits);
-  return { M, t, pub, factory, value, data, approvals, mined };
+  return { M, t, pub, factory, value, data, approvals, mined, noBuy };
 }
 
 async function simulateMimic(pad) {
   const status = (m) => setStatus(m);
+  let noBuy = false;
   try {
     if (!account) throw new Error('load your EVM key first - the simulation runs as your wallet');
     const name = $('name').value.trim() || mimicTemplate?.name || 'Mimic';
     const symbol = $('symbol').value.trim() || mimicTemplate?.symbol || 'MIMIC';
-    const { M, pub, factory, value, data, approvals, mined } = await mimicPrepare(pad, { name, symbol, description: $('desc').value.trim() || undefined, twitter: $('twitter').value.trim(), website: $('website').value.trim() }, { forReal: false });
+    const { M, pub, factory, value, data, approvals, mined, noBuy: nb } = await mimicPrepare(pad, { name, symbol, description: $('desc').value.trim() || undefined, twitter: $('twitter').value.trim(), website: $('website').value.trim() }, { forReal: false });
     const short = [];
     for (const a of approvals) {
       const [bal, alw] = await Promise.all([
@@ -3919,21 +3944,24 @@ async function simulateMimic(pad) {
       if (bal < a.amount) short.push(`needs ${M.fmtUnits(a.amount, a.decimals)} ${a.symbol}, wallet has ${M.fmtUnits(bal, a.decimals)}`);
       else if (alw < a.amount) short.push(`${a.symbol} will be approved to the factory at launch`);
     }
+    noBuy = nb;
     status('simulating...');
     const out = await M.simulateLaunch(pub, { account: account.address, to: factory, data, value });
     const addr = out.length >= 66 ? '0x' + out.slice(26, 66) : null;
     $('status').innerHTML = '<span class="ok">SIMULATES CLEAN</span>'
       + (addr && /^0x[0-9a-f]{40}$/i.test(addr) && !/^0x0{40}$/i.test(addr) ? ` · would create <code>${addr}</code>` : '')
       + (mined ? ` · mined <code>${mined.address}</code>${addr && addr.toLowerCase() !== mined.address.toLowerCase() ? ' <span class="err">(differs from what the factory returns)</span>' : ''}` : '')
+      + (noBuy ? ' · no dev buy' : '')
       + (short.length ? '<br>' + short.map(esc).join('<br>') : '');
   } catch (e) {
-    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>'
+      + (noBuy ? '<br>this was simulated with no dev buy - if this factory requires one, tick <b>include a dev buy</b>' : '');
   }
 }
 
 async function launchMimic(pad, inp) {
   const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
-  const { M, t, pub, factory, value, data, approvals } = await mimicPrepare(pad, inp, { forReal: true });
+  const { M, t, pub, factory, value, data, approvals, noBuy } = await mimicPrepare(pad, inp, { forReal: true });
 
   for (const a of approvals) {
     const bal = await pub.readContract({ address: a.token, abi: M.MIMIC_ERC20, functionName: 'balanceOf', args: [account.address] });
@@ -3947,7 +3975,8 @@ async function launchMimic(pad, inp) {
   }
 
   setStatus('simulating the launch...');
-  await M.simulateLaunch(pub, { account: account.address, to: factory, data, value });
+  try { await M.simulateLaunch(pub, { account: account.address, to: factory, data, value }); }
+  catch (e) { throw new Error(e.message + (noBuy ? ' (simulated with no dev buy - if this factory requires one, tick "include a dev buy")' : '')); }
 
   setStatus('sending the launch...');
   const hash = await wallet.sendTransaction({ to: factory, data, value });
@@ -6256,6 +6285,7 @@ function init() {
     finally { delete btn.dataset.busy; btn.textContent = 'MINE'; }
   });
   $('mimicSuffix').addEventListener('input', () => { mimicMined = null; });
+  $('mimicDevBuy').addEventListener('change', mimicSyncDevBuy);
   $('pumpQuoteCustom').addEventListener('input', () => { paintPumpDevSym(); paintPumpDepth(); });
 
   for (const id of ['solSupply', 'solMigPct']) $(id).addEventListener('input', paintSolSupplyHint);

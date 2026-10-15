@@ -499,7 +499,7 @@
           <option value="USDG">USDG</option>
           <option value="HXMAX">hXMAX</option>
         </select></div>
-        <div style="flex:0 0 150px"><label>DEV BUY (<span id="hookeBuySym">USDG</span>)</label><input type="text" id="hookeBuy" value="50" spellcheck="false"></div>
+        <div style="flex:0 0 150px"><label>DEV BUY (<span id="hookeBuySym">USDG</span>)</label><input type="text" id="hookeBuy" value="0" placeholder="0 = none" spellcheck="false"></div>
         <div style="flex:0 0 100px"><label>SLIPPAGE %</label><input type="text" id="hookeSlippage" value="2" spellcheck="false"></div>
       </div>
       <div class="row" style="margin-top:8px">
@@ -508,8 +508,8 @@
       <div class="hint" id="hookeLine" style="font-size:11px;margin-top:6px"></div>
       <div class="hint" style="font-size:11px;margin-top:6px">The factory WOLFPACK launched from, called the same way: <code>createMeme</code> on the Hooke hook with a salt mined so the
       token address ends in <b>0000</b> (the factory refuses anything else), paired against <b>hXMAX</b>. 800M of the 1B supply sells on the
-      hook's curve, 200M is held for graduation. A dev buy is <b>required</b> by the contract and is paid in USDG or hXMAX &mdash; WOLFPACK
-      used 50 USDG. Pick ETH and it is swapped to USDG on Uniswap first (a separate transaction, sized so it cannot come up short).
+      hook's curve, 200M is held for graduation. The dev buy is <b>optional</b>: leave it at 0 and the launch costs only the ETH fee.
+      If you do buy, it is paid in USDG or hXMAX &mdash; pick ETH and it is swapped to USDG on Uniswap first (a separate transaction, sized so it cannot come up short).
       The launch fee is read live and sent exactly; the contract rejects any other amount.</div>
     </div>
 
@@ -530,6 +530,7 @@
         <label>PARAMETERS <span class="hint">blank = automatic (your name, ticker, metadata, wallet, socials, a fresh deadline); type to override</span></label>
         <div id="mimicParams"></div>
         <div class="hint" id="mimicApprovals" style="font-size:12px;margin-top:8px"></div>
+        <label id="mimicDevBuyWrap" class="hidden" style="margin-top:10px"><input type="checkbox" id="mimicDevBuy" style="width:auto;margin-right:6px"> include a dev buy <span class="hint">off = launch with no buy: the pay-in amounts above are sent as 0 and nothing is approved</span></label>
         <div id="mimicVanity" class="hidden">
           <label>VANITY ADDRESS <span class="hint">mined on your GPU (the CPU if there is none) when you simulate or deploy</span></label>
           <div class="row">
