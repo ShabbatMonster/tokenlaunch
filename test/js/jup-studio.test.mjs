@@ -14,7 +14,7 @@ import { Connection, Keypair, PublicKey, VersionedTransaction } from '@solana/we
 import bs58 from 'bs58';
 import { DynamicBondingCurveClient } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import { SOL_RPC } from '../../src/rpc.js';
-import { studioVesting, studioRaise, studioCreateTx, studioClaimables, studioClaimDryRun, studioCreatorTokens, studioBuildBuy } from '../../src/jupstudio.js';
+import { studioVesting, studioRaise, studioCreateTx, studioClaimables, studioClaimDryRun, studioCreatorTokens, studioBuildBuy, studioReservedName, studioImageProblem, studioPreflight, launchStudio } from '../../src/jupstudio.js';
 
 const fails = [];
 const check = (ok, label, detail = '') => {
@@ -66,6 +66,22 @@ const lv = cfg && (cfg.locked_vesting || cfg.lockedVesting);
 const lockedTotal = lv ? BigInt(String(lv.cliff_unlock_amount ?? lv.cliffUnlockAmount)) + BigInt(String(lv.amount_per_period ?? lv.amountPerPeriod)) * BigInt(String(lv.number_of_period ?? lv.numberOfPeriod)) : 0n;
 check(lockedTotal === 400_000_000n * 10n ** 6n && String(lv.cliff_duration_from_migration_time ?? lv.cliffDurationFromMigrationTime) === '0',
   'and the curve config it creates locks exactly 400,000,000 tokens for the creator, released at migration', `${lockedTotal / 10n ** 6n} tokens`);
+
+// --- what Studio refuses with a bare "Internal server error" ------------------------------------
+// caught before anything is spent, with the real reason
+check(studioReservedName({ name: 'x', symbol: 'jup' }) && studioReservedName({ name: 'Solana Cat', symbol: 'SCAT' }) && !studioReservedName({ name: 'Jupe', symbol: 'JUPE' }),
+  "Studio's reserved names: ticker JUP/SOL/USDC..., or Jupiter/Solana/Tether... in the name");
+const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+const GIF = new Uint8Array([71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+check(await studioImageProblem(new Blob([PNG], { type: 'image/png' })) === null
+  && /PNG, JPEG or WebP/.test(await studioImageProblem(new Blob([GIF], { type: 'image/gif' })))
+  && /bytes are/.test(await studioImageProblem(new Blob([GIF], { type: 'image/png' }))), 'logos: PNG passes; a GIF, or a file whose bytes are not its type, is refused');
+let short = '';
+try { await studioPreflight(sk, { name: 'Fine Name', symbol: 'FINE', image: new Blob([PNG], { type: 'image/png' }), rpc: SOL_RPC, extraSol: 0.5 }); } catch (e) { short = e.message; }
+check(/holds 0\.0000 SOL.*needs about 0\.530/.test(short), 'an empty wallet is told what the launch and dev buy need, before anything is swapped', short.slice(0, 90));
+let viaLaunch = '';
+try { await launchStudio(sk, { name: 'Fine Name', symbol: 'FINE', quote: 'JUP', initialMarketCap: 10000, migrationMarketCap: 500000, vesting: { pct: 5 } }, { image: new Blob([PNG], { type: 'image/png' }), rpc: SOL_RPC }); } catch (e) { viaLaunch = e.message; }
+check(/SOL wallet holds 0\.0000 SOL/.test(viaLaunch) && !/Internal server error/.test(viaLaunch), 'and a JUP-paired launch from it fails with that reason, not a Studio 500', viaLaunch.slice(0, 90));
 
 // --- claiming, as a real Studio creator ---------------------------------------------------------
 const CREATOR = 'CCFRRLa5qvykEuxN5XjwBGGj9QNrBmpa4NegyfbVk5Tk';

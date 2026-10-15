@@ -1274,7 +1274,7 @@ export { pumpQuoteChain, pumpQuoteChainAccounts, MAX_CURVE_DEPTH } from './pump.
 export { inspectSolCoin, configParamsFromPoolConfig, diffPoolConfigs } from './solmimic.js';
 export {
   launchStudio, studioCreateTx, studioRaise, studioVesting, studioClaimables, studioClaim, studioCreatorTokens,
-  studioDevBuy, studioBuildBuy,
+  studioDevBuy, studioBuildBuy, studioPreflight, studioReservedName, studioImageProblem,
   STUDIO_QUOTES, STUDIO_MAX_CLAIMABLE_PCT,
 } from './jupstudio.js';
 import { pumpTrade, pumpCurve } from './pump.js';
