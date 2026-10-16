@@ -6068,6 +6068,139 @@ function ccToggleWatch(pad) {
   tick();
 }
 
+// --- arm a StonkFun launch for a quote not yet approved -----------------------
+//
+// You find a pool you expect StonkFun (Raydium LaunchLab) to admit as a quote.
+// It is not a quote yet - no LaunchpadConfig exists for it - so a normal deploy
+// is refused. ARM it: the metadata is pinned and the Raydium client warmed now,
+// then the quote's config PDA is polled many times a second, and the instant it
+// appears the launch fires with no warm-up, landing within a block or two.
+//
+// Armed to one exact token: if any launch input changes (a VAMP, an edit), it
+// disarms rather than deploy something you did not intend.
+let raydiumArm = null;
+
+// the inputs that define the armed launch; any change disarms
+function raydiumInputsSig(pad) {
+  let quote = ''; try { quote = raydiumQuoteMint(pad); } catch { quote = ''; }
+  return JSON.stringify([
+    $('name').value.trim(), $('symbol').value.trim(), $('desc').value.trim(),
+    $('twitter').value.trim(), $('website').value.trim(), quote,
+    $('raydiumRaise')?.value.trim() || '', $('raydiumFeeBps')?.value || '',
+    $('raydiumDevBuy')?.value.trim() || '', String(ccPlatformId(pad)),
+  ]);
+}
+
+function raydiumArmStatus(m, cls) { const el = $('raydiumArmStatus'); if (el) el.innerHTML = cls ? `<span class="${cls}">${esc(m)}</span>` : esc(m); }
+
+function disarmRaydium(msg, cls) {
+  if (raydiumArm?.timer) clearTimeout(raydiumArm.timer);
+  if (raydiumArm) raydiumArm.aborted = true;
+  raydiumArm = null;
+  const btn = $('raydiumArmBtn');
+  if (btn) { btn.textContent = 'ARM — launch when this quote is approved'; btn.classList.remove('active'); }
+  if (msg) raydiumArmStatus(msg, cls);
+}
+
+async function armRaydium(pad) {
+  if (raydiumArm) { disarmRaydium('disarmed'); return; }
+  try {
+    if (!solKeyB58) throw new Error('load your SOL key first');
+    if (!logoBlob) throw new Error('add a token image first');
+    const name = $('name').value.trim(), symbol = $('symbol').value.trim();
+    if (!name || !symbol) throw new Error('name and ticker are required');
+    const quoteMint = raydiumQuoteMint(pad);      // throws on a half-typed custom mint
+    const S = await import('./solana.js');
+
+    const btn = $('raydiumArmBtn'); if (btn) { btn.textContent = 'ARMING…'; btn.classList.add('active'); }
+    // if the quote is already approved, no need to wait - just launch now
+    if (await S.raydiumConfigExists(pad.rpc, quoteMint)) {
+      raydiumArmStatus('that quote already has a config - launching now');
+      if (btn) btn.textContent = 'DISARM';
+      await launch();
+      disarmRaydium();
+      return;
+    }
+
+    // pin the metadata and warm the client NOW, so the fire path is only
+    // derive + build + send
+    raydiumArmStatus('pinning metadata + warming Raydium…');
+    const imgHash = (await uploadToIpfs(logoBlob)).replace('ipfs://', '');
+    const metaHash = await uploadJsonToIpfs({
+      name, symbol, description: $('desc').value.trim() || DEFAULT_DESC, image: IPFS_GW(imgHash),
+      ...(($('twitter').value.trim() || $('website').value.trim()) ? { extensions: { twitter: $('twitter').value.trim(), website: $('website').value.trim() } } : {}),
+    });
+    const uri = IPFS_GW(metaHash);
+    const client = await S.loadRaydiumClient(pad.rpc, solKeyB58);
+    const mintBInfo = await S.raydiumQuoteInfo(client, quoteMint).catch(() => null);
+
+    const feeBps = pad.token2022 ? +($('raydiumFeeBps')?.value || pad.transferFeeBps || 100) : 0;
+    raydiumArm = {
+      pad, quoteMint, uri, client, mintBInfo, logoBlob, symbol,
+      sig: raydiumInputsSig(pad),
+      opts: {
+        rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint, name, symbol, uri,
+        buyAmountUi: $('raydiumDevBuy').value.trim() || '0',
+        migrateType: 'cpmm', platformId: ccPlatformId(pad),
+        ...(feeBps > 0 ? { token2022: true, transferFeeBps: feeBps } : { token2022: false }),
+        raiseTargetUi: $('raydiumRaise')?.value.trim() || undefined,
+        client, mintBInfo,
+      },
+      pollMs: Math.min(2000, Math.max(100, +($('raydiumArmPoll')?.value || 200))),
+      rpcs: [pad.rpc, ...(SOL_RPC_FALLBACKS || [])],
+      aborted: false, rpcI: 0, tries: 0,
+    };
+    if (btn) btn.textContent = 'DISARM';
+    raydiumArmStatus(`armed · watching ${quoteMint.slice(0, 8)}… ${raydiumArm.pollMs}ms — will launch the instant it is approved`, 'ok');
+    pollRaydiumArm();
+  } catch (e) {
+    disarmRaydium(e?.message || String(e), 'err');
+  }
+}
+
+async function pollRaydiumArm() {
+  const a = raydiumArm;
+  if (!a || a.aborted) return;
+  // halt if the token changed (VAMP or an edit)
+  if (raydiumInputsSig(a.pad) !== a.sig || logoBlob !== a.logoBlob) { disarmRaydium('token changed — disarmed; re-ARM to watch again', 'err'); return; }
+  try {
+    const S = await import('./solana.js');
+    const rpc = a.rpcs[a.rpcI++ % a.rpcs.length];
+    a.tries++;
+    const exists = await S.raydiumConfigExists(rpc, a.quoteMint).catch(() => false);
+    if (!exists) {
+      if (a.tries % 10 === 0) raydiumArmStatus(`watching ${a.quoteMint.slice(0, 8)}… (${a.tries} checks) — not approved yet`);
+      a.timer = setTimeout(pollRaydiumArm, a.pollMs);
+      return;
+    }
+    // approved — fire now, retrying only while the config is not yet visible to
+    // the send path (a race between our 'processed' detection and 'confirmed')
+    a.aborted = true;                 // stop the poll; we are committing
+    raydiumArmStatus('APPROVED — launching…', 'ok');
+    setStatus('quote approved — firing the StonkFun launch…');
+    let res = null;
+    for (let i = 0; i < 40 && !res; i++) {
+      try { res = await S.launchRaydium({ ...a.opts, onStatus: (m) => setStatus(m) }); }
+      catch (e) {
+        if (/no LaunchLab config/.test(e.message)) { await new Promise((r) => setTimeout(r, 150)); continue; }
+        throw e;
+      }
+    }
+    if (!res) throw new Error('the config appeared but was not confirmed in time — try a normal deploy now');
+    rememberLaunch(a.pad, res.mint, a.symbol);
+    $('status').innerHTML = `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>`
+      + `<a href="${a.pad.site(res.mint)}" target="_blank" rel="noopener">token on solscan</a>`
+      + (res.sig ? ` · <a href="${a.pad.explorer}/tx/${res.sig}" target="_blank" rel="noopener">launch tx</a>` : '');
+    raydiumArmStatus('launched ✓', 'ok');
+    disarmRaydium();
+    refreshBalance();
+    renderTokenList();
+  } catch (e) {
+    disarmRaydium('launch failed: ' + (e?.message || String(e)), 'err');
+    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+  }
+}
+
 /// Pull every LaunchLab config that exists on chain and fold the ones this pad
 /// does not already list into the dropdown.
 ///
@@ -6556,6 +6689,7 @@ function init() {
   }
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
+  $('raydiumArmBtn').addEventListener('click', () => { if (activePad.family === 'raydium') armRaydium(activePad); });
   $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });
   const paidBox = $('paidEnabled');
   if (paidBox) {
