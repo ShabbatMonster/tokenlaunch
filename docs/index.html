@@ -378,6 +378,13 @@
       </div>
       <div class="status" id="raydiumScanStatus" style="font-size:11px"></div>
       <div class="hint" id="raydiumHint" style="font-size:11px;margin-top:4px">bonding curve · no liquidity to seed · graduates to a Raydium AMM pool · quote needs a LaunchLab config. SCAN pulls every config that exists on chain, including pairings no launchpad website lists.</div>
+
+      <div class="row" style="margin-top:12px">
+        <div style="flex:3"><button class="btn secondary" id="raydiumArmBtn" style="margin-top:0;width:100%">ARM — launch when this quote is approved</button></div>
+        <div style="flex:1"><label style="margin-top:0">POLL (ms)</label><input type="text" id="raydiumArmPoll" value="200" spellcheck="false"></div>
+      </div>
+      <div class="status" id="raydiumArmStatus" style="font-size:11px;margin-top:4px"></div>
+      <div class="hint" style="font-size:11px;margin-top:4px">For a quote StonkFun hasn’t admitted yet: pick it as a custom quote, set the token up, then ARM. It pins the metadata and warms Raydium now, polls for the quote’s config, and fires the launch the instant it’s approved. Change any field (or VAMP) and it disarms.</div>
     </div>
 
     <!-- Custom single-sided Raydium CLMM curve -->

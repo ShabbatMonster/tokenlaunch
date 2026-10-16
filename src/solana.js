@@ -1787,6 +1787,44 @@ function asErrorShared(e, fallback) {
   return new Error(msg);
 }
 
+// --- arming a launch for a quote not yet approved on LaunchLab ----------------
+//
+// A LaunchLab quote only works once Raydium's admin creates its LaunchpadConfig
+// PDA - which is exactly what "approved on StonkFun" means. These let the pad
+// watch that PDA and fire the moment it exists, with the client pre-loaded and
+// the quote info pre-fetched so the launch builds and sends with no warm-up.
+
+/// The LaunchpadConfig PDA for a quote mint (index 0, constant-product curve).
+export function raydiumConfigId(quoteMint) {
+  return getPdaLaunchpadConfigId(LAUNCHPAD_PROGRAM, new PublicKey(quoteMint), 0, 0).publicKey;
+}
+
+/// Whether that config exists yet - the arm loop polls this. `processed` sees
+/// it the instant it lands, a beat before `confirmed`.
+export async function raydiumConfigExists(rpcUrl, quoteMint, commitment = 'processed') {
+  const connection = typeof rpcUrl === 'string' ? new Connection(rpcUrl, commitment) : rpcUrl;
+  const info = await connection.getAccountInfo(raydiumConfigId(quoteMint), commitment);
+  return !!info;
+}
+
+/// A Raydium client loaded once, to reuse when the config appears (the load is
+/// the slow part; doing it at arm time is what makes the fire near-instant).
+export async function loadRaydiumClient(rpcUrl, secretKey) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const owner = keypairFromSecret(secretKey);
+  const raydium = await Raydium.load({
+    connection, owner, cluster: 'mainnet',
+    disableFeatureCheck: true, disableLoadToken: true, blockhashCommitment: 'finalized',
+  });
+  return raydium;
+}
+
+/// The quote token's info, fetched at arm time (the mint exists even before its
+/// config does), to hand launchRaydium so it skips the lookup when it fires.
+export async function raydiumQuoteInfo(client, quoteMint) {
+  return client.token.getTokenInfo(new PublicKey(quoteMint));
+}
+
 export async function launchRaydium(opts) {
   const {
     rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId,
@@ -1802,17 +1840,25 @@ export async function launchRaydium(opts) {
     // is not the same as "it will work". ownerPubkey stands in for secretKey
     // when dry running, so a simulation never needs the key at all.
     dryRun, ownerPubkey,
+    // Pre-warm, for firing the instant a quote's config is approved: a Raydium
+    // client already loaded (loadRaydiumClient) and the quote's token info
+    // already fetched, both at arm time, so the fire path is only derive +
+    // build + send. See the StonkFun "arm" flow in main.js.
+    client, mintBInfo: preMintBInfo,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
   if (!secretKey && !(dryRun && ownerPubkey)) throw new Error('launchRaydium needs a secret key (or ownerPubkey with dryRun)');
   const owner = secretKey ? keypairFromSecret(secretKey) : new PublicKey(ownerPubkey);
 
-  say('loading Raydium SDK…');
-  const raydium = await Raydium.load({
-    connection, owner, cluster: 'mainnet',
-    disableFeatureCheck: true, disableLoadToken: true, blockhashCommitment: 'finalized',
-  });
+  let raydium = client;
+  if (!raydium) {
+    say('loading Raydium SDK…');
+    raydium = await Raydium.load({
+      connection, owner, cluster: 'mainnet',
+      disableFeatureCheck: true, disableLoadToken: true, blockhashCommitment: 'finalized',
+    });
+  }
 
   const programId = LAUNCHPAD_PROGRAM;
   const quote = new PublicKey(quoteMint);
@@ -1823,7 +1869,7 @@ export async function launchRaydium(opts) {
     throw new Error('no LaunchLab config exists for that quote token — LaunchLab needs a config per quote (SOL / USD1 / Anon / USDC / USDT / EURC / TRUMP / NVDAx / SPYx / CRCLx are live). For an arbitrary quote, use the Meteora pad instead.');
   }
   const configInfo = LaunchpadConfig.decode(configData.data);
-  const mintBInfo = await raydium.token.getTokenInfo(configInfo.mintB);
+  const mintBInfo = preMintBInfo || await raydium.token.getTokenInfo(configInfo.mintB);
 
   const pair = Keypair.generate(); // base mint keypair
   const buyRaw = toRawUnits(buyAmountUi, mintBInfo.decimals);
