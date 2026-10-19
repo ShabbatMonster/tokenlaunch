@@ -6,7 +6,7 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 import {
   SOL_RPC as SHARED_SOL_RPC, SOL_RPC_FALLBACKS as SHARED_SOL_RPC_FALLBACKS,
-  SOL_RPCS, healthyRpc, rpcStatus, rpcLabel,
+  SOL_RPCS, HELIUS_RPCS, healthyRpc, rpcStatus, rpcLabel,
 } from './rpc.js';
 import { FAIRTOKEN_BYTECODE, FAIRTOKEN_ABI, FAIRTOKEN_TAX_BYTECODE, FAIRTOKEN_TAX_ABI } from './fairtoken.js';
 import { buildPoolsLaunch, buildPoolsTokenData, selfTestPoolsLaunch, POOLS_LAUNCHER, POOLS_POOL_STRATEGY } from './poolsAtomic.js';
@@ -6068,136 +6068,232 @@ function ccToggleWatch(pad) {
   tick();
 }
 
-// --- arm a StonkFun launch for a quote not yet approved -----------------------
+// --- StonkFun snipe queue ------------------------------------------------------
 //
-// You find a pool you expect StonkFun (Raydium LaunchLab) to admit as a quote.
-// It is not a quote yet - no LaunchpadConfig exists for it - so a normal deploy
-// is refused. ARM it: the metadata is pinned and the Raydium client warmed now,
-// then the quote's config PDA is polled many times a second, and the instant it
-// appears the launch fires with no warm-up, landing within a block or two.
+// Queue a coin against a quote Raydium has not approved yet, and be the first
+// coin on it. Each queued snipe pins its metadata, pre-builds and signs the
+// launch (+ dev buy, priority fee, bribe) before the quote's LaunchLab config
+// exists, spams it as a bundle while waiting (a failing bundle is dropped and
+// costs nothing) and blasts it down every path the instant the config appears -
+// aiming for the approval's own block. The engine is src/stonkSnipe.js.
 //
-// Armed to one exact token: if any launch input changes (a VAMP, an edit), it
-// disarms rather than deploy something you did not intend.
-let raydiumArm = null;
+// The queue (token details, settings, log, result) is kept in this browser.
+// The private key is not: it stays in memory, so after a reload each snipe
+// waits for RE-ARM.
+const SNIPE_KEY = 'stonk.snipes.v1';
+const SNIPE_SETTINGS_KEY = 'stonk.snipe.settings.v1';
+const SNIPE_LIVE_STATES = new Set(['preparing', 'armed', 'firing']);
+const snipeLive = new Map();   // id -> StonkSnipe
+const loadSnipes = () => { try { return JSON.parse(localStorage.getItem(SNIPE_KEY) || '[]'); } catch { return []; } };
+const saveSnipes = (l) => { try { localStorage.setItem(SNIPE_KEY, JSON.stringify(l)); } catch { /* full or blocked */ } };
 
-// the inputs that define the armed launch; any change disarms
-function raydiumInputsSig(pad) {
-  let quote = ''; try { quote = raydiumQuoteMint(pad); } catch { quote = ''; }
-  return JSON.stringify([
-    $('name').value.trim(), $('symbol').value.trim(), $('desc').value.trim(),
-    $('twitter').value.trim(), $('website').value.trim(), quote,
-    $('raydiumRaise')?.value.trim() || '', $('raydiumFeeBps')?.value || '',
-    $('raydiumDevBuy')?.value.trim() || '', String(ccPlatformId(pad)),
-  ]);
+function snipeSettings() {
+  const num = (id, d) => { const v = Number($(id)?.value); return Number.isFinite(v) && v >= 0 ? v : d; };
+  return {
+    prioSol: num('snipePrio', 0.05),
+    tipSol: num('snipeTip', 0.01),
+    service: $('snipeService')?.value || 'helius',
+    customUrl: $('snipeCustomUrl')?.value.trim() || '',
+    customTipAccount: $('snipeCustomTip')?.value.trim() || '',
+    cuLimit: Math.max(200_000, Math.min(1_400_000, Math.round(num('snipeCu', 300_000)))),
+    spamMs: Math.max(50, Math.round(num('snipeSpam', 200))),
+  };
+}
+function saveSnipeSettings() { try { localStorage.setItem(SNIPE_SETTINGS_KEY, JSON.stringify(snipeSettings())); } catch { /* ignore */ } }
+function restoreSnipeSettings() {
+  let s = null; try { s = JSON.parse(localStorage.getItem(SNIPE_SETTINGS_KEY) || 'null'); } catch { s = null; }
+  if (s) {
+    const set = (id, v) => { if ($(id) && v != null) $(id).value = v; };
+    set('snipePrio', s.prioSol); set('snipeTip', s.tipSol); set('snipeService', s.service);
+    set('snipeCustomUrl', s.customUrl); set('snipeCustomTip', s.customTipAccount);
+    set('snipeCu', s.cuLimit); set('snipeSpam', s.spamMs);
+  }
+  $('snipeCustomRow')?.classList.toggle('hidden', $('snipeService')?.value !== 'custom');
+  // nothing runs across a reload - a snipe that was live is now waiting on RE-ARM
+  const l = loadSnipes();
+  let changed = false;
+  for (const it of l) if (SNIPE_LIVE_STATES.has(it.state) && !snipeLive.has(it.id)) { it.state = 'paused'; changed = true; }
+  if (changed) saveSnipes(l);
 }
 
-function raydiumArmStatus(m, cls) { const el = $('raydiumArmStatus'); if (el) el.innerHTML = cls ? `<span class="${cls}">${esc(m)}</span>` : esc(m); }
+function snipeStatus(m, cls) { const el = $('snipeStatus'); if (el) el.innerHTML = cls ? `<span class="${cls}">${esc(m)}</span>` : esc(m); }
 
-function disarmRaydium(msg, cls) {
-  if (raydiumArm?.timer) clearTimeout(raydiumArm.timer);
-  if (raydiumArm) raydiumArm.aborted = true;
-  raydiumArm = null;
-  const btn = $('raydiumArmBtn');
-  if (btn) { btn.textContent = 'ARM — launch when this quote is approved'; btn.classList.remove('active'); }
-  if (msg) raydiumArmStatus(msg, cls);
+function patchSnipe(id, fn) {
+  const l = loadSnipes();
+  const it = l.find((x) => x.id === id);
+  if (!it) return null;
+  fn(it);
+  saveSnipes(l);
+  renderSnipes();
+  return it;
 }
 
-async function armRaydium(pad) {
-  if (raydiumArm) { disarmRaydium('disarmed'); return; }
+function snipeLog(id, line) {
+  patchSnipe(id, (it) => { it.log = [...(it.log || []), line].slice(-300); });
+}
+
+const SNIPE_STATE_LABEL = {
+  queued: 'queued', preparing: 'building…', armed: 'ARMED — waiting for approval', firing: 'APPROVED — firing',
+  landed: 'LANDED ✓', failed: 'failed', error: 'error', disarmed: 'disarmed', paused: 'paused (page reloaded) — re-arm',
+};
+
+function renderSnipes() {
+  const box = $('snipeQueue');
+  if (!box) return;
+  const l = loadSnipes();
+  if (!l.length) { box.innerHTML = '<span class="hint">nothing queued</span>'; return; }
+  const open = new Set([...box.querySelectorAll('details[open]')].map((d) => d.dataset.id));
+  box.innerHTML = l.map((it) => {
+    const live = snipeLive.has(it.id);
+    const st = SNIPE_STATE_LABEL[it.state] || it.state;
+    const stCls = it.state === 'landed' ? 'ok' : (it.state === 'armed' || it.state === 'firing') ? 'ok' : (it.state === 'failed' || it.state === 'error') ? 'err' : '';
+    const r = it.report;
+    const det = [
+      ['quote', `${it.quoteLabel ? it.quoteLabel + ' · ' : ''}${it.quoteMint}`],
+      ['config PDA', it.configId || '—'],
+      ['platform', it.platformId],
+      ['mint', it.mint || '(made when armed)'],
+      ['pool', it.poolId || '—'],
+      ['dev buy', `${it.devBuyUi || 0} quote`],
+      ['raise', it.raiseUi || 'platform default'],
+      ['transfer fee', it.transferFeeBps ? `${it.transferFeeBps} bps (Token-2022)` : 'none (SPL)'],
+      ['priority', `${it.prioSol} SOL over ${it.cuLimit} CU`],
+      ['bribe', `${it.tipSol} SOL via ${it.service}${it.service === 'custom' ? ` (${it.customUrl || 'no url'} → ${it.customTipAccount || 'no tip acct'})` : ''}`],
+      ['spam', `${it.spamMs} ms`],
+      ['description', it.description || ''],
+      ['twitter / web', [it.twitter, it.website].filter(Boolean).join(' · ') || '—'],
+      ['image', it.image],
+      ['metadata', it.uri],
+      ['queued', new Date(it.createdAt).toLocaleString()],
+      ...(it.sig ? [['launch tx', it.sig]] : []),
+      ...(r ? [['landing', r.sameBlock ? `SAME BLOCK as approval · slot ${r.launchSlot} · approval idx ${r.approvalIndex} · ours idx ${r.launchIndex}`
+        : `${r.slotsAfter} slot(s) after approval · approval ${r.approvalSlot}/${r.approvalIndex} · ours ${r.launchSlot}/${r.launchIndex}`]] : []),
+    ];
+    const canArm = !live && it.state !== 'landed';
+    return `<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:6px">`
+      + `<div class="row" style="align-items:center;gap:8px">`
+      + `<div style="flex:1;min-width:0"><b>${esc(it.symbol)}</b> · ${esc(it.name)} <span class="hint">→ ${esc(it.quoteLabel || it.quoteMint.slice(0, 6) + '…')}`
+      + ` · dev ${esc(it.devBuyUi || 0)} · prio ${esc(it.prioSol)} · bribe ${esc(it.tipSol)}</span>`
+      + `<div style="font-size:11px" class="${stCls}">${esc(st)}${it.mint && it.state === 'landed' ? ` · <a href="https://solscan.io/token/${esc(it.mint)}" target="_blank" rel="noopener">${esc(it.mint.slice(0, 8))}…</a>` : ''}`
+      + `${it.sig ? ` · <a href="https://solscan.io/tx/${esc(it.sig)}" target="_blank" rel="noopener">tx</a>` : ''}</div></div>`
+      + (live ? `<button class="btn sell" data-snipe-disarm="${esc(it.id)}" style="margin-top:0;flex:0 0 100px;padding:7px">DISARM</button>`
+        : canArm ? `<button class="btn" data-snipe-arm="${esc(it.id)}" style="margin-top:0;flex:0 0 100px;padding:7px">${it.state === 'queued' ? 'ARM' : 'RE-ARM'}</button>` : '')
+      + `<button class="btn secondary" data-snipe-copy="${esc(it.id)}" style="margin-top:0;flex:0 0 60px;padding:7px">COPY</button>`
+      + `<button class="btn secondary" data-snipe-drop="${esc(it.id)}" style="margin-top:0;flex:0 0 40px;padding:7px">×</button>`
+      + `</div>`
+      + `<details data-id="${esc(it.id)}"${open.has(it.id) ? ' open' : ''} style="font-size:11px;margin-top:4px"><summary class="hint">details + log (${(it.log || []).length})</summary>`
+      + `<table style="font-size:11px;margin-top:4px;word-break:break-all">${det.map(([k, v]) => `<tr><td class="hint" style="padding-right:8px;white-space:nowrap;vertical-align:top">${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>`
+      + `<pre style="font-size:10.5px;max-height:220px;overflow:auto;white-space:pre-wrap;margin-top:6px">${esc((it.log || []).join('\n'))}</pre>`
+      + `</details></div>`;
+  }).join('');
+  box.querySelectorAll('[data-snipe-arm]').forEach((b) => { b.onclick = () => armSnipe(b.dataset.snipeArm, true); });
+  box.querySelectorAll('[data-snipe-disarm]').forEach((b) => { b.onclick = () => snipeLive.get(b.dataset.snipeDisarm)?.disarm(); });
+  box.querySelectorAll('[data-snipe-copy]').forEach((b) => {
+    b.onclick = () => {
+      const it = loadSnipes().find((x) => x.id === b.dataset.snipeCopy);
+      if (it) navigator.clipboard?.writeText(JSON.stringify(it, null, 2)).then(() => snipeStatus('copied the snipe details + log', 'ok')).catch(() => {});
+    };
+  });
+  box.querySelectorAll('[data-snipe-drop]').forEach((b) => {
+    b.onclick = () => {
+      const id = b.dataset.snipeDrop;
+      const sn = snipeLive.get(id);
+      if (sn) { sn.disarm(); snipeLive.delete(id); }
+      saveSnipes(loadSnipes().filter((x) => x.id !== id));
+      renderSnipes();
+    };
+  });
+}
+
+/// Capture the form as a snipe: pin the image + metadata now so the armed
+/// path never waits on IPFS, then arm it.
+async function addSnipe(pad) {
+  const btn = $('snipeAddBtn');
   try {
     if (!solKeyB58) throw new Error('load your SOL key first');
     if (!logoBlob) throw new Error('add a token image first');
     const name = $('name').value.trim(), symbol = $('symbol').value.trim();
     if (!name || !symbol) throw new Error('name and ticker are required');
     const quoteMint = raydiumQuoteMint(pad);      // throws on a half-typed custom mint
-    const S = await import('./solana.js');
-
-    const btn = $('raydiumArmBtn'); if (btn) { btn.textContent = 'ARMING…'; btn.classList.add('active'); }
-    // if the quote is already approved, no need to wait - just launch now
-    if (await S.raydiumConfigExists(pad.rpc, quoteMint)) {
-      raydiumArmStatus('that quote already has a config - launching now');
-      if (btn) btn.textContent = 'DISARM';
-      await launch();
-      disarmRaydium();
-      return;
-    }
-
-    // pin the metadata and warm the client NOW, so the fire path is only
-    // derive + build + send
-    raydiumArmStatus('pinning metadata + warming Raydium…');
+    const s = snipeSettings();
+    if (s.service === 'custom' && (!s.customUrl || !isSolAddress(s.customTipAccount))) throw new Error('a custom landing service needs its URL and tip account');
+    saveSnipeSettings();
+    if (btn) btn.disabled = true;
+    snipeStatus('pinning image + metadata…');
+    const description = $('desc').value.trim() || DEFAULT_DESC;
+    const twitter = $('twitter').value.trim(), website = $('website').value.trim();
     const imgHash = (await uploadToIpfs(logoBlob)).replace('ipfs://', '');
+    const image = IPFS_GW(imgHash);
     const metaHash = await uploadJsonToIpfs({
-      name, symbol, description: $('desc').value.trim() || DEFAULT_DESC, image: IPFS_GW(imgHash),
-      ...(($('twitter').value.trim() || $('website').value.trim()) ? { extensions: { twitter: $('twitter').value.trim(), website: $('website').value.trim() } } : {}),
+      name, symbol, description, image,
+      ...((twitter || website) ? { extensions: { twitter, website } } : {}),
     });
-    const uri = IPFS_GW(metaHash);
-    const client = await S.loadRaydiumClient(pad.rpc, solKeyB58);
-    const mintBInfo = await S.raydiumQuoteInfo(client, quoteMint).catch(() => null);
-
+    const sel = $('raydiumQuoteSelect').value;
     const feeBps = pad.token2022 ? +($('raydiumFeeBps')?.value || pad.transferFeeBps || 100) : 0;
-    raydiumArm = {
-      pad, quoteMint, uri, client, mintBInfo, logoBlob, symbol,
-      sig: raydiumInputsSig(pad),
-      opts: {
-        rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint, name, symbol, uri,
-        buyAmountUi: $('raydiumDevBuy').value.trim() || '0',
-        migrateType: 'cpmm', platformId: ccPlatformId(pad),
-        ...(feeBps > 0 ? { token2022: true, transferFeeBps: feeBps } : { token2022: false }),
-        raiseTargetUi: $('raydiumRaise')?.value.trim() || undefined,
-        client, mintBInfo,
-      },
-      pollMs: Math.min(2000, Math.max(100, +($('raydiumArmPoll')?.value || 200))),
-      rpcs: [pad.rpc, ...(SOL_RPC_FALLBACKS || [])],
-      aborted: false, rpcI: 0, tries: 0,
+    const it = {
+      id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+      createdAt: Date.now(), padId: pad.id,
+      name, symbol, description, twitter, website, image, uri: IPFS_GW(metaHash),
+      quoteMint, quoteLabel: sel && !/^custom/.test(sel) ? sel : '',
+      platformId: String(ccPlatformId(pad)),
+      devBuyUi: $('raydiumDevBuy').value.trim() || '0',
+      raiseUi: $('raydiumRaise')?.value.trim() || '',
+      transferFeeBps: feeBps > 0 ? feeBps : 0,
+      ...s,
+      state: 'queued', log: [], mint: null, poolId: null, configId: null, sig: null, report: null,
     };
-    if (btn) btn.textContent = 'DISARM';
-    raydiumArmStatus(`armed · watching ${quoteMint.slice(0, 8)}… ${raydiumArm.pollMs}ms — will launch the instant it is approved`, 'ok');
-    pollRaydiumArm();
+    saveSnipes([...loadSnipes(), it]);
+    renderSnipes();
+    snipeStatus(`queued ${symbol} — arming…`, 'ok');
+    await armSnipe(it.id, false);
   } catch (e) {
-    disarmRaydium(e?.message || String(e), 'err');
+    snipeStatus(e?.message || String(e), 'err');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
-async function pollRaydiumArm() {
-  const a = raydiumArm;
-  if (!a || a.aborted) return;
-  // halt if the token changed (VAMP or an edit)
-  if (raydiumInputsSig(a.pad) !== a.sig || logoBlob !== a.logoBlob) { disarmRaydium('token changed — disarmed; re-ARM to watch again', 'err'); return; }
+async function armSnipe(id, applySettings) {
+  if (snipeLive.has(id)) return;
   try {
-    const S = await import('./solana.js');
-    const rpc = a.rpcs[a.rpcI++ % a.rpcs.length];
-    a.tries++;
-    const exists = await S.raydiumConfigExists(rpc, a.quoteMint).catch(() => false);
-    if (!exists) {
-      if (a.tries % 10 === 0) raydiumArmStatus(`watching ${a.quoteMint.slice(0, 8)}… (${a.tries} checks) — not approved yet`);
-      a.timer = setTimeout(pollRaydiumArm, a.pollMs);
-      return;
-    }
-    // approved — fire now, retrying only while the config is not yet visible to
-    // the send path (a race between our 'processed' detection and 'confirmed')
-    a.aborted = true;                 // stop the poll; we are committing
-    raydiumArmStatus('APPROVED — launching…', 'ok');
-    setStatus('quote approved — firing the StonkFun launch…');
-    let res = null;
-    for (let i = 0; i < 40 && !res; i++) {
-      try { res = await S.launchRaydium({ ...a.opts, onStatus: (m) => setStatus(m) }); }
-      catch (e) {
-        if (/no LaunchLab config/.test(e.message)) { await new Promise((r) => setTimeout(r, 150)); continue; }
-        throw e;
-      }
-    }
-    if (!res) throw new Error('the config appeared but was not confirmed in time — try a normal deploy now');
-    rememberLaunch(a.pad, res.mint, a.symbol);
-    $('status').innerHTML = `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>`
-      + `<a href="${a.pad.site(res.mint)}" target="_blank" rel="noopener">token on solscan</a>`
-      + (res.sig ? ` · <a href="${a.pad.explorer}/tx/${res.sig}" target="_blank" rel="noopener">launch tx</a>` : '');
-    raydiumArmStatus('launched ✓', 'ok');
-    disarmRaydium();
-    refreshBalance();
-    renderTokenList();
+    if (!solKeyB58) throw new Error('load your SOL key first');
+    // RE-ARM picks up whatever priority / bribe / landing settings are entered now
+    if (applySettings) { saveSnipeSettings(); patchSnipe(id, (x) => Object.assign(x, snipeSettings())); }
+    const it = loadSnipes().find((x) => x.id === id);
+    if (!it) return;
+    const pad = PADS.find((p) => p.id === it.padId) || activePad;
+    const { StonkSnipe } = await import('./stonkSnipe.js');
+    const rpcUrls = [...new Set([pad.rpc, ...HELIUS_RPCS].filter(Boolean))];
+    const sn = new StonkSnipe({ ...it, rpcUrls, secretKey: solKeyB58, raiseUi: it.raiseUi || undefined }, {
+      onLog: (m) => snipeLog(id, m),
+      onState: (state, d = {}) => {
+        if (state === 'landed' || state === 'failed' || state === 'disarmed') snipeLive.delete(id);
+        patchSnipe(id, (x) => {
+          x.state = state;
+          if (d.mint) x.mint = d.mint;
+          if (d.configId) x.configId = d.configId;
+          if (d.sig) x.sig = d.sig;
+          if (d.report) x.report = d.report;
+          if (sn.prep) { x.mint = sn.prep.mint; x.poolId = sn.prep.poolId; x.configId = sn.configId || x.configId; }
+        });
+        if (state === 'landed' && !d.report) {
+          rememberLaunch(pad, d.mint, it.symbol);
+          snipeStatus(`${it.symbol} LANDED — ${d.mint}`, 'ok');
+          refreshBalance();
+          renderTokenList();
+        }
+        if (state === 'failed') snipeStatus(`${it.symbol}: ${d.reason || 'failed'}`, 'err');
+      },
+    });
+    snipeLive.set(id, sn);
+    patchSnipe(id, (x) => { x.state = 'preparing'; x.report = null; });
+    await sn.arm();
   } catch (e) {
-    disarmRaydium('launch failed: ' + (e?.message || String(e)), 'err');
-    $('status').innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    const sn = snipeLive.get(id);
+    if (sn) { sn.stop(); snipeLive.delete(id); }
+    snipeLog(id, `${new Date().toISOString().slice(11, 23)} error: ${e?.message || String(e)}`);
+    patchSnipe(id, (x) => { x.state = 'error'; });
+    snipeStatus(e?.message || String(e), 'err');
   }
 }
 
@@ -6689,7 +6785,13 @@ function init() {
   }
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
-  $('raydiumArmBtn').addEventListener('click', () => { if (activePad.family === 'raydium') armRaydium(activePad); });
+  $('snipeAddBtn').addEventListener('click', () => { if (activePad.family === 'raydium') addSnipe(activePad); });
+  $('snipeService').addEventListener('change', () => { $('snipeCustomRow').classList.toggle('hidden', $('snipeService').value !== 'custom'); saveSnipeSettings(); });
+  ['snipePrio', 'snipeTip', 'snipeCu', 'snipeSpam', 'snipeCustomUrl', 'snipeCustomTip'].forEach((id) => $(id).addEventListener('change', saveSnipeSettings));
+  restoreSnipeSettings();
+  renderSnipes();
+  // a page with a live snipe should not be closed by accident
+  window.addEventListener('beforeunload', (e) => { if (snipeLive.size) { e.preventDefault(); e.returnValue = ''; } });
   $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });
   const paidBox = $('paidEnabled');
   if (paidBox) {

@@ -379,12 +379,37 @@
       <div class="status" id="raydiumScanStatus" style="font-size:11px"></div>
       <div class="hint" id="raydiumHint" style="font-size:11px;margin-top:4px">bonding curve · no liquidity to seed · graduates to a Raydium AMM pool · quote needs a LaunchLab config. SCAN pulls every config that exists on chain, including pairings no launchpad website lists.</div>
 
-      <div class="row" style="margin-top:12px">
-        <div style="flex:3"><button class="btn secondary" id="raydiumArmBtn" style="margin-top:0;width:100%">ARM — launch when this quote is approved</button></div>
-        <div style="flex:1"><label style="margin-top:0">POLL (ms)</label><input type="text" id="raydiumArmPoll" value="200" spellcheck="false"></div>
+      <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px">
+        <label style="margin-top:0">SNIPE QUEUE — be the first coin on a quote the block Raydium approves it</label>
+        <div class="row">
+          <div><label style="margin-top:0">PRIORITY FEE (SOL)</label><input type="text" id="snipePrio" value="0.05" spellcheck="false"></div>
+          <div><label style="margin-top:0">BRIBE (SOL)</label><input type="text" id="snipeTip" value="0.01" spellcheck="false"></div>
+          <div><label style="margin-top:0">LAND VIA</label><select id="snipeService">
+            <option value="helius">Helius Sender (Jito + 3 more)</option>
+            <option value="jito">Jito block engines</option>
+            <option value="custom">custom endpoint</option>
+          </select></div>
+        </div>
+        <div class="row hidden" id="snipeCustomRow" style="margin-top:8px">
+          <div style="flex:2"><label style="margin-top:0">SEND URL (JSON-RPC sendTransaction)</label><input type="text" id="snipeCustomUrl" spellcheck="false" placeholder="https://…"></div>
+          <div style="flex:2"><label style="margin-top:0">BRIBE ACCOUNT</label><input type="text" id="snipeCustomTip" spellcheck="false" placeholder="tip account address"></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <div><label style="margin-top:0">CU LIMIT</label><input type="text" id="snipeCu" value="300000" spellcheck="false"></div>
+          <div><label style="margin-top:0">BUNDLE SPAM (ms)</label><input type="text" id="snipeSpam" value="200" spellcheck="false"></div>
+          <div style="flex:2"><label style="margin-top:0">&nbsp;</label><button class="btn" id="snipeAddBtn" style="margin-top:0;width:100%">ADD TO SNIPE QUEUE + ARM</button></div>
+        </div>
+        <div class="status" id="snipeStatus" style="font-size:11px;margin-top:4px"></div>
+        <div id="snipeQueue" style="font-size:12px;margin-top:4px"></div>
+        <div class="hint" style="font-size:11px;margin-top:6px">Pick the quote (custom mint for one StonkFun hasn&rsquo;t admitted yet),
+        set the token up above, then queue it. The image and metadata are pinned and the launch + dev buy are built and signed
+        <b>now</b>, before the quote&rsquo;s config exists. While armed it&rsquo;s sent as a bundle every few hundred ms &mdash; a bundle
+        that fails is dropped and costs nothing &mdash; so the first one the block engine tries after Raydium&rsquo;s approval lands,
+        ideally in that same block. The moment the config appears (websocket + polling) the same signed tx is blasted down every
+        path. The priority fee is the total SOL, spread over the CU limit; the bribe is a tip transfer (Helius Sender wants &ge; 0.001).
+        A dev buy needs the quote already in the wallet. Keep this tab open &mdash; the queue survives a reload but your key doesn&rsquo;t,
+        so re-arm after one. RE-ARM uses the fee settings entered now.</div>
       </div>
-      <div class="status" id="raydiumArmStatus" style="font-size:11px;margin-top:4px"></div>
-      <div class="hint" style="font-size:11px;margin-top:4px">For a quote StonkFun hasn’t admitted yet: pick it as a custom quote, set the token up, then ARM. It pins the metadata and warms Raydium now, polls for the quote’s config, and fires the launch the instant it’s approved. Change any field (or VAMP) and it disarms.</div>
     </div>
 
     <!-- Custom single-sided Raydium CLMM curve -->
