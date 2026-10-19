@@ -53,7 +53,7 @@ export const QUOTE_PRESETS = {
 const DECIMAL_ENUM = { 6: TokenDecimal.SIX, 7: TokenDecimal.SEVEN, 8: TokenDecimal.EIGHT, 9: TokenDecimal.NINE };
 
 // accept a base58 secret key (Phantom export) or a JSON array of 64 bytes
-function keypairFromSecret(secret) {
+export function keypairFromSecret(secret) {
   const s = secret.trim();
   if (s.startsWith('[')) {
     const arr = Uint8Array.from(JSON.parse(s));
@@ -1825,6 +1825,8 @@ export async function raydiumQuoteInfo(client, quoteMint) {
   return client.token.getTokenInfo(new PublicKey(quoteMint));
 }
 
+const LAUNCHLAB_BUY_EXACT_IN = Buffer.from('faea0d7bd59c13ec', 'hex');
+
 export async function launchRaydium(opts) {
   const {
     rpcUrl, secretKey, quoteMint, name, symbol, uri, buyAmountUi, migrateType, platformId,
@@ -1845,10 +1847,20 @@ export async function launchRaydium(opts) {
     // already fetched, both at arm time, so the fire path is only derive +
     // build + send. See the StonkFun "arm" flow in main.js.
     client, mintBInfo: preMintBInfo,
+    // Sniping a quote before it is approved (stonkSnipe.js): build the launch
+    // without sending it, against a stand-in config when the real one does
+    // not exist yet. The instructions only need the config's ADDRESS (a PDA of
+    // the quote); the SDK reads mintB/curveType/migrateFee off configInfo and
+    // would otherwise fetch it. minMintAAmountRaw replaces the SDK's own
+    // minimum-out maths, which leans on the config's fee rate.
+    prebuild = false, configInfoOverride = null, minMintAAmountRaw = null,
+    // test only: use the override even when the config exists, to prove the
+    // stand-in builds the same instructions as the real thing
+    forceConfigOverride = false,
   } = opts;
   const say = (m) => onStatus && onStatus(m);
   const connection = new Connection(rpcUrl, 'confirmed');
-  if (!secretKey && !(dryRun && ownerPubkey)) throw new Error('launchRaydium needs a secret key (or ownerPubkey with dryRun)');
+  if (!secretKey && !((dryRun || prebuild) && ownerPubkey)) throw new Error('launchRaydium needs a secret key (or ownerPubkey with dryRun / prebuild)');
   const owner = secretKey ? keypairFromSecret(secretKey) : new PublicKey(ownerPubkey);
 
   let raydium = client;
@@ -1865,10 +1877,10 @@ export async function launchRaydium(opts) {
   // config PDA binds the quote mint (index 0, constant-product curveType 0)
   const configId = getPdaLaunchpadConfigId(programId, quote, 0, 0).publicKey;
   const configData = await connection.getAccountInfo(configId);
-  if (!configData) {
+  if (!configData && !configInfoOverride) {
     throw new Error('no LaunchLab config exists for that quote token — LaunchLab needs a config per quote (SOL / USD1 / Anon / USDC / USDT / EURC / TRUMP / NVDAx / SPYx / CRCLx are live). For an arbitrary quote, use the Meteora pad instead.');
   }
-  const configInfo = LaunchpadConfig.decode(configData.data);
+  const configInfo = configData && !(forceConfigOverride && configInfoOverride) ? LaunchpadConfig.decode(configData.data) : configInfoOverride;
   const mintBInfo = preMintBInfo || await raydium.token.getTokenInfo(configInfo.mintB);
 
   const pair = Keypair.generate(); // base mint keypair
@@ -2082,6 +2094,7 @@ export async function launchRaydium(opts) {
       // 6GmAFSYs... sitting in EqvKTd3r... while its ATA did not exist at all.
       associatedOnly: false,
       slippage: new BN(100), // 1%
+      ...(minMintAAmountRaw != null ? { minMintAAmount: new BN(String(minMintAAmountRaw)) } : {}),
       buyAmount: doBuy ? buyRaw : new BN(1),
       createOnly: !doBuy, // no dev buy -> create the mint only
       extraSigners: [pair],
@@ -2169,9 +2182,14 @@ export async function launchRaydium(opts) {
       say(allowConfigId
         ? 'platform wants an allow config — attaching it ahead of the curve-rule slot…'
         : (curveRuleInfo ? 'platform has a curve rule — attaching it…' : 'attaching the curve-rule slot…'));
+      // Only the initialize instruction pops these. A dev buy in the same
+      // transaction is a separate LaunchLab instruction (buy_exact_in, 18
+      // accounts) and takes none - the ALTCOIN snipe that landed in the
+      // approval block (5m8XU9rz...) passes them on its initialize alone.
       let patched = 0;
       for (const ix of builder.instructions) {
         if (!ix.programId.equals(programId)) continue;
+        if (Buffer.from(ix.data).subarray(0, 8).equals(LAUNCHLAB_BUY_EXACT_IN)) continue;
         for (const pubkey of extra) ix.keys.push({ pubkey, isSigner: false, isWritable: false });
         patched++;
       }
@@ -2193,6 +2211,26 @@ export async function launchRaydium(opts) {
   // rejects with a bare `undefined` on timeout/failure — no message, no logs).
   // We send here, then confirm ourselves over plain HTTP polling below, which
   // is slower per call but gives real, attributable errors.
+  // Pre-build stops here: the patched instructions (no compute budget - the
+  // sniper sets its own fee) and the mint keypair that must co-sign them.
+  if (prebuild) {
+    const cb = ComputeBudgetProgram.programId;
+    const instructions = [...(builder.instructions || []), ...(builder.endInstructions || [])].filter((ix) => !ix.programId.equals(cb));
+    return {
+      prebuilt: true, instructions, mintKeypair: pair, owner: owner.publicKey,
+      mint: pair.publicKey.toBase58(), configId: configId.toBase58(),
+      configExists: !!configData,
+      curveRule: curveRuleId ? curveRuleId.toBase58() : null,
+      allowConfig: allowConfigId ? allowConfigId.toBase58() : null,
+      quoteDecimals: mintBInfo.decimals,
+      curve: {
+        supply: curveOverride.supply?.toString() ?? null,
+        totalSellA: curveOverride.totalSellA?.toString() ?? null,
+        totalFundRaisingB: curveOverride.totalFundRaisingB?.toString() ?? null,
+      },
+    };
+  }
+
   // A dry run stops here, having built exactly what a real launch would send.
   // Simulating rather than sending is what makes the window check meaningful:
   // the allow config has to exist AT THE MOMENT the program runs, and only the
