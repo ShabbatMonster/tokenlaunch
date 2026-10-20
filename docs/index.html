@@ -384,11 +384,19 @@
         <div class="row">
           <div><label style="margin-top:0">PRIORITY FEE (SOL)</label><input type="text" id="snipePrio" value="0.05" spellcheck="false"></div>
           <div><label style="margin-top:0">BRIBE (SOL)</label><input type="text" id="snipeTip" value="0.01" spellcheck="false"></div>
-          <div><label style="margin-top:0">LAND VIA</label><select id="snipeService">
-            <option value="helius">Helius Sender (Jito + 3 more)</option>
-            <option value="jito">Jito block engines</option>
-            <option value="custom">custom endpoint</option>
-          </select></div>
+        </div>
+        <label style="margin-top:8px">LAND VIA (tick several &mdash; with the nonce they all race and only one can land)</label>
+        <div class="row" style="flex-wrap:wrap;gap:12px;font-size:12px">
+          <label style="margin:0;display:flex;align-items:center;gap:5px"><input type="checkbox" data-snipe-svc="helius" checked style="width:auto"> Helius Sender</label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px"><input type="checkbox" data-snipe-svc="jito" checked style="width:auto"> Jito</label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px"><input type="checkbox" data-snipe-svc="nozomi" style="width:auto"> Nozomi (key)</label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px"><input type="checkbox" data-snipe-svc="falcon" style="width:auto"> Falcon (key &middot; local site only)</label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px"><input type="checkbox" data-snipe-svc="custom" style="width:auto"> custom</label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px"><input type="checkbox" id="snipeNonce" checked style="width:auto"> durable nonce fan-out</label>
+        </div>
+        <div class="row hidden" id="snipeKeyRow" style="margin-top:8px">
+          <div id="snipeNozomiBox" class="hidden"><label style="margin-top:0">NOZOMI API KEY</label><input type="password" id="snipeNozomiKey" spellcheck="false" autocomplete="off" placeholder="from dashboard.nozomi.temporal.xyz"></div>
+          <div id="snipeFalconBox" class="hidden"><label style="margin-top:0">FALCON API KEY</label><input type="password" id="snipeFalconKey" spellcheck="false" autocomplete="off" placeholder="UUID from Corvus Labs"></div>
         </div>
         <div class="row hidden" id="snipeCustomRow" style="margin-top:8px">
           <div style="flex:2"><label style="margin-top:0">SEND URL (JSON-RPC sendTransaction)</label><input type="text" id="snipeCustomUrl" spellcheck="false" placeholder="https://…"></div>
@@ -406,7 +414,10 @@
         <b>now</b>, before the quote&rsquo;s config exists. While armed it&rsquo;s sent as a bundle every few hundred ms &mdash; a bundle
         that fails is dropped and costs nothing &mdash; so the first one the block engine tries after Raydium&rsquo;s approval lands,
         ideally in that same block. The moment the config appears (websocket + polling) the same signed tx is blasted down every
-        path. The priority fee is the total SOL, spread over the CU limit; the bribe is a tip transfer (Helius Sender wants &ge; 0.001).
+        path. The priority fee is the total SOL, spread over the CU limit; the bribe is a tip transfer (Helius, Nozomi and Falcon want &ge; 0.001).
+        With <b>durable nonce fan-out</b> (a one-time ~0.0015 SOL account, refundable) the launch is signed once per ticked sender, each copy
+        with that sender&rsquo;s tip. They share the nonce, so the first to land kills the rest: every route raced, one tip and one fee paid,
+        nothing to re-sign. Sender API keys stay in this browser. Falcon is http-only, so it works from the local site, not the https one.
         A dev buy needs the quote already in the wallet. Keep this tab open &mdash; the queue survives a reload but your key doesn&rsquo;t,
         so re-arm after one. RE-ARM uses the fee settings entered now.</div>
       </div>

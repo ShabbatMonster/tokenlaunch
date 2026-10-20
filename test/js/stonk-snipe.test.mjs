@@ -9,7 +9,10 @@ import {
   Connection, Keypair, PublicKey, TransactionMessage, VersionedTransaction, ComputeBudgetProgram, SystemProgram,
 } from '@solana/web3.js';
 import { raydiumConfigId, raydiumConfigExists, launchRaydium } from '../../src/solana.js';
-import { standInConfig, prepareSnipe, signSnipe, HELIUS_TIP_ACCOUNTS } from '../../src/stonkSnipe.js';
+import {
+  standInConfig, prepareSnipe, signSnipe, buildSnipeTx, StonkSnipe, SNIPE_SERVICES,
+  HELIUS_TIP_ACCOUNTS, JITO_TIP_ACCOUNTS, NOZOMI_TIP_ACCOUNTS, FALCON_TIP_ACCOUNTS,
+} from '../../src/stonkSnipe.js';
 const RPC = process.env.RPC || process.env.SOL_RPC;
 const fails = [];
 const check = (ok, label, detail = '') => { console.log((ok ? 'PASS' : 'FAIL') + '  ' + label + (detail ? '  — ' + detail : '')); if (!ok) fails.push(label); };
@@ -23,12 +26,15 @@ const BENCH = '5m8XU9rzAVaBxuB7gkqZx39SK216XDXmXE2Qov4GkYbt3R7NxKZyA6Xe15ntXCRu9
 
 // --- wiring ---------------------------------------------------------------
 check(raydiumConfigId(SOL).toBase58() === '6s1xP3hpbAfFoNtUNF8mfHsjr2Bd97JxFJRWLbL6aHuX', 'the config PDA the sniper watches is derived from the quote alone');
-for (const id of ['snipePrio', 'snipeTip', 'snipeService', 'snipeCu', 'snipeSpam', 'snipeAddBtn', 'snipeQueue']) {
+for (const svc of ['helius', 'jito', 'nozomi', 'falcon', 'custom']) check(HTML.includes(`data-snipe-svc="${svc}"`), `UI can tick ${svc} as a sender`);
+check(/type="password" id="snipeNozomiKey"/.test(HTML) && /type="password" id="snipeFalconKey"/.test(HTML), 'sender API keys are masked inputs');
+check(/SNIPE_APIKEYS_KEY/.test(MAIN) && !/x\.keys =|it\.keys =/.test(MAIN), 'sender API keys are kept out of the queue (COPY never exports them)');
+for (const id of ['snipePrio', 'snipeTip', 'snipeNonce', 'snipeCu', 'snipeSpam', 'snipeAddBtn', 'snipeQueue']) {
   check(HTML.includes(`id="${id}"`), `UI has #${id}`);
 }
 const block = MAIN.slice(MAIN.indexOf('// --- StonkFun snipe queue'), MAIN.indexOf('/// Pull every LaunchLab config'));
 check(block.length > 1000, 'main.js has the snipe queue');
-check((block.match(/secretKey/g) || []).length === 1 && /new StonkSnipe\(\{ \.\.\.it, rpcUrls, secretKey: solKeyB58/.test(block),
+check((block.match(/secretKey/g) || []).length === 1 && /new StonkSnipe\(\{[^}]*secretKey: solKeyB58/.test(block),
   'the private key goes only to the live engine, never into the stored queue');
 check(/SNIPE_LIVE_STATES\.has\(it\.state\) && !snipeLive\.has\(it\.id\)\) \{ it\.state = 'paused'/.test(block),
   'a reload turns live snipes into paused ones (nothing runs without the key)');
@@ -50,19 +56,59 @@ check(/SNIPE_LIVE_STATES\.has\(it\.state\) && !snipeLive\.has\(it\.id\)\) \{ it\
   check(s.tx.signatures.length === 2, 'signed by the wallet and the new mint');
 }
 
+// --- nonce fan-out (no RPC) -------------------------------------------------
+{
+  const kp = Keypair.generate();
+  const mint = Keypair.generate();
+  const fake = { instructions: [SystemProgram.transfer({ fromPubkey: mint.publicKey, toPubkey: kp.publicKey, lamports: 0 })], mintKeypair: mint };
+  const nonce = { account: Keypair.generate().publicKey.toBase58(), value: Keypair.generate().publicKey.toBase58() };
+  const tips = { helius: HELIUS_TIP_ACCOUNTS, jito: JITO_TIP_ACCOUNTS, nozomi: NOZOMI_TIP_ACCOUNTS, falcon: FALCON_TIP_ACCOUNTS };
+  const copies = Object.entries(tips).map(([svc, list]) => ({ svc, ...signSnipe(fake, {
+    secretKey: bs58.encode(kp.secretKey), nonce, prioSol: 0.3, tipSol: 0.01, tipAccount: list[0],
+  }) }));
+  const keys = (c) => c.tx.message.staticAccountKeys.map((k) => k.toBase58());
+  const first = (c) => c.tx.message.compiledInstructions[0];
+  check(copies.every((c) => keys(c)[first(c).programIdIndex] === SystemProgram.programId.toBase58() && Buffer.from(first(c).data).readUInt32LE(0) === 4),
+    'every nonce copy opens with AdvanceNonce (what makes it a durable-nonce transaction)');
+  check(copies.every((c) => c.tx.message.recentBlockhash === nonce.value), 'and all of them carry the same nonce, so only one can land');
+  check(new Set(copies.map((c) => c.sig)).size === copies.length && copies.every((c) => keys(c).includes(tips[c.svc][0])),
+    'one distinct copy per sender, each tipping that sender');
+  check(Object.values(SNIPE_SERVICES).every((s) => Array.isArray(s.tips)) && FALCON_TIP_ACCOUNTS.length === 10 && NOZOMI_TIP_ACCOUNTS.length === 17,
+    'sender table has Falcon (10) and Nozomi (17) tip accounts');
+}
+
 if (!RPC) { console.log('SKIP  set RPC=<url> for the live checks'); process.exit(fails.length ? 1 : 0); }
 const conn = new Connection(RPC, 'confirmed');
-const rpc = async (m, q) => (await (await fetch(RPC, {
-  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: m, params: q }),
-})).json()).result;
+// rate limits happen on a busy key: retry a few times before giving up
+const rpc = async (m, q) => {
+  for (let i = 0; i < 6; i++) {
+    const r = await fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: m, params: q }) }).catch(() => null);
+    const j = r ? await r.json().catch(() => null) : null;
+    if (j && j.result !== undefined) return j.result;
+    await new Promise((res) => setTimeout(res, 600 * (i + 1)));
+  }
+  return null;
+};
 const hex = (d) => Buffer.from(d).toString('hex');
 
 // --- a stand-in config builds what the real one builds, byte for byte --------
 const override = await standInConfig(conn, QUOTE);
 check(override.minFundRaisingB.toString() === '1', 'the stand-in has no raise floor (the SOL config 24 SOL floor would lift the raise)');
-// built as the benchmark sniper's wallet: the SDK needs the quote account to exist to add a dev buy
+// built as a wallet that holds the quote now: the SDK needs the quote account
+// to exist to add a dev buy (the benchmark sniper's own wallet has since
+// closed its account). The owner only changes accounts, not instruction data.
+const holders = [];
+{
+  const largest = await rpc('getTokenLargestAccounts', [QUOTE]);
+  for (const a of (largest?.value || []).slice(0, 8)) {
+    const acct = await rpc('getAccountInfo', [a.address, { encoding: 'jsonParsed' }]);
+    const owner = acct?.value?.data?.parsed?.info?.owner;
+    if (owner && PublicKey.isOnCurve(new PublicKey(owner).toBytes())) holders.push(owner);   // skip pool vaults
+  }
+}
+check(holders.length > 0, 'found a wallet holding the quote to build the dev buy as', holders[0]);
 const base = {
-  rpcUrl: RPC, ownerPubkey: 'B9Zbs2W9VK22AHnCWiK4PqBueDFzN17RNAFu5uFozLMJ', quoteMint: QUOTE, name: 'Alt-coin', symbol: 'ALTCOIN',
+  rpcUrl: RPC, ownerPubkey: holders[0], quoteMint: QUOTE, name: 'Alt-coin', symbol: 'ALTCOIN',
   uri: 'https://api.nemtech.io/json/c1660b19', buyAmountUi: '1200.949167', migrateType: 'cpmm', platformId: PLAT, token2022: true,
   transferFeeBps: 100, raiseTargetUi: '8549.601036', prebuild: true, configInfoOverride: override, minMintAAmountRaw: 1,
 };
@@ -111,5 +157,51 @@ for (const a of (largest?.value || []).slice(0, 6)) {
   if (!sim.value.err) { simOk = true; why = `as ${owner.slice(0, 6)}…, ${sim.value.unitsConsumed} CU`; break; }
 }
 check(simOk, 'a stand-in-built launch + dev buy + bribe simulates clean against the live config', why);
+
+// --- a nonce-signed launch executes ----------------------------------------
+// Read-only simulation against an existing durable nonce account (the one the
+// 2026-10-19 winner signs with), with its authority as payer: proves the
+// AdvanceNonce-first layout and the nonce value as blockhash are accepted.
+{
+  const NONCE = 'HgZamge8AwTdM6Z34LMPatLTfybo74Az46R1khMTM2KX';
+  const n = await conn.getNonce(new PublicKey(NONCE), 'confirmed').catch(() => null);
+  if (!n) console.log('SKIP  fixture nonce account is gone');
+  else {
+    const auth = n.authorizedPubkey.toBase58();
+    const p = await launchRaydium({ ...base, ownerPubkey: auth, name: 'Nonce test', symbol: 'NONCE', buyAmountUi: '0', raiseTargetUi: undefined, forceConfigOverride: true });
+    const { tx } = buildSnipeTx(p, { payer: auth, nonce: { account: NONCE, value: n.nonce }, prioSol: 0.0001, tipSol: 0.001, tipAccount: FALCON_TIP_ACCOUNTS[0] });
+    const sim = await conn.simulateTransaction(tx, { sigVerify: false, commitment: 'confirmed' });
+    check(!sim.value.err, 'a durable-nonce launch + Falcon tip simulates clean against the live config', JSON.stringify(sim.value.err) + ` · ${tx.serialize().length} bytes`);
+  }
+  // with the benchmark's dev buy, a nonce copy still fits a transaction
+  const { blockhash } = await conn.getLatestBlockhash();
+  const fat = buildSnipeTx(stand, { payer: base.ownerPubkey, nonce: { account: NONCE, value: blockhash }, cuLimit: 450_000, prioSol: 0.32, tipSol: 0.01, tipAccount: FALCON_TIP_ACCOUNTS[0] });
+  const size = fat.tx.serialize().length;
+  check(size <= 1232, 'the benchmark launch + dev buy still fits with the nonce', `${size} bytes`);
+}
+
+// --- the engine still launches: armed on an approved quote it fires at once --
+// Sends are stubbed (a throwaway wallet), the nonce is unavailable, so this
+// walks the fallback path the original armed flow used.
+{
+  const kp = Keypair.generate();
+  const lines = [], states = [];
+  const sn = new StonkSnipe({
+    rpcUrls: [RPC], secretKey: bs58.encode(kp.secretKey), quoteMint: QUOTE, platformId: PLAT, name: 'Engine test', symbol: 'ENGT',
+    uri: base.uri, devBuyUi: '0', transferFeeBps: 100, prioSol: 0.01, tipSol: 0.001, services: ['helius', 'jito', 'nozomi'],
+    keys: {}, useNonce: true, nonceAccount: null,
+  }, { onLog: (m) => lines.push(m), onState: (s) => states.push(s) });
+  sn.checkFunds = async () => {};
+  let blasts = 0;
+  sn.sendEverywhere = async () => { blasts++; };
+  sn.sendBundles = async () => {};
+  await sn.arm();
+  await new Promise((r) => setTimeout(r, 600));
+  sn.stop();
+  check(lines.some((l) => /Nozomi: no API key entered - skipped/.test(l)), 'a sender without its key is skipped, not fatal');
+  check(lines.some((l) => /falling back to one blockhash copy/.test(l)), 'an unusable nonce falls back to the original single-copy signing');
+  check(states.includes('firing') && blasts > 0 && lines.some((l) => /already approved - firing now/.test(l)),
+    'and an armed snipe on an approved quote fires straight away', `${blasts} blasts · ${sn.cur?.size} bytes`);
+}
 console.log('');
 process.exit(fails.length ? 1 : 0);
