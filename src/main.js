@@ -6082,6 +6082,29 @@ function ccToggleWatch(pad) {
 // waits for RE-ARM.
 const SNIPE_KEY = 'stonk.snipes.v1';
 const SNIPE_SETTINGS_KEY = 'stonk.snipe.settings.v1';
+// sender API keys (Nozomi, Falcon): kept apart from the queue so COPY never
+// exports them. Not wallet keys - the wallet key is never stored.
+const SNIPE_APIKEYS_KEY = 'stonk.snipe.apikeys.v1';
+// durable nonce accounts this browser opened, per wallet: [{ owner, account }]
+const SNIPE_NONCES_KEY = 'stonk.snipe.nonces.v1';
+const loadSnipeNonces = () => { try { return JSON.parse(localStorage.getItem(SNIPE_NONCES_KEY) || '[]'); } catch { return []; } };
+function addSnipeNonce(owner, account) {
+  const l = loadSnipeNonces().filter((x) => x.account !== account);
+  l.push({ owner, account });
+  try { localStorage.setItem(SNIPE_NONCES_KEY, JSON.stringify(l)); } catch { /* ignore */ }
+}
+function snipeApiKeys() {
+  return { nozomi: $('snipeNozomiKey')?.value.trim() || '', falcon: $('snipeFalconKey')?.value.trim() || '' };
+}
+function syncSnipeServiceUI() {
+  const on = (svc) => !!document.querySelector(`[data-snipe-svc="${svc}"]`)?.checked;
+  $('snipeCustomRow')?.classList.toggle('hidden', !on('custom'));
+  $('snipeNozomiBox')?.classList.toggle('hidden', !on('nozomi'));
+  $('snipeFalconBox')?.classList.toggle('hidden', !on('falcon'));
+  $('snipeKeyRow')?.classList.toggle('hidden', !on('nozomi') && !on('falcon'));
+}
+// the senders a queued snipe uses (older entries carried a single `service`)
+const snipeServices = (it) => (it.services?.length ? it.services : [it.service || 'helius']);
 const SNIPE_LIVE_STATES = new Set(['preparing', 'armed', 'firing']);
 const snipeLive = new Map();   // id -> StonkSnipe
 const loadSnipes = () => { try { return JSON.parse(localStorage.getItem(SNIPE_KEY) || '[]'); } catch { return []; } };
@@ -6092,23 +6115,39 @@ function snipeSettings() {
   return {
     prioSol: num('snipePrio', 0.05),
     tipSol: num('snipeTip', 0.01),
-    service: $('snipeService')?.value || 'helius',
+    services: [...document.querySelectorAll('[data-snipe-svc]')].filter((x) => x.checked).map((x) => x.dataset.snipeSvc),
+    useNonce: $('snipeNonce') ? $('snipeNonce').checked : true,
     customUrl: $('snipeCustomUrl')?.value.trim() || '',
     customTipAccount: $('snipeCustomTip')?.value.trim() || '',
     cuLimit: Math.max(200_000, Math.min(1_400_000, Math.round(num('snipeCu', 300_000)))),
     spamMs: Math.max(50, Math.round(num('snipeSpam', 200))),
   };
 }
-function saveSnipeSettings() { try { localStorage.setItem(SNIPE_SETTINGS_KEY, JSON.stringify(snipeSettings())); } catch { /* ignore */ } }
+function saveSnipeSettings() {
+  try {
+    localStorage.setItem(SNIPE_SETTINGS_KEY, JSON.stringify(snipeSettings()));
+    localStorage.setItem(SNIPE_APIKEYS_KEY, JSON.stringify(snipeApiKeys()));
+  } catch { /* ignore */ }
+}
 function restoreSnipeSettings() {
   let s = null; try { s = JSON.parse(localStorage.getItem(SNIPE_SETTINGS_KEY) || 'null'); } catch { s = null; }
   if (s) {
     const set = (id, v) => { if ($(id) && v != null) $(id).value = v; };
-    set('snipePrio', s.prioSol); set('snipeTip', s.tipSol); set('snipeService', s.service);
+    set('snipePrio', s.prioSol); set('snipeTip', s.tipSol);
+    const svcs = s.services || (s.service ? [s.service] : null);   // older settings had one service
+    if (svcs) document.querySelectorAll('[data-snipe-svc]').forEach((x) => { x.checked = svcs.includes(x.dataset.snipeSvc); });
+    if (s.useNonce != null && $('snipeNonce')) $('snipeNonce').checked = !!s.useNonce;
     set('snipeCustomUrl', s.customUrl); set('snipeCustomTip', s.customTipAccount);
     set('snipeCu', s.cuLimit); set('snipeSpam', s.spamMs);
   }
-  $('snipeCustomRow')?.classList.toggle('hidden', $('snipeService')?.value !== 'custom');
+  try {
+    const k = JSON.parse(localStorage.getItem(SNIPE_APIKEYS_KEY) || 'null');
+    if (k) {
+      if ($('snipeNozomiKey')) $('snipeNozomiKey').value = k.nozomi || '';
+      if ($('snipeFalconKey')) $('snipeFalconKey').value = k.falcon || '';
+    }
+  } catch { /* ignore */ }
+  syncSnipeServiceUI();
   // nothing runs across a reload - a snipe that was live is now waiting on RE-ARM
   const l = loadSnipes();
   let changed = false;
@@ -6158,7 +6197,9 @@ function renderSnipes() {
       ['raise', it.raiseUi || 'platform default'],
       ['transfer fee', it.transferFeeBps ? `${it.transferFeeBps} bps (Token-2022)` : 'none (SPL)'],
       ['priority', `${it.prioSol} SOL over ${it.cuLimit} CU`],
-      ['bribe', `${it.tipSol} SOL via ${it.service}${it.service === 'custom' ? ` (${it.customUrl || 'no url'} → ${it.customTipAccount || 'no tip acct'})` : ''}`],
+      ['bribe', `${it.tipSol} SOL via ${snipeServices(it).join(' + ')}${snipeServices(it).includes('custom') ? ` (${it.customUrl || 'no url'} → ${it.customTipAccount || 'no tip acct'})` : ''}`],
+      ['signing', it.useNonce === false ? 'one blockhash copy' : `durable nonce fan-out${it.nonceAccount ? ' · ' + it.nonceAccount : ''}`],
+      ...(it.via ? [['landed via', it.via]] : []),
       ['spam', `${it.spamMs} ms`],
       ['description', it.description || ''],
       ['twitter / web', [it.twitter, it.website].filter(Boolean).join(' · ') || '—'],
@@ -6216,7 +6257,11 @@ async function addSnipe(pad) {
     if (!name || !symbol) throw new Error('name and ticker are required');
     const quoteMint = raydiumQuoteMint(pad);      // throws on a half-typed custom mint
     const s = snipeSettings();
-    if (s.service === 'custom' && (!s.customUrl || !isSolAddress(s.customTipAccount))) throw new Error('a custom landing service needs its URL and tip account');
+    if (!s.services.length) throw new Error('tick at least one landing service');
+    if (s.services.includes('custom') && (!s.customUrl || !isSolAddress(s.customTipAccount))) throw new Error('a custom landing service needs its URL and tip account');
+    const k = snipeApiKeys();
+    if (s.services.includes('nozomi') && !k.nozomi) throw new Error('enter your Nozomi API key, or untick Nozomi');
+    if (s.services.includes('falcon') && !k.falcon) throw new Error('enter your Falcon API key, or untick Falcon');
     saveSnipeSettings();
     if (btn) btn.disabled = true;
     snipeStatus('pinning image + metadata…');
@@ -6264,8 +6309,19 @@ async function armSnipe(id, applySettings) {
     const pad = PADS.find((p) => p.id === it.padId) || activePad;
     const { StonkSnipe } = await import('./stonkSnipe.js');
     const rpcUrls = [...new Set([pad.rpc, ...HELIUS_RPCS].filter(Boolean))];
-    const sn = new StonkSnipe({ ...it, rpcUrls, secretKey: solKeyB58, raiseUi: it.raiseUi || undefined }, {
+    // each live snipe needs a nonce of its own - the first launch to land
+    // advances it, which would kill another snipe's copies
+    const { keypairFromSecret } = await import('./solana.js');
+    const owner = keypairFromSecret(solKeyB58).publicKey.toBase58();
+    const busy = new Set([...snipeLive.values()].map((x) => x.nonce?.account || x.cfg.nonceAccount).filter(Boolean));
+    const nonceAccount = it.useNonce === false ? null
+      : (loadSnipeNonces().find((x) => x.owner === owner && !busy.has(x.account))?.account || null);
+    const sn = new StonkSnipe({
+      ...it, services: snipeServices(it), useNonce: it.useNonce !== false, nonceAccount,
+      keys: snipeApiKeys(), rpcUrls, secretKey: solKeyB58, raiseUi: it.raiseUi || undefined,
+    }, {
       onLog: (m) => snipeLog(id, m),
+      onNonce: (account) => { addSnipeNonce(owner, account); patchSnipe(id, (x) => { x.nonceAccount = account; }); },
       onState: (state, d = {}) => {
         if (state === 'landed' || state === 'failed' || state === 'disarmed') snipeLive.delete(id);
         patchSnipe(id, (x) => {
@@ -6274,6 +6330,8 @@ async function armSnipe(id, applySettings) {
           if (d.configId) x.configId = d.configId;
           if (d.sig) x.sig = d.sig;
           if (d.report) x.report = d.report;
+          if (d.via) x.via = d.via;
+          if (d.nonceAccount) x.nonceAccount = d.nonceAccount;
           if (sn.prep) { x.mint = sn.prep.mint; x.poolId = sn.prep.poolId; x.configId = sn.configId || x.configId; }
         });
         if (state === 'landed' && !d.report) {
@@ -6786,8 +6844,9 @@ function init() {
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
   $('snipeAddBtn').addEventListener('click', () => { if (activePad.family === 'raydium') addSnipe(activePad); });
-  $('snipeService').addEventListener('change', () => { $('snipeCustomRow').classList.toggle('hidden', $('snipeService').value !== 'custom'); saveSnipeSettings(); });
-  ['snipePrio', 'snipeTip', 'snipeCu', 'snipeSpam', 'snipeCustomUrl', 'snipeCustomTip'].forEach((id) => $(id).addEventListener('change', saveSnipeSettings));
+  document.querySelectorAll('[data-snipe-svc]').forEach((x) => x.addEventListener('change', () => { syncSnipeServiceUI(); saveSnipeSettings(); }));
+  ['snipePrio', 'snipeTip', 'snipeCu', 'snipeSpam', 'snipeCustomUrl', 'snipeCustomTip', 'snipeNonce', 'snipeNozomiKey', 'snipeFalconKey']
+    .forEach((id) => $(id).addEventListener('change', saveSnipeSettings));
   restoreSnipeSettings();
   renderSnipes();
   // a page with a live snipe should not be closed by accident
