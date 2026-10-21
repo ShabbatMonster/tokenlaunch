@@ -32,7 +32,7 @@ check(/SNIPE_APIKEYS_KEY/.test(MAIN) && !/x\.keys =|it\.keys =/.test(MAIN), 'sen
 for (const id of ['snipePrio', 'snipeTip', 'snipeNonce', 'snipeCu', 'snipeSpam', 'snipeAddBtn', 'snipeQueue']) {
   check(HTML.includes(`id="${id}"`), `UI has #${id}`);
 }
-const block = MAIN.slice(MAIN.indexOf('// --- StonkFun snipe queue'), MAIN.indexOf('/// Pull every LaunchLab config'));
+const block = MAIN.slice(MAIN.indexOf('// --- StonkFun snipe queue'), MAIN.indexOf('// --- pump.fun launch at a slot'));
 check(block.length > 1000, 'main.js has the snipe queue');
 check((block.match(/secretKey/g) || []).length === 1 && /new StonkSnipe\(\{[^}]*secretKey: solKeyB58/.test(block),
   'the private key goes only to the live engine, never into the stored queue');

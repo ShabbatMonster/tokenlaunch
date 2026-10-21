@@ -431,12 +431,16 @@ export async function buildPumpLaunch(opts) {
     }));
   }
 
+  const lut = opts.lookupTable ?? await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
+  // for callers that sign the launch themselves (the slot launcher): the launch
+  // instructions without the compute budget, plus the lookup table
+  if (opts.returnIxs) return { instructions: ixs.slice(2), lookupTable: lut?.value || null };
+
   // 'confirmed', not 'finalized': a finalized hash is ~32 slots (13s+) old the
   // moment you get it, which throws away a third of the ~60s validity window and
   // is a large part of why launches were dying on "block height exceeded".
   const blockhash = opts.blockhash
     ?? (await connection.getLatestBlockhash('confirmed')).blockhash;
-  const lut = opts.lookupTable ?? await connection.getAddressLookupTable(PUMP_LOOKUP_TABLE);
   const msg = new TransactionMessage({
     payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: ixs,
   }).compileToV0Message(lut?.value ? [lut.value] : []);
@@ -1058,6 +1062,15 @@ export async function launchPump(opts) {
   const computeUnits = Math.min(1_400_000, Math.max(600_000, Math.ceil(measured * 1.35)));
   say(`simulation used ${measured.toLocaleString()} CU — sending with ${computeUnits.toLocaleString()}`);
   if (simulateOnly) return { mint: mint.publicKey.toBase58(), sig: null, simulated: true };
+  // checked and simulated like a normal launch, but handed back unsent for the
+  // caller to wrap (nonce, slot guard, tips) and sign: the slot launcher
+  if (opts.prebuild) {
+    const built = await buildPumpLaunch({
+      connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
+      feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable, returnIxs: true,
+    });
+    return { mint: mint.publicKey.toBase58(), mintKeypair: mint, ...built, computeUnits, measured };
+  }
 
   // Rebuild against a blockhash fetched NOW, so none of the work above eats into
   // the validity window, then keep rebroadcasting until it lands or the hash

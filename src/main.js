@@ -5519,6 +5519,12 @@ function applyPadUI(pad) {
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
   if (pump) paintPumpDevSym();
   if (pump) renderArmed();
+  // the landing-service settings are shared by the StonkFun snipe and the
+  // pump.fun slot launch; move the one set of controls to whichever is showing
+  {
+    const box = $('senderBox'), host = pump ? $('slotSenderHost') : $('snipeSenderHost');
+    if (box && host && box.parentNode !== host) host.appendChild(box);
+  }
   $('clmmRow').classList.toggle('hidden', !clmm);      // single-sided CLMM curve
   $('uniRow').classList.toggle('hidden', !uni);
   $('flapRow').classList.toggle('hidden', !flap);
@@ -6355,6 +6361,115 @@ async function armSnipe(id, applySettings) {
   }
 }
 
+// --- pump.fun launch at a slot (the first Alpenglow block) --------------------
+//
+// Arms one pump.fun launch to land at a target slot: pinned + built + simulated
+// + signed on ARM, guarded on chain so it cannot land early, fired by a slot
+// clock. The engine is src/slotLaunch.js. Settings persist; the key does not.
+const SLOT_SETTINGS_KEY = 'slot.launch.settings.v1';
+let slotLive = null;
+
+function slotLogLine(m) {
+  const el = $('slotLog');
+  if (!el) return;
+  el.textContent = (el.textContent ? el.textContent + '\n' : '') + m;
+  el.scrollTop = el.scrollHeight;
+}
+function saveSlotSettings() {
+  const v = (id) => $(id)?.value.trim() || '';
+  try { localStorage.setItem(SLOT_SETTINGS_KEY, JSON.stringify({ target: v('slotTarget'), prio: v('slotPrio'), tip: v('slotTip'), bundleLead: v('slotBundleLead'), sendLead: v('slotSendLead') })); } catch { /* ignore */ }
+}
+function restoreSlotSettings() {
+  let s = null; try { s = JSON.parse(localStorage.getItem(SLOT_SETTINGS_KEY) || 'null'); } catch { s = null; }
+  if (!s) return;
+  const set = (id, val) => { if ($(id) && val) $(id).value = val; };
+  set('slotTarget', s.target); set('slotPrio', s.prio); set('slotTip', s.tip); set('slotBundleLead', s.bundleLead); set('slotSendLead', s.sendLead);
+}
+function slotArmButton() {
+  const b = $('slotArmBtn');
+  if (!b) return;
+  const live = slotLive && !slotLive.stopped;
+  b.textContent = live ? 'DISARM' : 'ARM SLOT LAUNCH';
+  b.classList.toggle('sell', !!live);
+}
+
+async function toggleSlotLaunch(pad) {
+  if (slotLive && !slotLive.stopped) { slotLive.disarm(); slotLive = null; slotArmButton(); return; }
+  const btn = $('slotArmBtn');
+  try {
+    if (!solKeyB58) throw new Error('load your SOL key first');
+    if (!logoBlob) throw new Error('add a token image first');
+    const name = $('name').value.trim(), symbol = $('symbol').value.trim();
+    if (!name || !symbol) throw new Error('name and ticker are required');
+    const num = (id, d) => { const x = Number($(id)?.value); return Number.isFinite(x) && x >= 0 ? x : d; };
+    const targetSlot = Math.round(num('slotTarget', 0));
+    if (!targetSlot) throw new Error('enter the target slot');
+    const s = snipeSettings();
+    if (!s.services.length) throw new Error('tick at least one landing service');
+    const keys = snipeApiKeys();
+    if (s.services.includes('nozomi') && !keys.nozomi) throw new Error('enter your Nozomi API key, or untick Nozomi');
+    if (s.services.includes('falcon') && !keys.falcon) throw new Error('enter your Falcon API key, or untick Falcon');
+    saveSlotSettings(); saveSnipeSettings();
+    if (btn) btn.disabled = true;
+    $('slotLog').textContent = '';
+    slotLogLine('pinning image + metadata…');
+    const description = $('desc').value.trim() || DEFAULT_DESC;
+    const twitter = $('twitter').value.trim(), website = $('website').value.trim();
+    const imgHash = (await uploadToIpfs(logoBlob)).replace('ipfs://', '');
+    const metaHash = await uploadJsonToIpfs({
+      name, symbol, description, image: IPFS_GW(imgHash),
+      ...((twitter || website) ? { extensions: { twitter, website } } : {}),
+    });
+    const { SlotLaunch } = await import('./slotLaunch.js');
+    const { keypairFromSecret } = await import('./solana.js');
+    const owner = keypairFromSecret(solKeyB58).publicKey.toBase58();
+    // a nonce no live StonkFun snipe is using
+    const busy = new Set([...snipeLive.values()].map((x) => x.nonce?.account || x.cfg.nonceAccount).filter(Boolean));
+    const nonceAccount = s.useNonce ? (loadSnipeNonces().find((x) => x.owner === owner && !busy.has(x.account))?.account || null) : null;
+    const rpcUrls = [...new Set([pad.rpc, ...HELIUS_RPCS].filter(Boolean))];
+    const sl = new SlotLaunch({
+      rpcUrls, secretKey: solKeyB58, targetSlot, name, symbol, uri: IPFS_GW(metaHash),
+      devBuySol: $('pumpDevBuy').value.trim() || '0', feesToHolders: $('pumpFeesToHolders').checked,
+      creatorFeeBps: pumpCreatorFeeBps(), creatorAddress: pumpCreatorAddress(), quoteMint: pumpQuoteMint() || undefined,
+      prioSol: num('slotPrio', 0.05), tipSol: num('slotTip', 0.01),
+      services: s.services, keys, customUrl: s.customUrl, customTipAccount: s.customTipAccount,
+      useNonce: s.useNonce, nonceAccount,
+      bundleLeadSlots: Math.round(num('slotBundleLead', 40)), sendLeadSlots: Math.round(num('slotSendLead', 1)),
+    }, {
+      onLog: slotLogLine,
+      onNonce: (account) => addSnipeNonce(owner, account),
+      onClock: (c) => {
+        const el = $('slotClock');
+        if (!el) return;
+        const left = Math.max(0, c.left);
+        const secs = Math.round((left * c.msPerSlot) / 1000);
+        el.innerHTML = `slot <b>${c.est.toLocaleString()}</b> · target ${targetSlot.toLocaleString()} · `
+          + (c.left > 0 ? `<b>${left.toLocaleString()}</b> slots (~${secs >= 120 ? Math.round(secs / 60) + ' min' : secs + 's'}) · ETA ${c.eta.toLocaleTimeString()} · ${Math.round(c.msPerSlot)}ms/slot`
+            : 'target reached') + ` · <span class="ok">${esc(c.state)}</span>`;
+      },
+      onState: (state, d = {}) => {
+        slotArmButton();
+        if (state === 'landed' && d.mint && !d.report) {
+          rememberLaunch(pad, d.mint, symbol);
+          $('status').innerHTML = `<span style="color:var(--accent)">LAUNCHED ✓</span> ${d.mint}<br>`
+            + `<a href="${pad.site(d.mint)}" target="_blank" rel="noopener">on pump.fun</a>`
+            + (d.sig ? ` · <a href="${pad.explorer}/tx/${d.sig}" target="_blank" rel="noopener">launch tx</a>` : '');
+          refreshBalance(); renderTokenList();
+        }
+      },
+    });
+    slotLive = sl;
+    slotArmButton();
+    await sl.arm();
+  } catch (e) {
+    slotLogLine('error: ' + (e?.message || String(e)));
+    if (slotLive) { slotLive.stop(); slotLive = null; }
+    slotArmButton();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 /// Pull every LaunchLab config that exists on chain and fold the ones this pad
 /// does not already list into the dropdown.
 ///
@@ -6849,8 +6964,11 @@ function init() {
     .forEach((id) => $(id).addEventListener('change', saveSnipeSettings));
   restoreSnipeSettings();
   renderSnipes();
+  restoreSlotSettings();
+  $('slotArmBtn').addEventListener('click', () => { if (activePad.family === 'pump') toggleSlotLaunch(activePad); });
+  ['slotTarget', 'slotPrio', 'slotTip', 'slotBundleLead', 'slotSendLead'].forEach((id) => $(id).addEventListener('change', saveSlotSettings));
   // a page with a live snipe should not be closed by accident
-  window.addEventListener('beforeunload', (e) => { if (snipeLive.size) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', (e) => { if (snipeLive.size || (slotLive && !slotLive.stopped)) { e.preventDefault(); e.returnValue = ''; } });
   $('pumpCheckBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpCheckPairs(activePad); });
   const paidBox = $('paidEnabled');
   if (paidBox) {
