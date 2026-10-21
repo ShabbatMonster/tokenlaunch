@@ -250,7 +250,11 @@ export function signSnipe(prep, { secretKey, ...o }) {
 
 /// The unsigned snipe transaction for `payer` (signSnipe signs this; tests
 /// simulate it with a funded payer).
-export function buildSnipeTx(prep, { payer, blockhash, nonce = null, cuLimit = 300_000, prioSol = 0, tipSol = 0, tipAccount = null }) {
+/// `guardIxs` go straight after the nonce (the slot launcher's "not before slot
+/// N" check); `luts` are address lookup tables to compile against (pump.fun's).
+/// A tip account must stay a static key for Falcon - none of the tip accounts
+/// sit in pump's table, so compiling against it leaves them static.
+export function buildSnipeTx(prep, { payer, blockhash, nonce = null, cuLimit = 300_000, prioSol = 0, tipSol = 0, tipAccount = null, guardIxs = [], luts = [] }) {
   const payerKey = new PublicKey(payer);
   const prioLamports = Math.round(Number(prioSol) * 1e9);
   const microLamports = Math.max(0, Math.ceil((prioLamports * 1e6) / cuLimit));
@@ -258,12 +262,13 @@ export function buildSnipeTx(prep, { payer, blockhash, nonce = null, cuLimit = 3
   const ixs = [
     // a durable-nonce transaction must open with AdvanceNonce
     ...(nonce ? [SystemProgram.nonceAdvance({ noncePubkey: new PublicKey(nonce.account), authorizedPubkey: payerKey })] : []),
+    ...guardIxs,
     ComputeBudgetProgram.setComputeUnitLimit({ units: cuLimit }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports }),
     ...prep.instructions,
     ...(tipLamports > 0 && tipAccount ? [SystemProgram.transfer({ fromPubkey: payerKey, toPubkey: new PublicKey(tipAccount), lamports: tipLamports })] : []),
   ];
-  const msg = new TransactionMessage({ payerKey, recentBlockhash: nonce ? nonce.value : blockhash, instructions: ixs }).compileToV0Message();
+  const msg = new TransactionMessage({ payerKey, recentBlockhash: nonce ? nonce.value : blockhash, instructions: ixs }).compileToV0Message(luts.filter(Boolean));
   return { tx: new VersionedTransaction(msg), microLamports, prioLamports, tipLamports };
 }
 
@@ -291,6 +296,74 @@ export async function landingReport(rpcUrl, { mint, configId }) {
   };
 }
 
+/// Sends signed copies down their routes, keeping each service under its rate
+/// limit. `cfg`: rpcUrls[], keys { nozomi, falcon }, customUrl. Each copy is
+/// { service, b64 }; a copy goes only to its own service (its tip is theirs).
+export class Fanout {
+  constructor(cfg) { this.cfg = cfg; this.lastSent = new Map(); }
+
+  // one send per route, spaced by the service's gap
+  due(key, gapMs) {
+    const now = Date.now();
+    if (now - (this.lastSent.get(key) || 0) < gapMs) return false;
+    this.lastSent.set(key, now);
+    return true;
+  }
+
+  // Jito allows about one unauthenticated request a second per region
+  jitoRegion() {
+    const now = Date.now();
+    const r = JITO_REGIONS.find((x) => now - (this.lastSent.get(x) || 0) >= 1000);
+    if (r) this.lastSent.set(r, now);
+    return r;
+  }
+
+  /// Bundles only: a bundle that fails is dropped and costs nothing.
+  async sendBundles(copies) {
+    const sends = [];
+    const j = copies.find((v) => v.service === 'jito');
+    if (j) { const r = this.jitoRegion(); if (r) sends.push(post(r + '/bundles', 'sendBundle', [[j.b64], { encoding: 'base64' }])); }
+    const h = copies.find((v) => v.service === 'helius');
+    if (h) sends.push(post(HELIUS_SENDER, 'sendBundle', [[h.b64], { encoding: 'base64' }]));
+    await Promise.allSettled(sends);
+  }
+
+  /// Every copy down its own route, plus `rpcB64` to the plain RPCs.
+  async sendAll(copies, rpcB64) {
+    const c = this.cfg;
+    const opts = { encoding: 'base64', skipPreflight: true, maxRetries: 0 };
+    const sends = rpcB64 ? c.rpcUrls.map((u) => post(u, 'sendTransaction', [rpcB64, opts])) : [];
+    for (const v of copies) {
+      if (v.service === 'helius') {
+        sends.push(post(HELIUS_SENDER, 'sendTransaction', [v.b64, opts]), post(HELIUS_SENDER, 'sendBundle', [[v.b64], { encoding: 'base64' }]));
+      } else if (v.service === 'jito') {
+        const r = this.jitoRegion();
+        if (r) sends.push(post(r + '/bundles', 'sendBundle', [[v.b64], { encoding: 'base64' }]), post(r + '/transactions', 'sendTransaction', [v.b64, { encoding: 'base64' }]));
+      } else if (v.service === 'nozomi') {
+        if (this.due('nozomi', SNIPE_SERVICES.nozomi.gapMs)) for (const u of NOZOMI_URLS) sends.push(post(`${u}/?c=${encodeURIComponent(c.keys.nozomi)}`, 'sendTransaction', [v.b64, opts]));
+      } else if (v.service === 'falcon') {
+        if (this.due('falcon', SNIPE_SERVICES.falcon.gapMs)) for (const u of FALCON_URLS) sends.push(postBlind(`${u}/?api-key=${encodeURIComponent(c.keys.falcon)}`, 'sendTransaction', [v.b64, opts]));
+      } else if (v.service === 'custom') {
+        if (this.due('custom', SNIPE_SERVICES.custom.gapMs)) sends.push(post(c.customUrl, 'sendTransaction', [v.b64, opts]));
+      }
+    }
+    await Promise.allSettled(sends);
+  }
+}
+
+/// Which of `services` can be used from here; logs why any is skipped.
+export function usableServices(cfg, log = () => {}) {
+  const httpsPage = typeof location !== 'undefined' && location.protocol === 'https:';
+  return (cfg.services || []).filter((s) => {
+    const def = SNIPE_SERVICES[s];
+    if (!def) return false;
+    if (def.needsKey && !cfg.keys?.[s]) { log(`${def.label}: no API key entered - skipped`); return false; }
+    if (def.httpOnly && httpsPage) { log(`${def.label}: http only, which an https page cannot call - skipped (use the local site)`); return false; }
+    if (s === 'custom' && !(cfg.customUrl && cfg.customTipAccount)) { log('custom: needs a URL and a tip account - skipped'); return false; }
+    return true;
+  });
+}
+
 /// One armed snipe. hooks: onLog(line), onState(state, detail), onNonce(address).
 export class StonkSnipe {
   constructor(cfg, hooks = {}) {
@@ -306,7 +379,6 @@ export class StonkSnipe {
     this.sigs = [];
     this.timers = [];
     this.subs = [];
-    this.lastSent = new Map();
     this.stopped = false;
   }
 
@@ -323,18 +395,7 @@ export class StonkSnipe {
   conn(i = 0) { const u = this.cfg.rpcUrls[i % this.cfg.rpcUrls.length]; return new Connection(u, 'processed'); }
 
   /// the services this snipe can actually use from here
-  usable() {
-    const c = this.cfg;
-    const httpsPage = typeof location !== 'undefined' && location.protocol === 'https:';
-    return c.services.filter((s) => {
-      const def = SNIPE_SERVICES[s];
-      if (!def) return false;
-      if (def.needsKey && !c.keys?.[s]) { this.log(`${def.label}: no API key entered - skipped`); return false; }
-      if (def.httpOnly && httpsPage) { this.log(`${def.label}: http only, which an https page cannot call - skipped (use the local site)`); return false; }
-      if (s === 'custom' && !(c.customUrl && c.customTipAccount)) { this.log('custom: needs a URL and a tip account - skipped'); return false; }
-      return true;
-    });
-  }
+  usable() { return usableServices(this.cfg, (m) => this.log(m)); }
 
   tipFor(service) { return service === 'custom' ? this.cfg.customTipAccount : pick(SNIPE_SERVICES[service].tips); }
 
@@ -474,54 +535,11 @@ export class StonkSnipe {
     }
   }
 
-  // one send per route, spaced by the service's gap
-  due(key, gapMs) {
-    const now = Date.now();
-    if (now - (this.lastSent.get(key) || 0) < gapMs) return false;
-    this.lastSent.set(key, now);
-    return true;
-  }
-
-  // Jito allows about one unauthenticated request a second per region
-  jitoRegion() {
-    const now = Date.now();
-    const r = JITO_REGIONS.find((x) => now - (this.lastSent.get(x) || 0) >= 1000);
-    if (r) this.lastSent.set(r, now);
-    return r;
-  }
-
+  // sending lives in Fanout (shared with the slot launcher)
+  get fan() { return this._fan || (this._fan = new Fanout(this.cfg)); }
   variant(service) { return this.variants.find((v) => v.service === service); }
-
-  async sendBundles() {
-    const sends = [];
-    const j = this.variant('jito');
-    if (j) { const r = this.jitoRegion(); if (r) sends.push(post(r + '/bundles', 'sendBundle', [[j.b64], { encoding: 'base64' }])); }
-    const h = this.variant('helius');
-    if (h) sends.push(post(HELIUS_SENDER, 'sendBundle', [[h.b64], { encoding: 'base64' }]));
-    await Promise.allSettled(sends);
-  }
-
-  /// Every copy down its own route, plus the plain RPCs.
-  async sendEverywhere() {
-    const c = this.cfg;
-    const opts = { encoding: 'base64', skipPreflight: true, maxRetries: 0 };
-    const sends = c.rpcUrls.map((u) => post(u, 'sendTransaction', [this.cur.b64, opts]));
-    for (const v of this.variants) {
-      if (v.service === 'helius') {
-        sends.push(post(HELIUS_SENDER, 'sendTransaction', [v.b64, opts]), post(HELIUS_SENDER, 'sendBundle', [[v.b64], { encoding: 'base64' }]));
-      } else if (v.service === 'jito') {
-        const r = this.jitoRegion();
-        if (r) sends.push(post(r + '/bundles', 'sendBundle', [[v.b64], { encoding: 'base64' }]), post(r + '/transactions', 'sendTransaction', [v.b64, { encoding: 'base64' }]));
-      } else if (v.service === 'nozomi') {
-        if (this.due('nozomi', SNIPE_SERVICES.nozomi.gapMs)) for (const u of NOZOMI_URLS) sends.push(post(`${u}/?c=${encodeURIComponent(c.keys.nozomi)}`, 'sendTransaction', [v.b64, opts]));
-      } else if (v.service === 'falcon') {
-        if (this.due('falcon', SNIPE_SERVICES.falcon.gapMs)) for (const u of FALCON_URLS) sends.push(postBlind(`${u}/?api-key=${encodeURIComponent(c.keys.falcon)}`, 'sendTransaction', [v.b64, opts]));
-      } else if (v.service === 'custom') {
-        if (this.due('custom', SNIPE_SERVICES.custom.gapMs)) sends.push(post(c.customUrl, 'sendTransaction', [v.b64, opts]));
-      }
-    }
-    await Promise.allSettled(sends);
-  }
+  async sendBundles() { return this.fan.sendBundles(this.variants); }
+  async sendEverywhere() { return this.fan.sendAll(this.variants, this.cur.b64); }
 
   async fire(trigger) {
     if (this.state === 'firing' || this.state === 'landed' || this.stopped) return;
@@ -591,4 +609,4 @@ export class StonkSnipe {
   }
 }
 
-export { RAYDIUM_ADMIN };
+export { RAYDIUM_ADMIN, post, after as tickAfter, cancel as tickCancel };
