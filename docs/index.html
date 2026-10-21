@@ -343,7 +343,7 @@
         <div id="slotSenderHost"></div>
         <div class="row" style="margin-top:8px">
           <div><label style="margin-top:0">BUNDLES FROM (slots before)</label><input type="text" id="slotBundleLead" value="40" spellcheck="false"></div>
-          <div><label style="margin-top:0">PLAIN SENDS FROM (slots before)</label><input type="text" id="slotSendLead" value="1" spellcheck="false"></div>
+          <div><label style="margin-top:0">PLAIN SENDS FROM (slots before)</label><input type="text" id="slotSendLead" value="2" spellcheck="false"></div>
           <div style="flex:2"><label style="margin-top:0">&nbsp;</label><button class="btn" id="slotArmBtn" style="margin-top:0;width:100%">ARM SLOT LAUNCH</button></div>
         </div>
         <div class="status" id="slotClock" style="font-size:12px;margin-top:6px"></div>
@@ -353,7 +353,8 @@
         nonce, once per ticked sender &mdash; hours ahead is fine, nonce copies never expire. Each copy opens with an on-chain guard
         (Lighthouse: &ldquo;slot &ge; target&rdquo;) so it <b>cannot land before the target</b>. Bundles go out from the bundle lead (an early
         bundle fails the guard and is dropped, free); plain sends from the plain lead &mdash; one of those reaching a leader a slot early
-        lands failed and pays its fee, and the launcher re-signs and carries on. Slots run ~216ms now, so the clock counts slots,
+        lands failed and pays its fee &mdash; a pre-signed backup set on a second nonce then fires instantly. The plain lead can be
+        fractional: in tests a lead of 2 landed a slot late and 3 a slot early, so 2.5 sits between. Slots run ~216ms now, so the clock counts slots,
         not seconds. Keep this tab open.</div>
       </div>
       <div class="hint" style="font-size:11px;margin-top:6px">WATCH polls by <b>simulating</b> the launch every 12s — free, no gas, no

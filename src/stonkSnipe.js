@@ -230,8 +230,8 @@ export async function createNonceAccount(connection, secretKey) {
 }
 
 /// The nonce's current value, or null if the account is missing / not ours.
-export async function readNonce(connection, nonceAccount, ownerPubkey) {
-  const n = await connection.getNonce(new PublicKey(nonceAccount), 'confirmed').catch(() => null);
+export async function readNonce(connection, nonceAccount, ownerPubkey, commitment = 'confirmed') {
+  const n = await connection.getNonce(new PublicKey(nonceAccount), commitment).catch(() => null);
   if (!n || !n.authorizedPubkey.equals(new PublicKey(ownerPubkey))) return null;
   return n.nonce;
 }

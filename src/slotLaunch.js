@@ -56,9 +56,9 @@ export class SlotLaunch {
     // cfg: rpcUrls[], secretKey, targetSlot, name, symbol, uri, devBuySol,
     //      feesToHolders, creatorFeeBps, creatorAddress, quoteMint,
     //      prioSol, tipSol, services[], keys { nozomi, falcon }, customUrl,
-    //      customTipAccount, useNonce, nonceAccount,
-    //      bundleLeadSlots, sendLeadSlots, spamMs
-    this.cfg = { bundleLeadSlots: 40, sendLeadSlots: 1, spamMs: 100, useNonce: true, keys: {}, ...cfg };
+    //      customTipAccount, useNonce, nonceAccount, backupNonceAccount,
+    //      bundleLeadSlots, sendLeadSlots (may be fractional), spamMs
+    this.cfg = { bundleLeadSlots: 40, sendLeadSlots: 2, spamMs: 100, useNonce: true, keys: {}, ...cfg };
     this.hooks = hooks;
     this.state = 'idle';
     this.sigs = [];
@@ -85,7 +85,9 @@ export class SlotLaunch {
   conn(i = 0) { return new Connection(this.cfg.rpcUrls[i % this.cfg.rpcUrls.length], 'processed'); }
 
   /// where the chain is now, extrapolated from the last slot seen
-  estSlot() { return this.slot + Math.max(0, Math.floor((Date.now() - this.slotAt) / this.msPerSlot)); }
+  estSlot() { return Math.floor(this.estSlotF()); }
+  /// the same with the fraction of the current slot, so a lead can be 2.5
+  estSlotF() { return this.slot + Math.max(0, (Date.now() - this.slotAt) / this.msPerSlot); }
   eta(slot) { return new Date(Date.now() + (slot - this.estSlot()) * this.msPerSlot); }
 
   seeSlot(s) {
@@ -102,33 +104,75 @@ export class SlotLaunch {
     const c = this.cfg;
     const lamports = await this.conn(0).getBalance(new PublicKey(this.owner), 'confirmed');
     const need = Number(c.prioSol || 0) + Number(c.tipSol || 0) + Number(c.devBuySol || 0) + 0.03
-      + (c.useNonce && !c.nonceAccount ? 0.0016 : 0);
+      + (c.useNonce && !c.nonceAccount ? 0.0016 : 0) + (c.useNonce && !c.backupNonceAccount ? 0.0016 : 0);
     if (lamports / 1e9 < need) throw new Error(`the wallet has ${(lamports / 1e9).toFixed(4)} SOL; this launch needs about ${need.toFixed(4)} (dev buy + priority + bribe + ~0.03 rent)`);
   }
 
-  /// One copy per service (nonce) or a single copy (blockhash), each opening
-  /// with the slot guard.
-  async sign() {
+  baseSign() {
     const c = this.cfg;
-    const base = {
+    return {
       secretKey: c.secretKey, cuLimit: this.cuLimit, prioSol: c.prioSol, tipSol: c.tipSol,
       guardIxs: [slotGuardIx(c.targetSlot)], luts: [this.prep.lookupTable],
     };
-    const tip = (svc) => (svc === 'custom' ? c.customTipAccount : SNIPE_SERVICES[svc].tips[Math.floor(Math.random() * SNIPE_SERVICES[svc].tips.length)]);
+  }
+  tipFor(svc) { return svc === 'custom' ? this.cfg.customTipAccount : SNIPE_SERVICES[svc].tips[Math.floor(Math.random() * SNIPE_SERVICES[svc].tips.length)]; }
+
+  /// One copy per service against `nonce` ({ account, value }), each opening
+  /// with the slot guard - plus a Jito copy for the bundles.
+  signSet(nonce) {
+    const base = this.baseSign();
+    const want = [...new Set([...this.services, 'jito'])];
+    return want.map((service) => ({ service, ...signSnipe(this.prep, { ...base, nonce, tipAccount: this.tipFor(service) }) }));
+  }
+
+  /// A nonce's value, optionally waiting (up to `waitMs`) for it to move off
+  /// `notValue`. After an early landing the recovery reads at 'processed':
+  /// 'confirmed' trails by a slot or two and would hand back the spent value,
+  /// re-signing copies that can never land.
+  async nonceValue(account, { commitment = 'confirmed', notValue = null, waitMs = 0 } = {}) {
+    const until = Date.now() + waitMs;
+    for (;;) {
+      const v = await readNonce(this.conn(0), account, this.owner, commitment).catch(() => null);
+      if (v && v !== notValue) return v;
+      if (Date.now() >= until) return null;
+      await new Promise((r) => setTimeout(r, 60));
+    }
+  }
+
+  /// The main set: one copy per service (nonce) or a single copy (blockhash).
+  async sign() {
     if (this.nonce) {
-      const value = await readNonce(this.conn(0), this.nonce.account, this.owner);
+      const value = await this.nonceValue(this.nonce.account);
       if (!value) throw new Error('the nonce account ' + this.nonce.account.slice(0, 8) + '… is gone or not this wallet\'s');
       this.nonce.value = value;
-      const want = [...new Set([...this.services, 'jito'])];
-      this.copies = want.map((service) => ({ service, ...signSnipe(this.prep, { ...base, nonce: this.nonce, tipAccount: tip(service) }) }));
+      this.copies = this.signSet(this.nonce);
     } else {
       const { blockhash } = await this.conn(0).getLatestBlockhash('confirmed');
       const service = this.services[0];
-      this.copies = [{ service, ...signSnipe(this.prep, { ...base, blockhash, tipAccount: tip(service) }) }];
+      this.copies = [{ service, ...signSnipe(this.prep, { ...this.baseSign(), blockhash, tipAccount: this.tipFor(service) }) }];
     }
     this.signedAt = Date.now();
     for (const v of this.copies) this.sigs.push(v.sig);
     return this.copies;
+  }
+
+  /// The backup set: the same launch on a SECOND nonce, signed ahead and held.
+  /// It is only sent once a main copy has landed early - which moved the main
+  /// nonce and so already killed every main copy - so it can never launch
+  /// twice or pay twice; it just skips the wait to re-sign.
+  async setupBackup() {
+    const c = this.cfg;
+    let account = c.backupNonceAccount && c.backupNonceAccount !== this.nonce.account
+      && await readNonce(this.conn(0), c.backupNonceAccount, this.owner) ? c.backupNonceAccount : null;
+    if (!account) {
+      this.log('opening a second nonce account for the backup set (one-time, ~0.0015 SOL rent)…');
+      account = await createNonceAccount(new Connection(c.rpcUrls[0], 'confirmed'), c.secretKey);
+      this.hooks.onNonce?.(account);
+    }
+    const nonce = { account, value: await this.nonceValue(account) };
+    if (!nonce.value) throw new Error('could not read the backup nonce');
+    this.backup = { nonce, copies: this.signSet(nonce) };
+    this.log(`backup set ready on nonce ${account.slice(0, 8)}… - fires instantly if a copy lands early`);
   }
 
   /// Simulate the launch exactly as signed, minus the slot guard (which would
@@ -179,6 +223,7 @@ export class SlotLaunch {
       } catch (e) { this.log('nonce unavailable (' + e.message + ') - falling back to one blockhash copy'); this.nonce = null; }
     }
     if (!this.nonce) await this.sign();
+    else await this.setupBackup().catch((e) => { this.backup = null; this.log('no backup set (' + e.message + ') - an early landing will re-sign instead'); });
     if (this.copies[0].size > 1232) throw new Error(`the launch is ${this.copies[0].size} bytes, over Solana's 1232 - shorten the name, ticker or metadata URI`);
 
     const pf = await this.preflight();
@@ -194,12 +239,26 @@ export class SlotLaunch {
       if (this.nonce) {
         const v = await readNonce(this.conn(0), this.nonce.account, this.owner).catch(() => null);
         if (v && v !== this.nonce.value) { this.log('nonce moved - re-signing'); await this.sign().catch((e) => this.log('re-sign failed: ' + e.message)); }
+        if (this.backup) {
+          const b = await readNonce(this.conn(0), this.backup.nonce.account, this.owner).catch(() => null);
+          if (b && b !== this.backup.nonce.value) { this.backup.nonce.value = b; this.backup.copies = this.signSet(this.backup.nonce); this.log('backup nonce moved - re-signed the backup set'); }
+        }
       } else await this.sign().catch((e) => this.log('re-sign failed: ' + e.message));
     });
     // a last full check ~30s before the target
     this.preflightDone = false;
     this.every(50, () => this.tick());
-    this.every(400, () => this.checkLanded().catch(() => {}));
+    // landing checks: every 150ms once firing, every 600ms before
+    this.every(150, () => { if (this.state === 'firing' || this.due('check', 600)) this.checkLanded().catch(() => {}); });
+    // and at once whenever a nonce moves - an early landing moves it
+    for (const acct of [this.nonce?.account, this.backup?.nonce.account].filter(Boolean)) {
+      try {
+        const u = c.rpcUrls[0];
+        const conn = new Connection(u, { commitment: 'processed', wsEndpoint: u.replace(/^http/, 'ws') });
+        const id = conn.onAccountChange(new PublicKey(acct), () => this.checkLanded().catch(() => {}), 'processed');
+        this.subs.push([conn, id, 'account']);
+      } catch { /* the polling covers it */ }
+    }
     this.log(`armed for slot ${c.targetSlot.toLocaleString()} · now ${this.slot.toLocaleString()} · ~${Math.round((c.targetSlot - this.slot) * this.msPerSlot / 1000)}s at ${Math.round(this.msPerSlot)}ms/slot`);
   }
 
@@ -229,11 +288,14 @@ export class SlotLaunch {
     if ((this.state === 'armed' || this.state === 'firing') && left <= c.bundleLeadSlots && this.due('bundle', c.spamMs)) {
       this.fan.sendBundles(this.copies).catch(() => {});
     }
-    // plain sends: everything, every route
-    if (this.state === 'armed' && left <= c.sendLeadSlots) {
+    // plain sends: everything, every route. The lead is in slots and may be
+    // fractional (2.5): tested 2026-10-21, a lead of 2 landed one slot late and
+    // 3 one slot early, so the line sits between.
+    const leftF = c.targetSlot - this.estSlotF();
+    if (this.state === 'armed' && leftF <= c.sendLeadSlots) {
       this.setState('firing', { slot: this.slot });
       this.firedAt = Date.now();
-      this.log(`T-${Math.max(0, left)} slots (seen ${this.slot.toLocaleString()}) - sending ${this.copies.length} cop${this.copies.length === 1 ? 'y' : 'ies'} down every route`);
+      this.log(`T-${Math.max(0, leftF).toFixed(2)} slots (seen ${this.slot.toLocaleString()}) - sending ${this.copies.length} cop${this.copies.length === 1 ? 'y' : 'ies'} down every route`);
       this.after(120_000, () => { if (this.state === 'firing') { this.log('gave up 120s after firing without landing'); this.setState('failed', { reason: 'did not land' }); this.stop(); } });
     }
     if (this.state === 'firing' && this.due('plain', Date.now() - this.firedAt < 6000 ? 80 : 400)) {
@@ -251,6 +313,11 @@ export class SlotLaunch {
 
   async checkLanded() {
     if (this.stopped || !this.copies || this.state === 'landed' || this.busy) return;
+    this.busy = true;
+    try { await this.checkLandedOnce(); } finally { this.busy = false; }
+  }
+
+  async checkLandedOnce() {
     const recent = this.sigs.slice(-60);
     const st = await this.conn(Math.floor(Math.random() * 10)).getSignatureStatuses(recent).catch(() => null);
     const hit = st?.value?.findIndex((v) => v && v.confirmationStatus);
@@ -263,13 +330,40 @@ export class SlotLaunch {
       const guardIndex = this.nonce ? 1 : 0;
       if (ie && ie[0] === guardIndex && ie[1]?.Custom === GUARD_FAILED) {
         // landed a slot early: the guard stopped it, the fee is paid, and (with
-        // a nonce) every other copy is dead. Re-sign and carry on.
+        // a nonce) every other copy of that set is dead.
         this.earlyRetries++;
-        this.log(`a copy reached slot ${v.slot ?? '?'} - before the target - and the guard stopped it (its fee is paid). Re-signing (${this.earlyRetries})…`);
-        this.sigs = this.sigs.filter((s) => s !== sig);
+        const dead = new Set(this.copies.map((x) => x.sig));
+        this.sigs = this.sigs.filter((s) => !dead.has(s));
         if (this.earlyRetries > 4) { this.setState('failed', { reason: 'kept landing early', sig }); this.stop(); return; }
-        this.busy = true;
-        try { await this.sign(); } catch (e) { this.log('re-sign failed: ' + e.message); } finally { this.busy = false; }
+        if (!this.nonce) {
+          this.log(`a copy reached slot ${v.slot ?? '?'} - before the target - and the guard stopped it (its fee is paid). Re-signing…`);
+          await this.sign().catch((e) => this.log('re-sign failed: ' + e.message));
+          return;
+        }
+        const spent = this.nonce;
+        if (this.backup) {
+          // swap in the pre-signed backup set and send it at once
+          this.nonce = this.backup.nonce; this.copies = this.backup.copies; this.backup = null;
+          for (const x of this.copies) this.sigs.push(x.sig);
+          this.log(`a copy reached slot ${v.slot ?? '?'} - before the target - and the guard stopped it (its fee is paid). Backup set fired instantly (${this.earlyRetries})`);
+          this.fan.sendAll(this.copies, this.copies[0].b64).catch(() => {});
+          this.fan.sendBundles(this.copies).catch(() => {});
+          // the spent nonce becomes the next backup once it has moved
+          this.nonceValue(spent.account, { commitment: 'processed', notValue: spent.value, waitMs: 8000 }).then((value) => {
+            if (!value || this.stopped || this.state === 'landed') return;
+            const nonce = { account: spent.account, value };
+            this.backup = { nonce, copies: this.signSet(nonce) };
+            this.log('new backup set ready');
+          }).catch(() => {});
+          return;
+        }
+        this.log(`a copy reached slot ${v.slot ?? '?'} - before the target - and the guard stopped it (its fee is paid). Re-signing on the moved nonce (${this.earlyRetries})…`);
+        const value = await this.nonceValue(spent.account, { commitment: 'processed', notValue: spent.value, waitMs: 8000 });
+        if (!value) { this.log('the nonce did not move - cannot re-sign'); return; }
+        this.nonce = { account: spent.account, value };
+        this.copies = this.signSet(this.nonce);
+        this.signedAt = Date.now();
+        for (const x of this.copies) this.sigs.push(x.sig);
         return;
       }
       this.log(`landed but FAILED: ${JSON.stringify(v.err)} (${sig.slice(0, 10)}…) - stopping`);
@@ -308,7 +402,7 @@ export class SlotLaunch {
     this.stopped = true;
     for (const t of this.timers) { t.loop = false; tickCancel(t); }
     this.timers = [];
-    for (const [conn, id] of this.subs) conn.removeSlotChangeListener(id).catch(() => {});
+    for (const [conn, id, kind] of this.subs) (kind === 'account' ? conn.removeAccountChangeListener(id) : conn.removeSlotChangeListener(id)).catch(() => {});
     this.subs = [];
   }
 
