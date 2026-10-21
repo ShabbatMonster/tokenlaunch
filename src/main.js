@@ -6425,7 +6425,8 @@ async function toggleSlotLaunch(pad) {
     const owner = keypairFromSecret(solKeyB58).publicKey.toBase58();
     // a nonce no live StonkFun snipe is using
     const busy = new Set([...snipeLive.values()].map((x) => x.nonce?.account || x.cfg.nonceAccount).filter(Boolean));
-    const nonceAccount = s.useNonce ? (loadSnipeNonces().find((x) => x.owner === owner && !busy.has(x.account))?.account || null) : null;
+    const free = s.useNonce ? loadSnipeNonces().filter((x) => x.owner === owner && !busy.has(x.account)).map((x) => x.account) : [];
+    const [nonceAccount = null, backupNonceAccount = null] = free;
     const rpcUrls = [...new Set([pad.rpc, ...HELIUS_RPCS].filter(Boolean))];
     const sl = new SlotLaunch({
       rpcUrls, secretKey: solKeyB58, targetSlot, name, symbol, uri: IPFS_GW(metaHash),
@@ -6433,8 +6434,9 @@ async function toggleSlotLaunch(pad) {
       creatorFeeBps: pumpCreatorFeeBps(), creatorAddress: pumpCreatorAddress(), quoteMint: pumpQuoteMint() || undefined,
       prioSol: num('slotPrio', 0.05), tipSol: num('slotTip', 0.01),
       services: s.services, keys, customUrl: s.customUrl, customTipAccount: s.customTipAccount,
-      useNonce: s.useNonce, nonceAccount,
-      bundleLeadSlots: Math.round(num('slotBundleLead', 40)), sendLeadSlots: Math.round(num('slotSendLead', 1)),
+      useNonce: s.useNonce, nonceAccount, backupNonceAccount,
+      // the plain-send lead may be fractional (2.5 = between 2 and 3 slots)
+      bundleLeadSlots: Math.round(num('slotBundleLead', 40)), sendLeadSlots: Math.round(num('slotSendLead', 2) * 100) / 100,
     }, {
       onLog: slotLogLine,
       onNonce: (account) => addSnipeNonce(owner, account),

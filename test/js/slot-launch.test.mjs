@@ -38,15 +38,42 @@ const ROOT = path.join(import.meta.dirname, '..', '..');
   check(sent.bundles > 0 && sent.plain === 0 && sl.state === 'armed', 'inside the bundle lead: bundles only (a failed bundle costs nothing)');
   at(999);
   check(sl.state === 'firing' && sent.plain > 0, 'one slot out: plain sends start on every route');
-  // an early landing the guard stopped: re-sign and keep going
-  let resigned = 0;
+  // an early landing the guard stopped, with a backup set: it fires at once
+  const early = { value: [{ err: { InstructionError: [1, { Custom: 6001 }] }, confirmationStatus: 'processed', slot: 999 }] };
+  sl.conn = () => ({ getSignatureStatuses: async () => early });
   sl.nonce = { account: 'n', value: 'v' };
   sl.sigs = ['early'];
   sl.copies = [{ service: 'jito', b64: 'AA==', sig: 'early' }];
-  sl.sign = async () => { resigned++; };
-  sl.conn = () => ({ getSignatureStatuses: async () => ({ value: [{ err: { InstructionError: [1, { Custom: 6001 }] }, confirmationStatus: 'processed', slot: 999 }] }) });
+  sl.backup = { nonce: { account: 'b', value: 'bv' }, copies: [{ service: 'jito', b64: 'BB==', sig: 'backup1' }] };
+  sl.nonceValue = async () => 'moved';
+  sl.signSet = (nonce) => [{ service: 'jito', b64: 'CC==', sig: 'next-' + nonce.value }];
+  const before = sent.plain;
   await sl.checkLanded();
-  check(resigned === 1 && sl.state === 'firing' && !sl.stopped, 'a copy that lands a slot early (guard 6001) is re-signed, not fatal');
+  check(sl.copies[0].sig === 'backup1' && sl.nonce.account === 'b' && sent.plain > before && sl.state === 'firing',
+    'a copy that lands early (guard 6001) swaps in the pre-signed backup set and sends it at once');
+  await new Promise((r) => setTimeout(r, 20));
+  check(sl.backup?.copies[0].sig === 'next-moved' && sl.backup.nonce.account === 'n', 'and the spent nonce becomes the next backup once it moves');
+  // without a backup: re-sign on the moved nonce, not the spent value
+  sl.backup = null;
+  sl.sigs = ['backup1'];
+  await sl.checkLanded();
+  check(sl.copies[0].sig === 'next-moved' && sl.nonce.value === 'moved' && !sl.stopped, 'with no backup it re-signs against the moved nonce');
+  sl.stop();
+}
+
+// --- a fractional plain-send lead --------------------------------------------------
+{
+  const kp = Keypair.generate(), mint = Keypair.generate();
+  const sl = new SlotLaunch({ rpcUrls: ['http://127.0.0.1:1'], secretKey: bs58.encode(kp.secretKey), targetSlot: 1_000, bundleLeadSlots: 0, sendLeadSlots: 2.5, spamMs: 0 });
+  sl.fan = { sendBundles: async () => {}, sendAll: async () => {} };
+  sl.prep = { mint: mint.publicKey.toBase58(), instructions: [], mintKeypair: mint, lookupTable: null };
+  sl.copies = [{ service: 'jito', b64: 'AA==', sig: 'x' }];
+  sl.state = 'armed';
+  sl.msPerSlot = 1000;
+  sl.slot = 997; sl.slotAt = Date.now() - 300; sl.tick();        // ~997.3: 2.7 slots out
+  const held = sl.state === 'armed';
+  sl.slotAt = Date.now() - 600; sl.tick();                         // ~997.6: 2.4 slots out
+  check(held && sl.state === 'firing', 'a 2.5-slot lead fires between whole slots (held at 2.7 out, fired at 2.4)');
   sl.stop();
 }
 
