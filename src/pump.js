@@ -374,6 +374,24 @@ function createAtaIdempotentIx(payer, owner, mint, tokenProgram) {
   });
 }
 
+/// The creator pump will record on a new coin's curve - what its creator_vault
+/// is seeded by. A holder-rewards coin gets a per-mint address whose
+/// derivation pump does not publish (seen 2026-10-21: a different address for
+/// every mint, none of the obvious seeds), so it is read off a simulated
+/// create of this exact mint rather than guessed.
+export async function curveCreatorAfterCreate(opts) {
+  const { connection, mint } = opts;
+  const tx = await buildPumpLaunch({ ...opts, devBuySol: 0, buyCreator: undefined });
+  const bc = pda([Buffer.from('bonding-curve'), mint.publicKey.toBuffer()]);
+  const sim = await connection.simulateTransaction(tx, {
+    sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed',
+    accounts: { addresses: [bc.toBase58()], encoding: 'base64' },
+  });
+  const data = sim.value.accounts?.[0]?.data?.[0];
+  if (sim.value.err || !data) throw new Error('could not work out the coin\'s creator for the dev buy: ' + JSON.stringify(sim.value.err));
+  return new PublicKey(Buffer.from(data, 'base64').subarray(49, 81));   // BondingCurve.creator
+}
+
 /// Build the launch transaction without sending it. Split out so the same code
 /// can be simulated, dry-run, or fired by the watcher.
 export async function buildPumpLaunch(opts) {
@@ -425,8 +443,17 @@ export async function buildPumpLaunch(opts) {
       payer.publicKey, payer.publicKey,
       quote ? quote.mint : WSOL, quote ? quote.tokenProgram : TOKEN_PROGRAM,
     ));
+    // The buy's creator_vault is seeded by the creator the CURVE records, which
+    // is not always the payer: a creator address puts that address there, and a
+    // holder-rewards coin gets a per-mint address pump derives itself. Using the
+    // payer for either failed the dev buy with ConstraintSeeds (2006) on
+    // creator_vault.
+    const buyCreator = opts.buyCreator
+      ?? (feesToHolders
+        ? await curveCreatorAfterCreate({ ...opts, global: g })
+        : (creatorAddress ? new PublicKey(creatorAddress) : payer.publicKey));
     ixs.push(buyIx({
-      mint: mint.publicKey, user: payer.publicKey, creator: payer.publicKey,
+      mint: mint.publicKey, user: payer.publicKey, creator: buyCreator,
       feeRecipient, buybackFeeRecipient, amountTokens, maxSolCost, quote,
     }));
   }
@@ -1036,11 +1063,16 @@ export async function launchPump(opts) {
 
   const payer = Keypair.fromSecretKey(bs58.decode(secretKey));
   const mint = Keypair.generate();
+  // read once for a holder-rewards coin with a dev buy (see buildPumpLaunch),
+  // so the three builds below do not each simulate it
+  const buyCreator = feesToHolders && quoteUiToRaw(devBuySol, quote) > 0n
+    ? await curveCreatorAfterCreate({ connection, payer, mint, name, symbol, uri, global: g, quote, feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable })
+    : undefined;
 
   say('simulating…');
   const dry = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-    feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable,
+    feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable, buyCreator,
   });
   const sim = await connection.simulateTransaction(dry, { commitment: 'confirmed' });
   if (sim.value.err) {
@@ -1067,7 +1099,7 @@ export async function launchPump(opts) {
   if (opts.prebuild) {
     const built = await buildPumpLaunch({
       connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-      feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable, returnIxs: true,
+      feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable, buyCreator, returnIxs: true,
     });
     return { mint: mint.publicKey.toBase58(), mintKeypair: mint, ...built, computeUnits, measured };
   }
@@ -1079,7 +1111,7 @@ export async function launchPump(opts) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const tx = await buildPumpLaunch({
     connection, payer, mint, name, symbol, uri, devBuySol, slippageBps, global: g, quote, cashback,
-    feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable, blockhash, computeUnits,
+    feesToHolders, creatorFeeBps: wantBps, creatorAddress, lookupTable, buyCreator, blockhash, computeUnits,
   });
   const raw = tx.serialize();
 
