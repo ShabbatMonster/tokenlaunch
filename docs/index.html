@@ -251,15 +251,20 @@
       <details class="adv" id="solParams" open>
         <summary>bonding-curve parameters (pump.fun defaults)</summary>
         <div class="row">
-          <div><label>FEE (BPS)</label><input type="text" id="solFeeBps" value="100" spellcheck="false"></div>
+          <div><label>PRE-BOND FEE (BPS)</label><input type="text" id="solFeeBps" value="100" spellcheck="false"></div>
+          <div><label>POST-BOND FEE (BPS)</label><input type="text" id="solMigratedFeeBps" value="100" spellcheck="false"></div>
         </div>
+        <div class="row">
+          <div><button class="btn secondary" id="solLowFeeBtn" style="margin-top:0">LOWEST POSSIBLE FEES (0.25% / 0.10%)</button></div>
+        </div>
+        <div class="hint" id="solFeeHint" style="font-size:11px;margin-top:4px"></div>
         <div class="row">
           <div><label>MIGRATION THRESHOLD (QUOTE)</label><input type="text" id="solMigThreshold" spellcheck="false"></div>
           <div style="flex:0 0 120px"><label>% ON MIGRATION</label><input type="text" id="solMigPct" value="20" spellcheck="false"></div>
         </div>
         <label>FEE WALLET (ALL TRADING FEES)</label>
         <input type="text" id="solFeeWallet" value="JDQKDrc1TQgBRvdFh56tkta5sYcDj1SoP52Eiu64rSrT" spellcheck="false">
-        <div class="hint" style="font-size:11px;margin-top:4px">1% buy &amp; sell → this wallet · LP burnt · mint authority disabled · migrates to DAMM v2</div>
+        <div class="hint" style="font-size:11px;margin-top:4px">buy &amp; sell fee → this wallet · LP burnt · mint authority disabled · migrates to DAMM v2</div>
       </details>
     </div>
 

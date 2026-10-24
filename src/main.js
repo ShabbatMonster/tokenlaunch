@@ -2797,6 +2797,25 @@ function meteoraDecimalsFor(totalSupply) {
   return BigInt(Math.ceil(Number(totalSupply))) * 10n ** 9n <= 18_446_744_073_709_551_615n ? 9 : 6;
 }
 
+// Meteora's own floors, enforced by the DBC program (see src/solana.js). Shown
+// here so the pad says why a lower number is refused before a launch is tried.
+const DBC_FEE_LIMITS = { minFee: 25, maxFee: 9900, minMigrated: 10, maxMigrated: 1000 };
+
+function paintSolFeeHint() {
+  const el = $('solFeeHint');
+  if (!el) return;
+  const pre = +($('solFeeBps')?.value || 0);
+  const post = +($('solMigratedFeeBps')?.value || 0);
+  const L = DBC_FEE_LIMITS;
+  const bad = [];
+  if (!(pre >= L.minFee && pre <= L.maxFee)) bad.push(`the pre-bond fee has to be ${L.minFee}–${L.maxFee} bps (${L.minFee / 100}%–${L.maxFee / 100}%)`);
+  if (!(post >= L.minMigrated && post <= L.maxMigrated)) bad.push(`the post-bond fee has to be ${L.minMigrated}–${L.maxMigrated} bps (${L.minMigrated / 100}%–${L.maxMigrated / 100}%)`);
+  el.innerHTML = bad.length
+    ? `<span class="err">${esc(bad.join('; '))}</span>`
+    : `${pre / 100}% on every buy and sell while it is on the curve, then ${post / 100}% in the DAMM v2 pool after it migrates`
+      + `<span class="hint"> · Meteora's floors are ${L.minFee / 100}% and ${L.minMigrated / 100}%</span>`;
+}
+
 function solParamsFromUI(pad) {
   const num = (id, name) => {
     const v = +($(id).value.trim().replace(/,/g, ''));
@@ -2818,7 +2837,9 @@ function solParamsFromUI(pad) {
     // 9 whenever the supply allows it: at 6, curves that sell nearly the whole
     // supply round short of their own threshold and Meteora refuses them
     baseDecimals: meteoraDecimalsFor(num('solSupply', 'total supply')),
-    feeBps: num('solFeeBps', 'fee bps'),
+    feeBps: num('solFeeBps', 'pre-bond fee bps'),
+    // the fee the migrated DAMM v2 pool charges; its own floor is 10 bps
+    migratedFeeBps: num('solMigratedFeeBps', 'post-bond fee bps'),
     pctSupplyOnMigration: num('solMigPct', '% on migration'),
     migrationThreshold,
     feeClaimer: feeWallet,
@@ -5696,6 +5717,7 @@ function applyPadUI(pad) {
   $('quoteRow').classList.toggle('hidden', pad.family !== 'rialto');
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
   if (meteora) paintSolSupplyHint();
+  if (meteora) paintSolFeeHint();
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
   if (pump) paintPumpDevSym();
@@ -7238,6 +7260,12 @@ function init() {
   }
   $('pumpFeeCheckBtn').addEventListener('click', () => pumpReadFeeLimit());
   $('pumpArmBtn').addEventListener('click', () => { if (activePad.family === 'pump') pumpArm(activePad); });
+  $('solLowFeeBtn').addEventListener('click', () => {
+    $('solFeeBps').value = String(DBC_FEE_LIMITS.minFee);
+    $('solMigratedFeeBps').value = String(DBC_FEE_LIMITS.minMigrated);
+    paintSolFeeHint();
+  });
+  for (const id of ['solFeeBps', 'solMigratedFeeBps']) $(id).addEventListener('input', paintSolFeeHint);
   $('solPumpEconBtn').addEventListener('click', () => { if (activePad.family === 'meteora') applyPumpEconomics(activePad); });
   $('clmmQuoteSelect').addEventListener('change', () => { if (activePad.family === 'clmm') updateClmmUI(activePad); });
   $('ponsQuoteSelect').addEventListener('change', () => { if (activePad.family === 'pons-v2') updatePonsUI(activePad); });
