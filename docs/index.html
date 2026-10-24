@@ -520,6 +520,31 @@
           <select id="flapDevFund"><option value="BNB">BNB</option><option value="USDC">USDC</option></select>
         </div>
       </div>
+      <div id="flapVaultRow" class="hidden" style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+        <label style="margin-top:0">FEE VAULT <span class="hint">a contract that receives the market share of the tax instead of your wallet</span></label>
+        <select id="flapVault">
+          <option value="">none &mdash; tax goes to my wallet</option>
+          <option value="gift">X account &middot; Gift Vault (any pair token)</option>
+          <option value="giftv2">X account &middot; Gift Vault V2 (BNB pair only)</option>
+          <option value="giftx">X account &middot; FlapXVault (the original)</option>
+          <option value="split">Split &middot; up to 10 wallets by %</option>
+          <option value="rwa2">Stock dividends &middot; RWA v2 (11 assets)</option>
+          <option value="rwa1">Stock dividends &middot; RWA v1 (7 assets)</option>
+        </select>
+        <div id="flapVaultXWrap" class="hidden" style="margin-top:8px">
+          <label style="margin-top:0">X / TWITTER HANDLE</label>
+          <input type="text" id="flapVaultX" spellcheck="false" placeholder="handle without the @">
+        </div>
+        <div id="flapVaultSplitWrap" class="hidden" style="margin-top:8px">
+          <label style="margin-top:0">RECIPIENTS &mdash; one <code>address percent</code> per line, totalling 100</label>
+          <textarea id="flapVaultSplit" spellcheck="false" rows="3" placeholder="0xabc… 70&#10;0xdef… 30"></textarea>
+        </div>
+        <div id="flapVaultRwaWrap" class="hidden" style="margin-top:8px">
+          <label style="margin-top:0">DIVIDEND ASSET</label>
+          <select id="flapVaultRwa"></select>
+        </div>
+        <div class="status" id="flapVaultRules" style="font-size:11px;margin-top:6px"></div>
+      </div>
       <div class="hint" id="flapHint" style="font-size:11px;margin-top:4px">tax token · address mined to end in 7777 · buy/sell tax splits per mode</div>
     </div>
 
