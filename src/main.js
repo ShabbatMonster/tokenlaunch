@@ -1,7 +1,7 @@
 import {
   createPublicClient, createWalletClient, http, defineChain,
   parseEther, formatEther, keccak256, stringToBytes, parseEventLogs, getAddress,
-  encodeAbiParameters, encodeFunctionData, encodePacked, concat, parseUnits, formatUnits,
+  encodeAbiParameters, decodeAbiParameters, encodeFunctionData, encodePacked, concat, parseUnits, formatUnits,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import {
@@ -1747,6 +1747,104 @@ const FLAP_PORTAL_ABI = [{
   outputs: [{ name: 'token', type: 'address' }],
 }];
 
+// ---------------------------------------------------------------------------
+// flap fee vaults (BNB)
+//
+// A vault is a contract that receives the MARKET share of the tax in place of a
+// wallet. Launching with one goes through VaultPortal.newTokenV6WithVault,
+// whose params are newTokenV6's minus `beneficiary` (the vault replaces it)
+// plus `vaultFactory` + `vaultData`. mktBps must stay > 0 or it reverts
+// InvalidMktBps - that is the share the vault is paid.
+//
+// Each factory publishes its own launch rules through tokenCreationPolicies(),
+// so they are read off chain and enforced here rather than hardcoded. Verified
+// by simulation on 2026-10-23; every vault below launched in a dry run.
+const FLAP_VAULT_PORTAL = '0x90497450f2a706f1951b5bdda52B4E5d16f34C06';   // BSC mainnet
+const FLAP_VAULT_PARAM_COMPONENTS = [
+  ...FLAP_PARAM_COMPONENTS.filter((c) => c.name !== 'beneficiary'),
+  { name: 'vaultFactory', type: 'address' }, { name: 'vaultData', type: 'bytes' },
+];
+const FLAP_VAULT_PORTAL_ABI = [{
+  type: 'function', name: 'newTokenV6WithVault', stateMutability: 'payable',
+  inputs: [{ name: 'params', type: 'tuple', components: FLAP_VAULT_PARAM_COMPONENTS }],
+  outputs: [{ name: 'token', type: 'address' }],
+}];
+// the rule list every V2 factory publishes: (field, op, abi-encoded values, message)
+const FLAP_POLICY_ABI = [{
+  type: 'function', name: 'tokenCreationPolicies', stateMutability: 'view', inputs: [],
+  outputs: [{
+    type: 'tuple[]',
+    components: [{ name: 'field', type: 'string' }, { name: 'op', type: 'string' }, { name: 'values', type: 'bytes' }, { name: 'message', type: 'string' }],
+  }],
+}];
+const FLAP_ASSETS_ABI = [{ type: 'function', name: 'getSupportedAssets', stateMutability: 'view', inputs: [], outputs: [{ type: 'address[]' }] }];
+
+// A gift vault's only input is the X handle, as a struct - a bare ABI-encoded
+// string makes the factory's decode blow up with Panic(0x41).
+const encodeXHandle = (handle) => encodeAbiParameters(
+  [{ type: 'tuple', components: [{ name: 'xHandle', type: 'string' }] }], [{ xHandle: handle }],
+);
+const FLAP_VAULTS = {
+  gift: {
+    label: 'X account · Gift Vault', factory: '0x5e8604a69158FA583b0C5c16441A9b3d429E7Cbb', kind: 'x',
+    note: 'tax revenue is held for the owner of the X account, who proves it with a tweet and names the wallet to stream to. Unclaimed after ~7 days it is paid out to holders instead.',
+  },
+  giftv2: {
+    label: 'X account · Gift Vault V2', factory: '0xFb7ccc4Fd09Da5b7016A18d51e227Af4ABE53f44', kind: 'x',
+    note: 'the BNB-only build of the gift vault.',
+  },
+  giftx: {
+    label: 'X account · FlapXVault', factory: '0x025549F52B03cF36f9e1a337c02d3AA7Af66ab32', kind: 'x',
+    note: 'the original X vault; kept for tokens that want to match older launches.',
+  },
+  split: {
+    label: 'Split', factory: '0xfab75Dc774cB9B38b91749B8833360B46a52345F', kind: 'split',
+    note: 'splits every bit of tax revenue between up to 10 wallets by percentage; each can claim its share.',
+  },
+  rwa2: {
+    label: 'Stock dividends · RWA v2', factory: '0x40a9a2FDa017E0923EA0B403F2f063f9E51168Fb', kind: 'rwa',
+    note: 'tax revenue accumulates and keepers convert it into a tokenised stock, paid to holders as dividends.',
+  },
+  rwa1: {
+    label: 'Stock dividends · RWA v1', factory: '0xf8aC088F06D155f3C3F531f1Ef80B14f1604530a', kind: 'rwa',
+    note: 'the older stock-dividend vault, with a shorter asset list.',
+  },
+};
+
+/// Read a factory's published launch rules. Null when it publishes none (the
+/// older factories), which means nothing beyond the Portal's own checks.
+async function flapVaultPolicies(pub, factory) {
+  const list = await pub.readContract({ address: getAddress(factory), abi: FLAP_POLICY_ABI, functionName: 'tokenCreationPolicies' }).catch(() => null);
+  if (!list) return null;
+  return list.map((p) => {
+    let values = null;
+    for (const t of ['address[]', 'uint256[]']) {
+      if (values) break;
+      try { values = decodeAbiParameters([{ type: t }], p.values)[0].map(String); } catch { /* next shape */ }
+    }
+    if (!values) { try { values = [String(decodeAbiParameters([{ type: 'uint256' }], p.values)[0])]; } catch { values = []; } }
+    return { field: p.field, op: p.op, values, message: p.message.split(' / ')[0].trim() };
+  });
+}
+
+/// Check the launch params against the rules the factory published. Returns the
+/// first rule broken, so the reason is the factory's own wording.
+function flapCheckPolicies(rules, params) {
+  const num = (v) => BigInt(v ?? 0).toString();
+  const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+  for (const r of rules || []) {
+    const got = params[r.field];
+    if (got === undefined) continue;
+    const isAddr = typeof got === 'string' && got.startsWith('0x') && got.length === 42;
+    const asList = r.values.map((v) => (isAddr ? String(v) : num(v)));
+    const mine = isAddr ? String(got) : num(got);
+    if (r.op === 'eq' && asList.length && !same(mine, asList[0])) return r;
+    if (r.op === 'in' && asList.length && !asList.some((v) => same(v, mine))) return r;
+    if (r.op === 'eqQuoteToken' && !same(mine, params.quoteToken)) return r;
+  }
+  return null;
+}
+
 // EIP-1167 clone init-code hash for the token implementation this pad deploys
 function flapInitCodeHash(impl) {
   return keccak256(concat(['0x3d602d80600a3d3981f3363d3d373d3d3d363d73', getAddress(impl), '0x5af43d82803e903d91602b57fd5bf3']));
@@ -1801,6 +1899,48 @@ function flapReadForm(pad) {
   return { quote, taxBps, mode, mktBps, deflationBps, dividendBps, lpBps: 0, dividendToken, minimumShareBalance, devBuy, devFund };
 }
 
+/// The chosen vault and its one piece of launch data.
+function flapReadVault(pad) {
+  const sel = document.getElementById('flapVault');
+  const id = pad.chainId === 56 ? (sel?.value || '') : '';
+  if (!id) return null;
+  const v = FLAP_VAULTS[id];
+  if (!v) return null;
+  if (v.kind === 'x') {
+    const handle = (document.getElementById('flapVaultX').value || '').trim().replace(/^@/, '').toLowerCase();
+    if (!/^[a-z0-9_]{1,15}$/.test(handle)) throw new Error('enter the X handle that should receive the fees (letters, numbers and _)');
+    return { ...v, id, handle, vaultData: encodeXHandle(handle) };
+  }
+  if (v.kind === 'split') {
+    const rows = (document.getElementById('flapVaultSplit').value || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!rows.length) throw new Error('add at least one recipient wallet for the split vault');
+    if (rows.length > 10) throw new Error('the split vault takes at most 10 recipients');
+    const seen = new Set();
+    const recipients = rows.map((line) => {
+      const [addr, pct] = line.split(/[\s,:]+/);
+      if (!/^0x[0-9a-fA-F]{40}$/.test(addr || '')) throw new Error(`split recipient "${line}" is not an address`);
+      const bps = Math.round(Number(pct) * 100);
+      if (!(bps > 0)) throw new Error(`split recipient ${addr.slice(0, 8)}… needs a percentage above 0`);
+      const key = addr.toLowerCase();
+      if (seen.has(key)) throw new Error('the same wallet is listed twice in the split');
+      seen.add(key);
+      return { recipient: getAddress(addr), bps };
+    });
+    const total = recipients.reduce((t, r) => t + r.bps, 0);
+    if (total !== 10000) throw new Error(`the split percentages add up to ${(total / 100).toFixed(2)}%, and they have to make 100%`);
+    return {
+      ...v, id, recipients,
+      vaultData: encodeAbiParameters(
+        [{ type: 'tuple[]', components: [{ name: 'recipient', type: 'address' }, { name: 'bps', type: 'uint16' }] }], [recipients],
+      ),
+    };
+  }
+  // stock dividends: the asset is named by dividendToken, and the vault takes no data
+  const asset = document.getElementById('flapVaultRwa').value;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(asset || '')) throw new Error('pick the stock the dividends are paid in');
+  return { ...v, id, asset: getAddress(asset), vaultData: '0x' };
+}
+
 // Fund a stock-quote dev buy by swapping BNB/USDC into the pair token through the
 // OpenOcean DEX aggregator (routes across PancakeSwap/Uniswap V2+V3 — the same
 // liquidity GMGN uses), then flap buys with the acquired token. `amountHuman` is a
@@ -1845,6 +1985,7 @@ async function launchFlap(pad, { name, symbol, logo, description, twitter, websi
   setStatus('publishing token metadata to IPFS...');
   const meta = await uploadJsonToIpfs({ name, symbol, description, image: logo, twitter, website });
 
+  const vault = flapReadVault(pad);
   const isNative = f.quote.address === ZERO_ADDR;
   // flap requires a non-zero dividendToken when the quote is an ERC-20; default it
   // to the quote token itself (harmless in standard mode where dividendBps == 0).
@@ -1861,13 +2002,15 @@ async function launchFlap(pad, { name, symbol, logo, description, twitter, websi
       value = quoteAmt;
     } else {
       if (pad.chainId !== 56) throw new Error('dev buy on a stock pair is only supported on BNB');
+      // whoever is called pulls the pair token, so that is what gets the allowance
+      const spender = vault ? FLAP_VAULT_PORTAL : pad.portal;
       const fundIsNative = f.devFund === 'BNB';
       setStatus(`swapping ${f.devBuy} ${f.devFund} → ${f.quote.symbol} via aggregator…`);
       const got = await aggregatorAcquireQuote(pub, wallet, 'bsc', fundIsNative ? 'BNB' : BSC_USDC, f.devBuy, f.quote.address);
       setStatus(`approving ${f.quote.symbol} to flap…`);
-      const alw = await pub.readContract({ address: getAddress(f.quote.address), abi: ERC20, functionName: 'allowance', args: [account.address, pad.portal] });
+      const alw = await pub.readContract({ address: getAddress(f.quote.address), abi: ERC20, functionName: 'allowance', args: [account.address, spender] });
       if (alw < got) {
-        const ah = await wallet.writeContract({ address: getAddress(f.quote.address), abi: ERC20, functionName: 'approve', args: [pad.portal, got] });
+        const ah = await wallet.writeContract({ address: getAddress(f.quote.address), abi: ERC20, functionName: 'approve', args: [spender, got] });
         await pub.waitForTransactionReceipt({ hash: ah });
       }
       quoteAmt = got; // flap pulls this via allowance during newTokenV6
@@ -1877,26 +2020,53 @@ async function launchFlap(pad, { name, symbol, logo, description, twitter, websi
   setStatus(`mining vanity address (…${FLAP_VANITY_SUFFIX})…`);
   const { salt, token } = await mineFlapSalt(pad);
 
+  // A vault replaces the beneficiary and is paid the market share, so that
+  // share has to exist; a stock-dividend vault also names its asset here.
+  let mktBps = f.mktBps, dividendBps = f.dividendBps, minimumShareBalance = f.minimumShareBalance;
+  if (vault) {
+    if (vault.kind === 'rwa') { dividendToken = vault.asset; dividendBps = 0; minimumShareBalance = 0n; }
+    if (!(mktBps > 0)) throw new Error(`a ${vault.label} vault is paid out of the market share of the tax, so that share cannot be 0% — lower the ${f.mode} share below 100%`);
+  }
+
   const params = {
     name, symbol, meta, dexThresh: 1, salt, migratorType: 1,
-    quoteToken: f.quote.address, quoteAmt, beneficiary: feeRecipient,
+    quoteToken: f.quote.address, quoteAmt,
+    ...(vault ? {} : { beneficiary: feeRecipient }),
     permitData: '0x', extensionID: '0x' + '00'.repeat(32), extensionData: '0x',
     dexId: 0, lpFeeProfile: 0, buyTaxRate: f.taxBps, sellTaxRate: f.taxBps,
     taxDuration: 3153600000n, antiFarmerDuration: 2592000n,
-    mktBps: f.mktBps, deflationBps: f.deflationBps, dividendBps: f.dividendBps, lpBps: f.lpBps,
-    minimumShareBalance: f.minimumShareBalance, dividendToken,
+    mktBps, deflationBps: f.deflationBps, dividendBps, lpBps: f.lpBps,
+    minimumShareBalance, dividendToken,
     commissionReceiver: ZERO_ADDR, tokenVersion: 6,
+    ...(vault ? { vaultFactory: getAddress(vault.factory), vaultData: vault.vaultData } : {}),
   };
 
-  setStatus('simulating flap launch...');
+  // the factory's own rules, read off chain, so a launch it would reject is
+  // refused here in its own words
+  if (vault) {
+    const rules = await flapVaultPolicies(pub, vault.factory);
+    const broken = flapCheckPolicies(rules, params);
+    if (broken) {
+      const allowed = broken.values.length && !broken.values[0].startsWith('0x')
+        ? ` (allowed: ${broken.values.map((v) => (/Bps|TaxRate/.test(broken.field) ? (Number(v) / 100) + '%' : v)).join(', ')})`
+        : '';
+      throw new Error(`${vault.label}: ${broken.message}${allowed}`);
+    }
+  }
+
+  const target = vault ? FLAP_VAULT_PORTAL : pad.portal;
+  const abi = vault ? FLAP_VAULT_PORTAL_ABI : FLAP_PORTAL_ABI;
+  const fn = vault ? 'newTokenV6WithVault' : 'newTokenV6';
+
+  setStatus(vault ? `simulating flap launch with the ${vault.label} vault…` : 'simulating flap launch...');
   try {
-    await pub.simulateContract({ address: pad.portal, abi: FLAP_PORTAL_ABI, functionName: 'newTokenV6', args: [params], account, value });
+    await pub.simulateContract({ address: target, abi, functionName: fn, args: [params], account, value });
   } catch (e) {
     throw new Error('flap simulation failed: ' + (e.shortMessage || e.message).split('\n')[0]);
   }
 
-  setStatus('sending flap newTokenV6 tx...');
-  const hash = await wallet.writeContract({ address: pad.portal, abi: FLAP_PORTAL_ABI, functionName: 'newTokenV6', args: [params], value });
+  setStatus(`sending flap ${fn} tx...`);
+  const hash = await wallet.writeContract({ address: target, abi, functionName: fn, args: [params], value });
   setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
   const rcpt = await pub.waitForTransactionReceipt({ hash });
   if (rcpt.status !== 'success') throw new Error('flap launch reverted');
@@ -1904,7 +2074,18 @@ async function launchFlap(pad, { name, symbol, logo, description, twitter, websi
   rememberLaunch(pad, token, symbol);
   const modeNote = f.mode === 'burn' ? `burn ${f.deflationBps / 100}% of tax`
     : f.mode === 'dividends' ? `dividends ${f.dividendBps / 100}% of tax` : 'standard';
-  setStatus(`✅ launched ${symbol} on flap · ${pad.nativeSymbol === 'BNB' ? 'BNB' : 'Robinhood'}\ntoken: ${token}\npair: ${f.quote.symbol} · tax ${f.taxBps / 100}% · ${modeNote}\n${pad.site(token)}`);
+  // where the market share went, which the vault now owns
+  let vaultNote = '';
+  if (vault) {
+    const got = await pub.readContract({
+      address: FLAP_VAULT_PORTAL, functionName: 'tryGetVault', args: [token],
+      abi: [{ type: 'function', name: 'tryGetVault', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'bool' }, { type: 'tuple', components: [{ name: 'vault', type: 'address' }, { name: 'vaultFactory', type: 'address' }, { name: 'description', type: 'string' }, { name: 'isOfficial', type: 'bool' }, { name: 'riskLevel', type: 'uint8' }] }] }],
+    }).catch(() => null);
+    const addr = got && got[0] ? got[1].vault : null;
+    vaultNote = `\nvault: ${vault.label}${vault.handle ? ' → @' + vault.handle : ''}${addr ? ' · ' + addr : ''}`
+      + (vault.handle ? `\n@${vault.handle} claims it by tweeting: gift the fee from ${token} to <their wallet> #FlapGift` : '');
+  }
+  setStatus(`✅ launched ${symbol} on flap · ${pad.nativeSymbol === 'BNB' ? 'BNB' : 'Robinhood'}\ntoken: ${token}\npair: ${f.quote.symbol} · tax ${f.taxBps / 100}% · ${modeNote}${vaultNote}\n${pad.site(token)}`);
   refreshBalance();
   renderTokenList();
 }
@@ -6634,6 +6815,47 @@ async function previewSolDevBuy(pad) {
   }
 }
 
+/// Show what the chosen factory will and will not accept, read from the chain,
+/// and fill the stock list from its own allowlist.
+let flapVaultRulesFor = null;
+let flapVaultRulesHtml = '';
+async function paintFlapVaultRules(pad, vid, extraNote = '') {
+  const el = $('flapVaultRules');
+  const v = FLAP_VAULTS[vid];
+  if (!el || !v) return;
+  const note = extraNote ? `<div class="ok">${esc(extraNote)}</div>` : '';
+  el.innerHTML = note + esc(v.note);
+  if (flapVaultRulesFor === vid) { el.innerHTML = note + flapVaultRulesHtml; return; }
+  flapVaultRulesFor = vid;
+  try {
+    const pub = publicClientFor(pad);
+    if (v.kind === 'rwa') {
+      const sel = $('flapVaultRwa');
+      const assets = await pub.readContract({ address: getAddress(v.factory), abi: FLAP_ASSETS_ABI, functionName: 'getSupportedAssets' });
+      const named = await Promise.all(assets.map(async (a) => {
+        const sym = await pub.readContract({ address: a, abi: ERC20, functionName: 'symbol' }).catch(() => a.slice(0, 8) + '…');
+        return { a, sym };
+      }));
+      if (flapVaultRulesFor !== vid) return;
+      sel.innerHTML = named.map(({ a, sym }) => `<option value="${a}">${esc(sym)}</option>`).join('');
+    }
+    const rules = await flapVaultPolicies(pub, v.factory);
+    if (flapVaultRulesFor !== vid) return;
+    const lines = (rules || []).map((r) => {
+      const vals = r.values.length && !String(r.values[0]).startsWith('0x')
+        ? r.values.map((x) => (/Bps|TaxRate/.test(r.field) ? (Number(x) / 100) + '%' : x)).join(' / ')
+        : r.values.length > 3 ? `${r.values.length} allowed` : r.values.join(' / ');
+      return `<div>· ${esc(r.message)}${vals ? ` <span class="hint">[${esc(vals)}]</span>` : ''}</div>`;
+    });
+    flapVaultRulesHtml = esc(v.note) + (lines.length ? `<div style="margin-top:4px">${lines.join('')}</div>` : '')
+      + '<div class="hint" style="margin-top:4px">rules read from the vault factory itself</div>';
+    el.innerHTML = note + flapVaultRulesHtml;
+  } catch (e) {
+    flapVaultRulesHtml = esc(v.note) + `<div class="err">could not read the factory rules: ${esc((e.shortMessage || e.message || '').split('\n')[0])}</div>`;
+    el.innerHTML = note + flapVaultRulesHtml;
+  }
+}
+
 // flap: populate quote dropdown, toggle mode-dependent fields, set dev-buy symbol
 function updateFlapUI(pad) {
   const qs = $('flapQuoteSelect');
@@ -6657,6 +6879,27 @@ function updateFlapUI(pad) {
   dev.title = dev.disabled ? 'dev buy needs the native pair, or a stock pair on BNB (funded via an aggregator swap)' : '';
   $('flapDevFundWrap').classList.toggle('hidden', !swapFundable);
   $('flapDevSym').textContent = swapFundable ? ($('flapDevFund').value || 'BNB') : pad.nativeSymbol;
+  // vaults are a BNB-only feature (VaultPortal is only deployed there)
+  const vaultsOk = pad.chainId === 56;
+  $('flapVaultRow').classList.toggle('hidden', !vaultsOk);
+  const vid = vaultsOk ? $('flapVault').value : '';
+  const vdef = FLAP_VAULTS[vid];
+  $('flapVaultXWrap').classList.toggle('hidden', vdef?.kind !== 'x');
+  $('flapVaultSplitWrap').classList.toggle('hidden', vdef?.kind !== 'split');
+  $('flapVaultRwaWrap').classList.toggle('hidden', vdef?.kind !== 'rwa');
+  // Every gift and stock vault requires dividendBps == 0 - the vault decides
+  // when holders are paid - and all of them need a market share to be paid out
+  // of, so the pad's default dividends mode cannot be used with one.
+  let vaultModeNote = '';
+  if (vdef && mode === 'dividends') {
+    $('flapMode').value = 'standard';
+    $('flapSplitWrap').classList.add('hidden');
+    $('flapDivWrap').classList.add('hidden');
+    vaultModeNote = 'switched to standard mode: the vault is paid the tax itself, and decides when holders are paid.';
+  }
+  if (vdef) paintFlapVaultRules(pad, vid, vaultModeNote);
+  else $('flapVaultRules').textContent = '';
+
   $('flapHint').textContent = mode === 'dividends'
     ? `${$('flapSplit').value || 50}% of the ${$('flapTax').value || 10}% tax paid to holders in ${$('flapDivToken').value === 'self' ? symbolOrToken() : $('flapDivToken').value === 'quote' ? quote.symbol : 'a custom token'} · address mined to end 7777`
     : mode === 'burn'
@@ -7004,7 +7247,7 @@ function init() {
     $(id).addEventListener('change', () => { if (activePad.family === 'lunch') updateLunchUI(activePad); });
   }
   $('lunchBuyBtn').addEventListener('click', () => { if (activePad.family === 'lunch') lunchBuyQuote(activePad); });
-  for (const id of ['flapQuoteSelect', 'flapMode', 'flapDivToken', 'flapTax', 'flapSplit', 'flapDevFund']) {
+  for (const id of ['flapQuoteSelect', 'flapMode', 'flapDivToken', 'flapTax', 'flapSplit', 'flapDevFund', 'flapVault']) {
     const el = $(id);
     if (el) el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => { if (activePad.family === 'flap') updateFlapUI(activePad); });
   }

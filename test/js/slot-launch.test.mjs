@@ -115,9 +115,12 @@ if (!RPC) { console.log('SKIP  set RPC=<url> for the live simulation'); process.
     };
     const past = await run(now - 100);
     check(!past.err, 'nonce + guard (slot already passed) + pump.fun launch + tip simulates clean', `${past.cu} CU · ${past.size} bytes`);
-    const future = await run(ALPENGLOW_SLOT);
+    // a slot still ahead of the chain - the Alpenglow one has passed, so a
+    // guard for it now passes too
+    const ahead = now + 100_000;
+    const future = await run(ahead);
     check(JSON.stringify(future.err) === JSON.stringify({ InstructionError: [1, { Custom: 6001 }] }),
-      'the same launch aimed at 459,653,000 fails on the guard (instruction 1) - it cannot land early', JSON.stringify(future.err));
+      `the same launch aimed at a future slot (${ahead}) fails on the guard (instruction 1) - it cannot land early`, JSON.stringify(future.err));
     // sized as the real signed copies are
     const signed = signSnipe(prep, { secretKey: bs58.encode(Keypair.generate().secretKey), nonce: { account: NONCE, value: n.nonce }, cuLimit: 605_000, prioSol: 0.05, tipSol: 0.01, tipAccount: SNIPE_SERVICES.helius.tips[0], guardIxs: [slotGuardIx(ALPENGLOW_SLOT)], luts: [built.lookupTable] });
     check(signed.size <= 1232, 'a signed copy fits a transaction', `${signed.size} bytes`);
