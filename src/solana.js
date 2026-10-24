@@ -35,6 +35,7 @@ import {
   deriveDbcPoolAddress, deriveDbcTokenVaultAddress, deriveMintMetadata, METAPLEX_PROGRAM_ID,
   TokenType, TokenDecimal, TokenAuthorityOption,
   BaseFeeMode, CollectFeeMode, MigrationOption, MigrationFeeOption, ActivationType,
+  MigratedCollectFeeMode, DammV2DynamicFeeMode,
 } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import {
   Raydium, TxVersion, LAUNCHPAD_PROGRAM, getPdaLaunchpadConfigId, LaunchpadConfig,
@@ -79,13 +80,52 @@ export function meteoraBaseDecimals(totalSupply) {
   return BigInt(Math.ceil(Number(totalSupply))) * 10n ** 9n <= 18_446_744_073_709_551_615n ? 9 : 6;
 }
 
+// ---------------------------------------------------------------------------
+// The floors Meteora enforces, both read off the live DBC program rather than
+// the SDK (2026-10-24): the SDK rejects the same values client-side, but these
+// are the program's own limits, each confirmed by simulation.
+//
+//   pre-bond (the bonding curve's trading fee)   25 bps .. 9900 bps
+//     below 25 the fee scheduler itself throws ExceedMaxFeeBps
+//   post-bond (the migrated DAMM v2 pool fee)    10 bps .. 1000 bps
+//     below 10 create_config throws InvalidMigratedPoolFee
+//
+// So the cheapest a DBC launch can be is 0.25% on the curve and 0.10% after
+// migration. 0.01% is not reachable on either side.
+// ---------------------------------------------------------------------------
+export const DBC_MIN_FEE_BPS = 25;
+export const DBC_MAX_FEE_BPS = 9900;
+export const DBC_MIN_MIGRATED_FEE_BPS = 10;
+export const DBC_MAX_MIGRATED_FEE_BPS = 1000;
+
+/// The fixed post-bond options, for when one matches exactly - the program
+/// stores a cheaper enum instead of a custom fee config.
+const DBC_FIXED_MIGRATED_FEE = new Map([
+  [25, MigrationFeeOption.FixedBps25], [30, MigrationFeeOption.FixedBps30],
+  [100, MigrationFeeOption.FixedBps100], [200, MigrationFeeOption.FixedBps200],
+  [400, MigrationFeeOption.FixedBps400], [600, MigrationFeeOption.FixedBps600],
+]);
+
 // pump.fun-style curve, editable via `p`:
-//   totalSupply, baseDecimals, feeBps (buy+sell), migrationThreshold (in whole
-//   quote tokens), pctSupplyOnMigration, feeClaimer (all trading fees go here)
+//   totalSupply, baseDecimals, feeBps (buy+sell), migratedFeeBps (the pool fee
+//   after migration), migrationThreshold (in whole quote tokens),
+//   pctSupplyOnMigration, feeClaimer (all trading fees go here)
 function buildLaunchConfig(quoteDecimals, p) {
   const quoteEnum = DECIMAL_ENUM[quoteDecimals];
   if (quoteEnum === undefined) throw new Error(`quote token has ${quoteDecimals} decimals; DBC supports 6–9`);
   const baseEnum = DECIMAL_ENUM[p.baseDecimals] ?? TokenDecimal.SIX;
+  if (p.feeBps < DBC_MIN_FEE_BPS || p.feeBps > DBC_MAX_FEE_BPS) {
+    throw new Error(`Meteora's bonding curve takes a trading fee of ${DBC_MIN_FEE_BPS / 100}%–${DBC_MAX_FEE_BPS / 100}% `
+      + `(${DBC_MIN_FEE_BPS}–${DBC_MAX_FEE_BPS} bps); ${p.feeBps} bps is outside that, and the program rejects it`);
+  }
+  // Default to the 1% fixed option, which is what every launch from this pad
+  // used before the post-bond fee was configurable.
+  const migratedBps = p.migratedFeeBps == null ? 100 : Math.round(p.migratedFeeBps);
+  if (migratedBps < DBC_MIN_MIGRATED_FEE_BPS || migratedBps > DBC_MAX_MIGRATED_FEE_BPS) {
+    throw new Error(`the migrated DAMM v2 pool takes a fee of ${DBC_MIN_MIGRATED_FEE_BPS / 100}%–${DBC_MAX_MIGRATED_FEE_BPS / 100}% `
+      + `(${DBC_MIN_MIGRATED_FEE_BPS}–${DBC_MAX_MIGRATED_FEE_BPS} bps); ${migratedBps} bps is outside that, and the program rejects it`);
+  }
+  const fixed = DBC_FIXED_MIGRATED_FEE.get(migratedBps);
   return buildCurve({
     token: {
       tokenType: TokenType.SPLToken,          // base is a standard SPL mint
@@ -109,8 +149,17 @@ function buildLaunchConfig(quoteDecimals, p) {
     },
     migration: {
       migrationOption: MigrationOption.MET_DAMM_V2, // v2 supports Token-2022 quotes
-      migrationFeeOption: MigrationFeeOption.FixedBps100,
+      // a fee that matches one of the fixed options uses it; anything else is
+      // spelled out through Customizable, which is how a 0.10% pool is reached
+      migrationFeeOption: fixed ?? MigrationFeeOption.Customizable,
       migrationFee: { feePercentage: 0, creatorFeePercentage: 0 },
+      ...(fixed === undefined ? {
+        migratedPoolFee: {
+          collectFeeMode: MigratedCollectFeeMode.QuoteToken,
+          dynamicFee: DammV2DynamicFeeMode.Disabled,
+          poolFeeBps: migratedBps,
+        },
+      } : {}),
     },
     liquidityDistribution: {
       // 100% of migrated LP permanently locked == liquidity burnt
@@ -128,6 +177,9 @@ function buildLaunchConfig(quoteDecimals, p) {
     migrationQuoteThreshold: p.migrationThreshold,
   });
 }
+
+/// the curve builder, exposed so tests can pin the fee floors
+export const buildLaunchConfigForTest = buildLaunchConfig;
 
 // add a priority fee, but only if the SDK didn't already add a compute-budget ix
 function addPriority(tx) {
