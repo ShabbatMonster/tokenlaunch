@@ -10,6 +10,7 @@ import {
 } from './rpc.js';
 import { FAIRTOKEN_BYTECODE, FAIRTOKEN_ABI, FAIRTOKEN_TAX_BYTECODE, FAIRTOKEN_TAX_ABI } from './fairtoken.js';
 import { buildPoolsLaunch, buildPoolsTokenData, selfTestPoolsLaunch, POOLS_LAUNCHER, POOLS_POOL_STRATEGY } from './poolsAtomic.js';
+import { GENIUS_PAIRS } from './geniusPairs.js';
 selfTestPoolsLaunch(); // fail fast if the launch recipe ever drifts
 
 // ---------------------------------------------------------------------------
@@ -976,6 +977,39 @@ const PADS = [
     // PairTokenApprovalUpdated events + approvedPairTokens state, 2026-08). ETH is a
     // distinct native pair; USDG is 6-decimals (handled dynamically at launch).
     quotes: PONS_V2_PAIRS,
+  },
+  {
+    // Genius.fun — Pons v2 on BNB Chain (DefiLlama's adapter calls it exactly
+    // that), so the same launchToken/launchAndBuy ABI drives it. Verified live
+    // 2026-10-26 by simulating against the m4.2 factory from the manifest at
+    // https://genius.fun/contracts/manifest.json.
+    //
+    // The fees are the factory's, not the launcher's: 0.002 BNB to launch, 2%
+    // on every curve trade (split 1% destination / 0.5% platform / 0.25%
+    // creator / 0.25% buyback) and 2% in the PancakeSwap Infinity pool after
+    // graduation. maxCreatorTaxBps reads 0, so a creator tax cannot be added,
+    // and a launch with buybackEnabled = false reverts - both enforced below.
+    // What IS yours to choose is the pair, and each of the 465 approved pairs
+    // carries its own graduation threshold.
+    id: 'genius-bnb', label: 'Genius · BNB', vm: 'evm', enabled: true, family: 'pons-v2',
+    chainId: 56, rpc: 'https://bsc-dataseed.bnbchain.org',
+    factory: '0x37eE8AeE29C5efd3C1A7edA6dF3F510779928a37',   // GeniusLaunchFactory m4.2
+    forwarder: '0xd8b71b46498A36A4607EAb5C735BeE1DAb7F263d', // router == launchAndBuy
+    escrow: '0xc2F95799285109d076275A1ee298849A6fbd611a',    // GeniusFeeEscrow
+    locker: '0x9109522FF8125394EDB44B8Eeb87AD946D893194',    // GeniusLaunchLocker
+    hook: '0x8E6f8eBbD62B60085B703C40B460daE802eDC51b',      // GeniusMemeHook
+    launchConfigId: 0n, creatorTaxBps: 0, buybackEnabled: true,
+    // the factory rejects a launch that turns the buyback off, and caps the
+    // creator tax at 0 - so neither is offered as a choice
+    forceBuyback: true, maxCreatorTaxBps: 0,
+    startBlock: 122874828n,
+    explorer: 'https://bscscan.com',
+    site: (t) => `https://genius.fun/token/${t}`,
+    nativeSymbol: 'BNB', curve: null,
+    pairToken: '0x0000000000000000000000000000000000000000',
+    quotes: GENIUS_PAIRS,
+    // what the factory charges, for the panel; read live where possible
+    fees: { launchFeeBnb: 0.002, curveBps: 200, hookBps: 200, destinationBps: 100, platformBps: 50, creatorBps: 25, buybackBps: 25, snipeTaxStartBps: 9900, snipeTaxSeconds: 15 },
   },
   {
     // Pools — open-to-everyone launchpad on Robinhood chain (Uniswap v4). Launch =
@@ -3938,12 +3972,22 @@ async function launchPonsV2(pad, inp) {
     pub.readContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'maxCreatorTaxBps' }).catch(() => 10000n),
     pub.readContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'approvedPairTokens', args: [pairAddr] }).catch(() => true),
   ]);
-  if (!enabled) throw new Error('pons v2 launches are currently paused');
+  if (!enabled) throw new Error(`${pad.label} launches are currently paused`);
+  // Pons v2 and Genius share this code; Genius pins the forwarder to its own router
+  const forwarder = pad.forwarder || PONS_V2_FORWARDER_ADDR;
   // native ETH (0x0) is a distinct pair handled specially by the factory (not on the
   // approvedPairTokens allowlist); stocks must be approved.
   const isNative = pairAddr === ZERO_ADDR;
   if (!isNative && !approved) throw new Error(`${inp.pair.symbol} is not an approved Pons v2 pair — pick ETH / NVDA / AAPL / GME`);
-  const creatorTaxBps = Math.min(pad.creatorTaxBps || 0, Number(maxTax));
+  // The factory caps the creator tax, and Genius currently caps it at 0, so a
+  // tax asked for there is refused rather than silently dropped to zero.
+  const wantTax = inp.creatorTaxBps !== undefined ? Number(inp.creatorTaxBps) : (pad.creatorTaxBps || 0);
+  if (wantTax > Number(maxTax)) {
+    throw new Error(Number(maxTax) === 0
+      ? `${pad.label} does not allow a creator tax right now (the factory's maxCreatorTaxBps is 0), so the ${wantTax} bps asked for cannot be set`
+      : `${pad.label} caps the creator tax at ${Number(maxTax)} bps, and ${wantTax} was asked for`);
+  }
+  const creatorTaxBps = wantTax;
 
   const pairDecimals = isNative ? 18 : await pub.readContract({ address: pairAddr, abi: ERC20, functionName: 'decimals' });
   const devBuyRaw = parseUnits(String(inp.devBuyStr || '0'), pairDecimals);
@@ -3968,7 +4012,9 @@ async function launchPonsV2(pad, inp) {
     name: inp.name, symbol: inp.symbol, logo: inp.logo, description: inp.description,
     socials: { twitter: inp.twitter, telegram: '', discord: '', website: inp.website, farcaster: '' },
     creatorFeeRecipient: inp.feeRecipient,
-    creatorTaxBps, buybackEnabled: inp.buyback !== undefined ? !!inp.buyback : !!pad.buybackEnabled,
+    creatorTaxBps,
+    // Genius reverts a launch with the buyback off, so it is pinned on there
+    buybackEnabled: pad.forceBuyback ? true : (inp.buyback !== undefined ? !!inp.buyback : !!pad.buybackEnabled),
     expectedEconomics,
     salt: keccak256(stringToBytes(`${inp.name}-${inp.symbol}-${account.address}-${Date.now()}`)),
   };
@@ -3982,20 +4028,20 @@ async function launchPonsV2(pad, inp) {
     // ATOMIC launch + dev buy in ONE tx via PonsV2LaunchAndBuy — no gap for snipers.
     // ERC-20 pair: approve the pair token to the forwarder first (it pulls it).
     if (!isNative) {
-      const alw = await pub.readContract({ address: pairAddr, abi: ERC20, functionName: 'allowance', args: [account.address, PONS_V2_FORWARDER_ADDR] });
+      const alw = await pub.readContract({ address: pairAddr, abi: ERC20, functionName: 'allowance', args: [account.address, forwarder] });
       if (alw < devBuyRaw) {
         setStatus(`approving ${inp.pair.symbol} to the launcher…`);
-        const ah = await wallet.writeContract({ address: pairAddr, abi: ERC20, functionName: 'approve', args: [PONS_V2_FORWARDER_ADDR, devBuyRaw] });
+        const ah = await wallet.writeContract({ address: pairAddr, abi: ERC20, functionName: 'approve', args: [forwarder, devBuyRaw] });
         await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
       }
     }
     const value = isNative ? fee + devBuyRaw : fee; // native: fee + buy; ERC-20: fee only (quote pulled)
     const args = [params, pad.launchConfigId, pairAddr, devBuyRaw, 0n, account.address, exemptions];
     setStatus('simulating atomic launch + dev buy…');
-    const { result } = await pub.simulateContract({ address: PONS_V2_FORWARDER_ADDR, abi: PONS_V2_FORWARDER_ABI, functionName: 'launchAndBuy', args, value, account });
+    const { result } = await pub.simulateContract({ address: forwarder, abi: PONS_V2_FORWARDER_ABI, functionName: 'launchAndBuy', args, value, account });
     [token, curve] = result;
     setStatus('sending atomic launch + dev buy tx…');
-    hash = await wallet.writeContract({ address: PONS_V2_FORWARDER_ADDR, abi: PONS_V2_FORWARDER_ABI, functionName: 'launchAndBuy', args, value });
+    hash = await wallet.writeContract({ address: forwarder, abi: PONS_V2_FORWARDER_ABI, functionName: 'launchAndBuy', args, value });
     buyNote = ` · dev buy ✓ (${inp.devBuyStr} ${inp.pair.symbol}, atomic)`;
   } else {
     // no dev buy — plain launchToken
@@ -6879,6 +6925,33 @@ async function paintFlapVaultRules(pad, vid, extraNote = '') {
 }
 
 // flap: populate quote dropdown, toggle mode-dependent fields, set dev-buy symbol
+/// Genius's fees are the factory's, so the panel states them and reads the two
+/// that can move (the launch fee and the creator-tax cap) off chain.
+async function paintGeniusFees(pad) {
+  const el = $('geniusFees');
+  if (!el) return;
+  const f = pad.fees || {};
+  const pct = (bps) => (bps / 100) + '%';
+  const q = pad.quotes.find((x) => x.symbol === $('ponsQuoteSelect').value) || pad.quotes[0];
+  const gradNote = q && q.grad ? ` · graduates at <b>${Number(q.grad).toLocaleString()} ${esc(q.symbol)}</b>` : '';
+  el.innerHTML = `<div><b>${f.launchFeeBnb} BNB</b> to launch${gradNote}</div>`
+    + `<div>${pct(f.curveBps)} on every curve trade, split `
+    + `${pct(f.destinationBps)} destination · ${pct(f.platformBps)} platform · ${pct(f.creatorBps)} you · ${pct(f.buybackBps)} buyback</div>`
+    + `<div>${pct(f.hookBps)} in the PancakeSwap Infinity pool after it graduates (liquidity is locked)</div>`
+    + `<div class="hint">anti-snipe tax starts at ${pct(f.snipeTaxStartBps)} and decays over ${f.snipeTaxSeconds}s — your wallet and the whitelist are exempt</div>`;
+  try {
+    const pub = publicClientFor(pad);
+    const [fee, maxTax] = await Promise.all([
+      pub.readContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'launchFee' }),
+      pub.readContract({ address: pad.factory, abi: PONS_V2_FACTORY_ABI, functionName: 'maxCreatorTaxBps' }).catch(() => 0n),
+    ]);
+    const live = Number(formatEther(fee));
+    el.innerHTML += `<div class="hint">live from the factory: launch fee ${live} BNB`
+      + `${live !== f.launchFeeBnb ? ' <span class="err">(differs from the built-in value — the factory moved it)</span>' : ''}`
+      + ` · creator tax capped at ${Number(maxTax)} bps${Number(maxTax) === 0 ? ', so no creator tax can be set' : ''}</div>`;
+  } catch { /* the fixed figures above still stand */ }
+}
+
 function updateFlapUI(pad) {
   const qs = $('flapQuoteSelect');
   if (qs.dataset.padId !== pad.id) {
@@ -6941,6 +7014,13 @@ function updatePonsUI(pad) {
   const isCustom = q.address === 'custom';
   $('ponsQuoteCustom').classList.toggle('hidden', !isCustom);
   $('ponsDevSym').textContent = isCustom ? 'pair' : q.symbol;
+  // Genius states the factory's fees instead of offering a choice, and its
+  // buyback cannot be turned off - the launch reverts if it is
+  const geniusFees = !!pad.fees;
+  $('geniusFees').classList.toggle('hidden', !geniusFees);
+  const bb = $('ponsBuyback');
+  if (pad.forceBuyback) { bb.checked = true; bb.disabled = true; } else bb.disabled = false;
+  if (geniusFees) paintGeniusFees(pad);
 }
 
 /// Fill the threshold and opening cap with the ETH-denominated shape, converted
