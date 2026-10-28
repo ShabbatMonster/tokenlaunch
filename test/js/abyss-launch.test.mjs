@@ -9,11 +9,12 @@
 // Plus the one that is easy to miss: the launched token has to sort ABOVE the
 // pair token or the one-sided ladder is upside down (TOPOLOGY_OPENING_GAP).
 //   node test/js/abyss-launch.test.mjs
-import fs from 'node:fs'; import path from 'node:path';
+import fs from 'node:fs'; import path from 'node:path'; import zlib from 'node:zlib';
 import { createProtocolPublicClient, getAddresses } from '@black-market/sdk';
 import {
   abyssPlan, abyssPlanDraft, abyssGeometry, abyssQuotes, abyssTier, abyssAddresses, resolveAbyssQuote,
-  ABYSS_FEE_TIER_LIST, ABYSS_PROFILES, ABYSS_PRESETS, ABYSS_CHAIN_ID,
+  ABYSS_FEE_TIER_LIST, ABYSS_PROFILES, ABYSS_PRESETS, ABYSS_CHAIN_ID, ABYSS_MAX_ERC404_SUPPLY,
+  abyssApiBase, abyssMetadata, abyssStageMetadata, abyssImageDescriptor,
   LifecycleRewardMode, LifecycleTokenKind,
 } from '../../src/abyssLaunch.js';
 
@@ -24,6 +25,28 @@ const MAIN = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
 const HTML = fs.readFileSync(path.join(ROOT, 'docs', 'index.html'), 'utf8');
 const RPC = process.env.RH_RPC || 'https://rpc.mainnet.chain.robinhood.com';
 const E = 10n ** 18n;
+
+// a real PNG of a given size, so the API's image verification has something to
+// verify (it rejects anything it cannot decode)
+function testPng(size) {
+  const raw = Buffer.alloc((size * 4 + 1) * size);
+  let o = 0;
+  for (let y = 0; y < size; y++) {
+    raw[o++] = 0;
+    for (let x = 0; x < size; x++) { raw[o++] = (x * 2) & 255; raw[o++] = (y * 2) & 255; raw[o++] = 128; raw[o++] = 255; }
+  }
+  const table = [];
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; table[n] = c >>> 0; }
+  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = table[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const c = Buffer.alloc(4); c.writeUInt32BE(crc(td));
+    return Buffer.concat([len, td, c]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(size, 0); ihdr.writeUInt32BE(size, 4); ihdr[8] = 8; ihdr[9] = 6;
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
 
 // --- wiring -------------------------------------------------------------------
 check(ABYSS_CHAIN_ID === 4663, 'the pad is on Robinhood Chain');
@@ -42,7 +65,14 @@ check(/STARTING MARKET CAP \(<span id="abyssCapSym">/.test(HTML), 'the starting 
 check(HTML.includes('id="abyssQuoteCustom"') && /'custom…'/.test(MAIN), 'and any ERC-20 can be pasted as the pair token');
 check(/resolveAbyssCustomQuote/.test(MAIN) && /abyssSelectedQuote/.test(MAIN), 'a pasted pair token is resolved off chain, not assumed');
 check(/for \(const pre of built\.planned\.prerequisites/.test(MAIN), 'an ERC-20 dev buy approves the funding escrow first');
-check(/async function launchAbyss/.test(MAIN) && /abyssPlan\(client, \{ \.\.\.f, metadataURI \}\)/.test(MAIN), 'and the launch goes through the SDK plan');
+check(/async function launchAbyss/.test(MAIN) && /abyssPlan\(client, \{ \.\.\.f, metadataURI: f\.nftBaseUri \}\)/.test(MAIN),
+  'the launch goes through the SDK plan, and the only URI it carries is an ERC-404 base URI');
+check(/abyssStageMetadata/.test(MAIN) && /abyssPublishMetadata/.test(MAIN),
+  'the name, image and links are staged with Abyss before the launch and bound to it after');
+check(/stageAbyssMetadata/.test(MAIN) && /never throws/.test(MAIN), 'and a metadata failure does not cost the launch');
+for (const id of ['abyssTelegram', 'abyssDiscord', 'abyssNftUri']) check(HTML.includes(`id="${id}"`), `UI has #${id}`);
+check(/id="abyssNftUriWrap"[^>]*class="row hidden"|class="row hidden"[^>]*id="abyssNftUriWrap"/.test(HTML),
+  'the NFT base URI is only shown for an ERC-404');
 
 // --- the geometry, no RPC -------------------------------------------------------
 {
@@ -79,9 +109,92 @@ check(/async function launchAbyss/.test(MAIN) && /abyssPlan\(client, \{ \.\.\.f,
   };
   refuses({ rewardsBps: 5000 }, /reward mode set to staking or dividends/, 'a holders\' share without a reward mode is refused');
   refuses({ rewardMode: LifecycleRewardMode.Dividends }, /need a share of the fees pointed at holders/, 'dividends with no holders\' share is refused');
-  refuses({ tokenKind: LifecycleTokenKind.ERC404 }, /needs a unit size/, 'an ERC-404 with no unit size is refused');
+  refuses({ tokenKind: LifecycleTokenKind.ERC404 }, /at least 1 whole token per NFT/, 'an ERC-404 with no unit size is refused');
   refuses({ preset: 'nope' }, /not an Abyss liquidity preset/, 'an unknown liquidity preset is refused');
   refuses({ positions: 0 }, /between 1 and 16/, 'zero positions is refused');
+  // the token rules the chain runs inside predictToken, before anything else:
+  // every one of these comes back as a bare InvalidTokenConfiguration (0xdf450632)
+  refuses({ name: '' }, /needs a name and a ticker/, 'a launch with no name is refused');
+  refuses({ symbol: '' }, /needs a name and a ticker/, 'a launch with no ticker is refused');
+  refuses({ supply: 0n }, /set a total supply/, 'a zero supply is refused');
+  refuses({ nftUnit: E }, /only an ERC-404 launch has a tokens-per-NFT/, 'a tokens-per-NFT size on an ERC-20 is refused');
+  refuses({ tokenKind: LifecycleTokenKind.ERC404, nftUnit: E }, /1,000,000,000 NFTs.*caps at 10,000/,
+    'an ERC-404 whose unit size would mint over 10,000 NFTs is refused');
+  refuses({ tokenKind: LifecycleTokenKind.ERC404, nftUnit: E, supply: 1_000_000_000n * E },
+    /put at least 100,000 tokens in each NFT/, 'and it says what the smallest workable unit size is');
+  refuses({ tokenKind: LifecycleTokenKind.ERC404, nftUnit: 2_000_000_000n * E },
+    /more than the whole supply/, 'a unit size bigger than the supply is refused');
+  refuses({ tokenKind: LifecycleTokenKind.ERC404, nftUnit: 100_000n * E, supply: ABYSS_MAX_ERC404_SUPPLY + 1n },
+    /fit in 96 bits/, 'an ERC-404 supply over 96 bits is refused');
+  // metadataURI is the ERC-404 base URI and nothing else: the chain refuses an
+  // ERC-20 that carries one, so the pad never sends it on an ERC-20
+  {
+    const erc20 = abyssPlanDraft({ ...base, metadataURI: 'ipfs://whatever' });
+    check(erc20.plan.token.metadataURI === '', 'an ERC-20 is planned with no metadata URI, whatever was passed');
+    const nft = abyssPlanDraft({ ...base, tokenKind: LifecycleTokenKind.ERC404, nftUnit: 100_000n * E, metadataURI: 'ipfs://art/' });
+    check(nft.plan.token.metadataURI === 'ipfs://art/', 'and an ERC-404 keeps its base URI, which is what the field is for');
+  }
+}
+
+// --- the metadata API: what the coin shows on abyss.trading -----------------------
+{
+  check(abyssApiBase('https://abyss.trading') === 'https://api.abyss.trading',
+    'on abyss.trading the metadata API is called directly');
+  check(abyssApiBase('https://app.abyss.trading') === 'https://api.abyss.trading', 'and from its subdomains too');
+  check(abyssApiBase('http://localhost:8080') === 'http://localhost:8080/abyss-api',
+    'anywhere else it goes through the local proxy, since the API allows no other origin', abyssApiBase('http://localhost:8080'));
+  check(abyssApiBase('https://shabbatmonster.github.io') === 'https://shabbatmonster.github.io/abyss-api', 'including GitHub Pages');
+  const SERVE = fs.readFileSync(path.join(ROOT, 'serve.mjs'), 'utf8');
+  const PROXY = fs.readFileSync(path.join(ROOT, 'abyssProxy.mjs'), 'utf8');
+  check(/handleAbyssProxy/.test(SERVE) && /api\.abyss\.trading/.test(PROXY), 'and the local server has that proxy');
+  check(/cloudflarestorage/.test(PROXY) && /ABYSS_UPLOAD_HOST\.test\(/.test(PROXY),
+    'whose image hop only ever forwards to the API\'s own storage host');
+  check(/idempotency-key/.test(PROXY) && /authorization/.test(PROXY), 'passing the headers the session flow needs');
+  // the hash is signed, so the links have to be canonical URLs before signing
+  const m = abyssMetadata({ name: 'Coin', symbol: 'COIN', description: ' hi ', twitter: '@coin', telegram: 't.me/coin', website: 'coin.xyz' });
+  check(m.twitterUrl === 'https://x.com/coin', 'a bare @handle becomes the twitter URL the API canonicalises', m.twitterUrl);
+  check(m.telegramUrl === 'https://t.me/coin' && m.websiteUrl === 'https://coin.xyz/', 'bare links are made absolute', `${m.telegramUrl} ${m.websiteUrl}`);
+  check(m.description === 'hi', 'the description is trimmed exactly as the hash expects');
+  check(!('discordUrl' in m), 'and an empty social is left out rather than sent as an empty string');
+  const bad = abyssMetadata({ name: 'Coin', symbol: 'COIN', twitter: 'not a url at all' });
+  check(!('twitterUrl' in bad), 'something that cannot be a URL is dropped instead of breaking the signature');
+}
+
+// --- live: the whole metadata session, through the real proxy ----------------------
+// A throwaway key signs the attribution; the session is staged and the image is
+// uploaded and verified, which is everything that happens before a launch. No
+// transaction is sent, so the session simply expires.
+{
+  const { createServer } = await import('node:http');
+  const { handleAbyssProxy } = await import('../../abyssProxy.mjs');
+  const { privateKeyToAccount, generatePrivateKey } = await import('viem/accounts');
+  const server = createServer(async (req, res) => {
+    if (!(await handleAbyssProxy(req, res))) res.writeHead(404).end('not found');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const acct = privateKeyToAccount(generatePrivateKey());
+    const staged = await abyssStageMetadata({
+      wallet: acct, creator: acct.address, baseUrl: abyssApiBase(origin),
+      metadata: abyssMetadata({ name: 'Abyss Wire', symbol: 'AWIRE', description: 'wiring check', twitter: '@awire', website: 'awire.xyz' }),
+      image: new Blob([testPng(192)], { type: 'image/png' }),
+    });
+    const s = staged.session;
+    check(s.status === 'ready_to_launch' && s.imageStatus === 'ready',
+      'the metadata session stages through the proxy and the image is verified', `${s.status} · ${s.image?.width}x${s.image?.height}`);
+    check(s.metadata.twitterUrl === 'https://x.com/awire' && s.metadata.websiteUrl === 'https://awire.xyz/',
+      'and the API stores the links as the signed hash claimed they were');
+    check(typeof staged.capability === 'string' && staged.capability.length > 0,
+      'with the one-time capability the publish after the launch needs');
+  } catch (e) {
+    check(false, 'the metadata session stages through the proxy', (e.message || String(e)).slice(0, 120));
+  } finally {
+    server.close();
+  }
+  let refused = '';
+  try { await abyssImageDescriptor(new Blob([testPng(64)], { type: 'image/gif' })); } catch (e) { refused = e.message; }
+  check(/takes png, jpeg, webp/.test(refused), 'an image Abyss does not accept is refused by name', refused);
 }
 
 const client = createProtocolPublicClient({ chainId: ABYSS_CHAIN_ID });
@@ -128,6 +241,13 @@ await live('burning part of the token fees launches', { burnBps: 1000 });
 for (const p of ABYSS_PRESETS) await live(`the ${p} liquidity shape launches`, { preset: p, positions: 4 });
 for (const prof of ABYSS_PROFILES) await live(`pool profile ${prof.key} launches`, { profileKey: prof.key });
 await live('an atomic dev buy launches', { devBuyRaw: 5n * 10n ** 16n }, (r) => `${r.plan.buys.length} buy, ${Number(r.tx.value) / 1e18} ETH attached`);
+// an ERC-404 at the 10,000-NFT ceiling and well under it, both carrying the base
+// URI that is the only metadata the chain itself stores
+for (const [nfts, unit] of [[10_000, 100_000n * E], [1_000, 1_000_000n * E]]) {
+  await live(`an ERC-404 of ${nfts.toLocaleString()} NFTs launches`,
+    { tokenKind: LifecycleTokenKind.ERC404, nftUnit: unit, metadataURI: 'ipfs://art/' },
+    (r) => `${(unit / E).toLocaleString()} tokens per NFT, base URI ${r.plan.token.metadataURI}`);
+}
 
 // --- a custom pair token ----------------------------------------------------------
 {

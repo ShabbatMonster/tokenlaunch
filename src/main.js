@@ -1822,7 +1822,9 @@ async function updateAbyssUI(pad) {
   $('abyssCapSym').textContent = quote ? quote.symbol : 'pair';
   $('abyssDevSym').textContent = quote ? quote.symbol : 'pair';
   $('abyssShareWrap').classList.toggle('hidden', $('abyssRewardMode').value === '0');
-  $('abyssUnitWrap').classList.toggle('hidden', $('abyssKind').value !== '1');
+  const isNft = $('abyssKind').value === '1';
+  $('abyssUnitWrap').classList.toggle('hidden', !isNft);
+  $('abyssNftUriWrap').classList.toggle('hidden', !isNft);
   paintAbyssSummary(pad).catch(() => {});
 }
 
@@ -1834,7 +1836,9 @@ async function paintAbyssSummary(pad) {
     const M = await loadAbyss();
     if ($('abyssQuote').value === 'custom…') await resolveAbyssCustomQuote(pad);
     const f = abyssForm(await loadAbyss(), pad);
-    const { tier, recipe, ranges } = M.abyssGeometry(f);
+    // the whole draft, not just the geometry: it runs the same token rules the
+    // chain does, so a bad ERC-404 unit size reads here instead of reverting
+    const { tier, recipe, ranges } = M.abyssPlanDraft({ ...f, metadataURI: f.nftBaseUri });
     const supplyWhole = Number(f.supply) / 1e18;
     const capWhole = Number(f.openingValuationQuote) / 10 ** f.quoteDecimals;
     const price = capWhole / supplyWhole;
@@ -1844,7 +1848,11 @@ async function paintAbyssSummary(pad) {
       + `<div>${esc(tier.label)} trading fee · ${bands} liquidity band${bands === 1 ? '' : 's'} from tick ${recipe.launchTick}`
       + ` · ${(Number(ranges.tokenAmountMaximum) / 1e18).toLocaleString()} tokens into the pool</div>`
       + (f.rewardsBps ? `<div>holders get ${f.rewardsBps / 100}% of the fees${f.burnBps ? `, ${f.burnBps / 100}% of token fees burnt` : ''}</div>`
-        : f.burnBps ? `<div>${f.burnBps / 100}% of the token's fees burnt</div>` : '');
+        : f.burnBps ? `<div>${f.burnBps / 100}% of the token's fees burnt</div>` : '')
+      + (f.tokenKind === 1
+        ? `<div>ERC-404 · ${(f.supply / f.nftUnit).toLocaleString()} NFTs of ${(Number(f.nftUnit) / 1e18).toLocaleString()} tokens each`
+          + ` (up to ${Number(M.ABYSS_MAX_NFTS).toLocaleString()})</div>`
+        : '');
   } catch (e) {
     el.innerHTML = `<span class="err">${esc((e.message || String(e)).split('\n')[0])}</span>`;
   }
@@ -1879,6 +1887,9 @@ function abyssForm(M, pad) {
     rewardMode, rewardsBps: Math.round(sharePct * 100), burnBps: Math.round(burnPct * 100),
     tokenKind: kind,
     nftUnit: kind === 1 ? parseUnits(String(num('abyssUnit', 'tokens per NFT') || 1), 18) : 0n,
+    // the only URI the chain stores is an ERC-404 collection's base URI
+    nftBaseUri: kind === 1 ? ($('abyssNftUri').value || '').trim() : '',
+    telegram: ($('abyssTelegram').value || '').trim(), discord: ($('abyssDiscord').value || '').trim(),
     devBuyRaw: parseUnits(String(num('abyssDevBuy', 'dev buy') || 0), quote.decimals),
   };
 }
@@ -1890,15 +1901,12 @@ async function launchAbyss(pad, inp) {
   if (!account?.address) throw new Error('connect a wallet first');
   if (!f.name || !f.symbol) throw new Error('name and ticker are required');
 
-  setStatus('uploading metadata...');
-  const metadataURI = await uploadJsonToIpfs({
-    name: inp.name, symbol: inp.symbol, description: inp.description, image: inp.logo,
-    ...((inp.twitter || inp.website) ? { extensions: { twitter: inp.twitter, website: inp.website } } : {}),
-  });
-
   const client = createProtocolPublicClient({ chainId: M.ABYSS_CHAIN_ID });
   setStatus('pricing the curve and building the launch...');
-  const built = await M.abyssPlan(client, { ...f, metadataURI });
+  // metadataURI is the ERC-404 collection's base URI; an ERC-20 carrying one is
+  // refused by the chain itself, so the name, image and socials go to Abyss's
+  // own metadata API below instead.
+  const built = await M.abyssPlan(client, { ...f, metadataURI: f.nftBaseUri });
 
   const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
   const pub = publicClientFor(pad);
@@ -1932,19 +1940,64 @@ async function launchAbyss(pad, inp) {
     throw new Error('Abyss simulation failed: ' + (e.shortMessage || e.message || '').split('\n')[0]);
   });
 
+  // The coin's name, description, image and links are Abyss's, not the chain's:
+  // the session is opened and the image uploaded BEFORE the launch, then bound
+  // to the tx hash. A launch is worth more than its artwork, so a failure here
+  // is reported and stepped over rather than cancelling the launch.
+  const staged = await stageAbyssMetadata(M, wallet, inp, f);
   setStatus('sending launch tx...');
   const hash = await wallet.sendTransaction({ to: built.tx.to, data: built.tx.data, value });
   setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
   const rcpt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
   if (rcpt.status !== 'success') throw new Error('Abyss launch reverted: ' + hash);
 
+  let metaNote = staged.error ? `<br><span class="err">the coin's image and description were not attached: ${esc(staged.error)}</span>` : '';
+  if (staged.session) {
+    setStatus(`launched — attaching the image and description...`);
+    try {
+      await M.abyssPublishMetadata(staged.session, hash);
+      metaNote = '<br>image, description and links attached ✓';
+    } catch (e) {
+      metaNote = `<br><span class="err">launched, but Abyss did not take the metadata: ${esc((e.message || String(e)).split('\n')[0])}</span>`;
+    }
+  }
+
   rememberLaunch(pad, built.token, inp.symbol);
   const capWhole = Number(f.openingValuationQuote) / 10 ** f.quoteDecimals;
   $('status').innerHTML = `<span style="color:var(--accent)">LAUNCHED ✓</span> ${built.token}<br>`
     + `opened at ${capWhole.toLocaleString()} ${esc(f.quote.symbol)} · ${esc(built.tier.label)} fee · ${built.ranges.positions.length} bands<br>`
     + `<a href="${pad.site(built.token)}" target="_blank" rel="noopener">on Abyss</a>`
-    + ` · <a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx</a>`;
+    + ` · <a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx</a>`
+    + metaNote;
   return { token: built.token, hash };
+}
+
+/// The Abyss-side metadata, staged before the launch is sent. Returns either the
+/// staged session or why there is none — never throws, because losing the
+/// artwork is not worth losing the launch.
+async function stageAbyssMetadata(M, wallet, inp, f) {
+  setStatus('staging the image and description with Abyss...');
+  try {
+    // Abyss takes png/jpeg/webp; a GIF (which the pad lets through for other
+    // chains) is flattened to a png rather than refused.
+    let image = logoBlob;
+    if (image && !['image/png', 'image/jpeg', 'image/webp'].includes(image.type)) image = await squareResize(image, 512);
+    const session = await M.abyssStageMetadata({
+      wallet, creator: account.address,
+      metadata: M.abyssMetadata({
+        name: inp.name, symbol: inp.symbol, description: inp.description,
+        website: inp.website, twitter: inp.twitter, telegram: f.telegram, discord: f.discord,
+      }),
+      image,
+    });
+    return { session };
+  } catch (e) {
+    const msg = (e.message || String(e)).split('\n')[0];
+    // off abyss.trading the API is reachable only through the local server's
+    // proxy, so say that rather than leaving a bare CORS/404 on screen
+    const proxied = M.abyssApiBase().endsWith(M.ABYSS_API_PROXY_PATH);
+    return { error: proxied ? `${msg} (Abyss's metadata API only answers abyss.trading, so it goes through this site's local server — run \`node serve.mjs\` and launch from localhost to attach them)` : msg };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -7549,7 +7602,7 @@ function init() {
     $(id).addEventListener('change', () => { if (activePad.family === 'abyss') updateAbyssUI(activePad); });
   }
   $('abyssQuoteCustom').addEventListener('change', () => { if (activePad.family === 'abyss') updateAbyssUI(activePad).catch(() => {}); });
-  for (const id of ['abyssCap', 'abyssShare', 'abyssBurn', 'abyssPositions', 'supply']) {
+  for (const id of ['abyssCap', 'abyssShare', 'abyssBurn', 'abyssPositions', 'abyssUnit', 'supply']) {
     $(id).addEventListener('input', () => { if (activePad.family === 'abyss') paintAbyssSummary(activePad).catch(() => {}); });
   }
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
