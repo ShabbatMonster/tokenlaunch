@@ -1779,18 +1779,48 @@ async function launchB20(pad, { name, symbol, logo, description, twitter, websit
 let abyssMod = null;
 const loadAbyss = async () => (abyssMod ??= await import('./abyssLaunch.js'));
 
+/// A pasted pair token, read off chain. Cached so the form stays synchronous
+/// and the decimals are never guessed - they decide what the market cap means.
+let abyssCustomQuote = null;
+async function resolveAbyssCustomQuote(pad) {
+  const raw = ($('abyssQuoteCustom').value || '').trim();
+  if (abyssCustomQuote?.input === raw) return abyssCustomQuote.quote;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(raw)) { abyssCustomQuote = { input: raw, quote: null, error: raw ? 'that is not an address' : 'paste a pair token address' }; return null; }
+  try {
+    const M = await loadAbyss();
+    const { createProtocolPublicClient } = await import('@black-market/sdk');
+    const quote = await M.resolveAbyssQuote(createProtocolPublicClient({ chainId: M.ABYSS_CHAIN_ID }), raw);
+    abyssCustomQuote = { input: raw, quote, error: null };
+    return quote;
+  } catch (e) {
+    abyssCustomQuote = { input: raw, quote: null, error: (e.message || String(e)).split('\n')[0] };
+    return null;
+  }
+}
+
+/// Whichever pair token is selected, preset or pasted.
+function abyssSelectedQuote(M) {
+  const sel = $('abyssQuote').value;
+  if (sel === 'custom…') return abyssCustomQuote?.quote || null;
+  return M.abyssQuotes().find((q) => q.symbol === sel) || M.abyssQuotes()[0];
+}
+
 async function updateAbyssUI(pad) {
   const M = await loadAbyss();
   const qs = $('abyssQuote');
   if (qs.dataset.padId !== pad.id) {
-    qs.innerHTML = M.abyssQuotes().map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}</option>`).join('');
+    qs.innerHTML = [...M.abyssQuotes().map((q) => q.symbol), 'custom…']
+      .map((sym) => `<option value="${esc(sym)}">${esc(sym)}</option>`).join('');
     $('abyssFee').innerHTML = M.ABYSS_FEE_TIER_LIST.map((t) => `<option value="${t.feePips}"${t.feePips === 20000 ? ' selected' : ''}>${esc(t.label)}</option>`).join('');
     $('abyssProfile').innerHTML = M.ABYSS_PROFILES.map((p) => `<option value="${esc(p.key)}">${esc(p.label)} — ${esc(p.note)}</option>`).join('');
     qs.dataset.padId = pad.id;
   }
-  const quote = M.abyssQuotes().find((q) => q.symbol === qs.value) || M.abyssQuotes()[0];
-  $('abyssCapSym').textContent = quote.symbol;
-  $('abyssDevSym').textContent = quote.symbol;
+  const isCustom = qs.value === 'custom…';
+  $('abyssQuoteCustom').classList.toggle('hidden', !isCustom);
+  if (isCustom) await resolveAbyssCustomQuote(pad);
+  const quote = abyssSelectedQuote(M);
+  $('abyssCapSym').textContent = quote ? quote.symbol : 'pair';
+  $('abyssDevSym').textContent = quote ? quote.symbol : 'pair';
   $('abyssShareWrap').classList.toggle('hidden', $('abyssRewardMode').value === '0');
   $('abyssUnitWrap').classList.toggle('hidden', $('abyssKind').value !== '1');
   paintAbyssSummary(pad).catch(() => {});
@@ -1802,6 +1832,7 @@ async function paintAbyssSummary(pad) {
   if (!el) return;
   try {
     const M = await loadAbyss();
+    if ($('abyssQuote').value === 'custom…') await resolveAbyssCustomQuote(pad);
     const f = abyssForm(await loadAbyss(), pad);
     const { tier, recipe, ranges } = M.abyssGeometry(f);
     const supplyWhole = Number(f.supply) / 1e18;
@@ -1826,7 +1857,8 @@ function abyssForm(M, pad) {
     if (!Number.isFinite(v) || v < 0) throw new Error(`${name} must be a number`);
     return v;
   };
-  const quote = M.abyssQuotes().find((q) => q.symbol === $('abyssQuote').value) || M.abyssQuotes()[0];
+  const quote = abyssSelectedQuote(M);
+  if (!quote) throw new Error(abyssCustomQuote?.error || 'pick a pair token');
   const supplyWhole = num('supply', 'total supply');
   if (!(supplyWhole > 0)) throw new Error('set a total supply');
   const cap = num('abyssCap', 'opening market cap');
@@ -1873,6 +1905,27 @@ async function launchAbyss(pad, inp) {
   const value = BigInt(built.tx.value ?? 0n);
   const bal = await pub.getBalance({ address: account.address });
   if (bal < value) throw new Error(`insufficient ETH: need ${formatEther(value)}+gas, have ${formatEther(bal)}`);
+
+  // A dev buy against an ERC-20 pair is pulled by the funding escrow, so it
+  // needs a balance and an allowance first. The SDK states both, including who
+  // the spender is, rather than leaving it to be guessed.
+  for (const pre of built.planned.prerequisites || []) {
+    const spender = pre.spender;
+    const asset = pre.funding?.inputAsset || pre.funding?.asset;
+    const need = BigInt(pre.requiredInput ?? pre.funding?.inputAmount ?? 0n);
+    if (!spender || !asset || need <= 0n || asset === ZERO_ADDR) continue;
+    const held = await pub.readContract({ address: asset, abi: ERC20, functionName: 'balanceOf', args: [account.address] });
+    const dec = await pub.readContract({ address: asset, abi: ERC20, functionName: 'decimals' }).catch(() => 18);
+    if (held < need) {
+      throw new Error(`the dev buy needs ${formatUnits(need, dec)} ${f.quote.symbol} in your wallet, and it holds ${formatUnits(held, dec)}`);
+    }
+    const allowed = await pub.readContract({ address: asset, abi: ERC20, functionName: 'allowance', args: [account.address, spender] });
+    if (allowed < need) {
+      setStatus(`approving ${f.quote.symbol} for the dev buy…`);
+      const ah = await wallet.writeContract({ address: asset, abi: ERC20, functionName: 'approve', args: [spender, need] });
+      await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+    }
+  }
 
   setStatus('simulating the launch...');
   await pub.call({ account: account.address, to: built.tx.to, data: built.tx.data, value }).catch((e) => {
@@ -7454,6 +7507,7 @@ function init() {
   for (const id of ['abyssQuote', 'abyssFee', 'abyssRewardMode', 'abyssKind', 'abyssPreset', 'abyssProfile']) {
     $(id).addEventListener('change', () => { if (activePad.family === 'abyss') updateAbyssUI(activePad); });
   }
+  $('abyssQuoteCustom').addEventListener('change', () => { if (activePad.family === 'abyss') updateAbyssUI(activePad).catch(() => {}); });
   for (const id of ['abyssCap', 'abyssShare', 'abyssBurn', 'abyssPositions', 'supply']) {
     $(id).addEventListener('input', () => { if (activePad.family === 'abyss') paintAbyssSummary(activePad).catch(() => {}); });
   }

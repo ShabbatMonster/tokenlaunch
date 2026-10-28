@@ -556,7 +556,7 @@
     <div id="abyssRow" class="hidden">
       <div class="row">
         <div><label>PAIR AGAINST</label><select id="abyssQuote"></select></div>
-        <div><label>OPENS AT (<span id="abyssCapSym">ETH</span> market cap)</label>
+        <div><label>STARTING MARKET CAP (<span id="abyssCapSym">ETH</span>)</label>
           <input type="text" id="abyssCap" value="10" spellcheck="false"></div>
         <div style="flex:0 0 140px"><label>DEV BUY (<span id="abyssDevSym">ETH</span>)</label>
           <input type="text" id="abyssDevBuy" value="0" spellcheck="false"></div>
@@ -571,6 +571,8 @@
         <div style="flex:0 0 150px" id="abyssShareWrap" class="hidden"><label style="margin-top:0">HOLDERS&rsquo; SHARE (%)</label>
           <input type="text" id="abyssShare" value="75" spellcheck="false"></div>
       </div>
+      <input type="text" id="abyssQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px"
+             placeholder="pair token address (0x…) — any ERC-20 on Robinhood chain">
       <div class="status" id="abyssSummary" style="font-size:11px;margin-top:8px;line-height:1.6"></div>
       <details open style="margin-top:8px">
         <summary class="hint" style="cursor:pointer">liquidity shape, pool profile, burn, ERC-404</summary>
