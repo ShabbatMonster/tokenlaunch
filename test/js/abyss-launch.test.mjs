@@ -12,7 +12,7 @@
 import fs from 'node:fs'; import path from 'node:path';
 import { createProtocolPublicClient, getAddresses } from '@black-market/sdk';
 import {
-  abyssPlan, abyssPlanDraft, abyssGeometry, abyssQuotes, abyssTier, abyssAddresses,
+  abyssPlan, abyssPlanDraft, abyssGeometry, abyssQuotes, abyssTier, abyssAddresses, resolveAbyssQuote,
   ABYSS_FEE_TIER_LIST, ABYSS_PROFILES, ABYSS_PRESETS, ABYSS_CHAIN_ID,
   LifecycleRewardMode, LifecycleTokenKind,
 } from '../../src/abyssLaunch.js';
@@ -38,7 +38,10 @@ check(pad.length > 100 && /family: 'abyss'/.test(pad) && /chainId: 4663/.test(pa
 for (const id of ['abyssQuote', 'abyssCap', 'abyssFee', 'abyssRewardMode', 'abyssShare', 'abyssBurn', 'abyssPreset', 'abyssPositions', 'abyssProfile', 'abyssKind', 'abyssDevBuy', 'abyssSummary']) {
   check(HTML.includes(`id="${id}"`), `UI has #${id}`);
 }
-check(/OPENS AT \(<span id="abyssCapSym">/.test(HTML), 'the opening market cap is a field, priced in the pair token');
+check(/STARTING MARKET CAP \(<span id="abyssCapSym">/.test(HTML), 'the starting market cap is a field, priced in the pair token');
+check(HTML.includes('id="abyssQuoteCustom"') && /'custom…'/.test(MAIN), 'and any ERC-20 can be pasted as the pair token');
+check(/resolveAbyssCustomQuote/.test(MAIN) && /abyssSelectedQuote/.test(MAIN), 'a pasted pair token is resolved off chain, not assumed');
+check(/for \(const pre of built\.planned\.prerequisites/.test(MAIN), 'an ERC-20 dev buy approves the funding escrow first');
 check(/async function launchAbyss/.test(MAIN) && /abyssPlan\(client, \{ \.\.\.f, metadataURI \}\)/.test(MAIN), 'and the launch goes through the SDK plan');
 
 // --- the geometry, no RPC -------------------------------------------------------
@@ -125,5 +128,29 @@ await live('burning part of the token fees launches', { burnBps: 1000 });
 for (const p of ABYSS_PRESETS) await live(`the ${p} liquidity shape launches`, { preset: p, positions: 4 });
 for (const prof of ABYSS_PROFILES) await live(`pool profile ${prof.key} launches`, { profileKey: prof.key });
 await live('an atomic dev buy launches', { devBuyRaw: 5n * 10n ** 16n }, (r) => `${r.plan.buys.length} buy, ${Number(r.tx.value) / 1e18} ETH attached`);
+
+// --- a custom pair token ----------------------------------------------------------
+{
+  const custom = await resolveAbyssQuote(client, '0x15f3385625D7e364C5a6216FBbceadf10fa90e7d');   // the ABYSS token
+  check(custom.symbol === 'ABYSS' && custom.decimals === 18 && custom.custom === true,
+    'a pasted pair token is read off chain for its symbol and decimals', `${custom.symbol} / ${custom.decimals}dp`);
+  for (const bad of ['0xdeadbeef', '']) {
+    let msg = '';
+    try { await resolveAbyssQuote(client, bad); } catch (e) { msg = e.message; }
+    check(/paste a pair token address/.test(msg), `a malformed pair token address is refused (${bad || 'empty'})`, msg.slice(0, 60));
+  }
+  {
+    let msg = '';
+    try { await resolveAbyssQuote(client, '0x000000000000000000000000000000000000dEaD'); } catch (e) { msg = e.message; }
+    check(/not a contract/.test(msg), 'and an address with no contract behind it is refused', msg.slice(0, 60));
+  }
+  for (const prof of ABYSS_PROFILES) {
+    await live(`a custom pair token launches on ${prof.key}`, { quote: custom, quoteDecimals: 18, openingValuationQuote: 100n * E, profileKey: prof.key });
+  }
+  const r = await live('a custom pair token with a dev buy plans', { quote: custom, quoteDecimals: 18, openingValuationQuote: 100n * E, devBuyRaw: 10n * E },
+    (x) => `prerequisite spender ${x.planned.prerequisites[0]?.spender?.slice(0, 10)}…`);
+  if (r) check(r.planned.prerequisites.length === 1 && !!r.planned.prerequisites[0].spender,
+    'and names the escrow that needs the approval', r.planned.prerequisites[0]?.spender);
+}
 console.log('');
 process.exit(fails.length ? 1 : 0);

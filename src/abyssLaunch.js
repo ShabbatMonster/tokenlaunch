@@ -25,6 +25,7 @@
 //     rewardMode != None. A burn share is only legal on the token's own row.
 //   * no interior tick gaps, and ticks must align to the fee tier's spacing.
 //     The staircase preset leaves gaps unless positionGaps is 'adjacent'.
+import { getAddress } from 'viem';
 import {
   getAddresses, ABYSS_FEE_TIERS, AbyssPoolProfile, LifecycleTokenKind, LifecycleRewardMode,
   getKnownLifecycleProfile, deriveLaunchPoolRecipe, deriveLaunchPositionRanges,
@@ -52,8 +53,9 @@ export const ABYSS_PROFILES = [
 
 export const abyssAddresses = () => getAddresses(ABYSS_CHAIN_ID);
 
-/// The quotes the SDK's own examples admit. `custom` lets any ERC-20 through,
-/// which the orchestrator accepts but which has no oracle wiring.
+/// The two quotes the SDK's own examples use. Any other ERC-20 works too -
+/// verified against the ABYSS token on all four pool profiles - so the pad
+/// offers a custom one as well, resolved by resolveAbyssQuote.
 export function abyssQuotes() {
   const a = abyssAddresses();
   return [
@@ -61,6 +63,26 @@ export function abyssQuotes() {
     // USDG is 6 decimals, not 18 - pricing it as 18 is wrong by 1e12
     { symbol: 'USDG', address: a.usdg ?? '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', decimals: 6 },
   ];
+}
+
+const ERC20_META = [
+  { type: 'function', name: 'symbol', stateMutability: 'view', inputs: [], outputs: [{ type: 'string' }] },
+  { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
+];
+
+/// Read a pasted pair token off chain. Its decimals decide what the starting
+/// market cap means, so they are never assumed to be 18.
+export async function resolveAbyssQuote(client, address) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address || '')) throw new Error('paste a pair token address (0x…)');
+  const addr = getAddress(address);
+  const code = await client.getBytecode({ address: addr }).catch(() => null);
+  if (!code || code === '0x') throw new Error(`${addr.slice(0, 10)}… is not a contract on Robinhood chain`);
+  const [symbol, decimals] = await Promise.all([
+    client.readContract({ address: addr, abi: ERC20_META, functionName: 'symbol' }).catch(() => null),
+    client.readContract({ address: addr, abi: ERC20_META, functionName: 'decimals' }).catch(() => null),
+  ]);
+  if (decimals === null) throw new Error(`${addr.slice(0, 10)}… does not look like an ERC-20 (no decimals)`);
+  return { symbol: symbol || addr.slice(0, 8) + '…', address: addr, decimals: Number(decimals), custom: true };
 }
 
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -147,7 +169,7 @@ export function abyssPlanDraft(o) {
   // They were allowed to disagree once - a 20% floor with a 0.5% price limit -
   // and every dev buy reverted SlippageExceeded.
   const slippageBps = Math.min(9000, Math.max(1, Math.round(o.slippageBps ?? 2000)));
-  const isNative = (o.quote.symbol === 'ETH');
+  const isNative = o.quote.address.toLowerCase() === String(abyssAddresses().weth || '').toLowerCase();
   const funding = devBuy > 0n
     ? [{
       asset: o.quote.address, amount: devBuy,
