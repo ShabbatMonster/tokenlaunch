@@ -1,185 +1,129 @@
-// Abyss Launch, and why the pad is disabled.
+// Abyss / Black Market launches on Robinhood Chain, driven by the project's own
+// SDK. Every live case plans the launch and then eth_calls the transaction the
+// SDK builds, so a pass means the launch would actually execute.
 //
-// The whole system went live on Robinhood Chain a few hours before this was
-// written. Every contract is real and the gate is wired, but no template is
-// registered, nothing has ever launched, and launch.abyss.trading serves a
-// component named `maintenance-splash`. So this suite pins two different kinds
-// of thing:
-//
-//   the FACTS, which must stay true  - the addresses, the gate, the entry
-//                                      point's signature, the shared pool key
-//   the STATE, which is expected to change - whether it is open
-//
-// A test that failed the moment Abyss opened would be worse than no test, so
-// readiness is reported and the pad's disabled-ness is asserted to MATCH the
-// chain rather than asserted outright.
-//
-// Run: node test/js/abyss-launch.test.mjs
-
-import fs from 'node:fs';
-import path from 'node:path';
-import { createPublicClient, http, getAddress, toFunctionSelector } from 'viem';
+// The three rules that cause almost every rejection are each covered:
+//   * fee rows unique + ascending, summing to 10000bps per asset
+//   * rewardMode must agree with whether any row pays holders
+//   * no interior tick gaps, ticks aligned to the tier's spacing
+// Plus the one that is easy to miss: the launched token has to sort ABOVE the
+// pair token or the one-sided ladder is upside down (TOPOLOGY_OPENING_GAP).
+//   node test/js/abyss-launch.test.mjs
+import fs from 'node:fs'; import path from 'node:path';
+import { createProtocolPublicClient, getAddresses } from '@black-market/sdk';
 import {
-  ABYSS_LAUNCH, ABYSS_REGISTRAR, ABYSS_LAUNCH_DEPLOYED, LAUNCH_SELECTOR,
-  ABYSS_LAUNCH_ABI, ABYSS_POOL_KEY, ABYSS_LAUNCH_ERRORS,
-  ABYSS_COORDINATOR_ABI, ABYSS_TOKEN_FACTORY_ABI,
-  abyssLaunchStatus, simulateAbyssLaunch,
-} from '../../src/abyss.js';
-import { ROBINHOOD } from '../../src/rhPrice.js';
-
-const pub = createPublicClient({
-  chain: ROBINHOOD,
-  transport: http('https://rpc.mainnet.chain.robinhood.com', { retryCount: 5, retryDelay: 900 }),
-});
+  abyssPlan, abyssPlanDraft, abyssGeometry, abyssQuotes, abyssTier, abyssAddresses,
+  ABYSS_FEE_TIER_LIST, ABYSS_PROFILES, ABYSS_PRESETS, ABYSS_CHAIN_ID,
+  LifecycleRewardMode, LifecycleTokenKind,
+} from '../../src/abyssLaunch.js';
 
 const fails = [];
-const check = (ok, label, detail = '') => {
-  console.log((ok ? 'PASS' : 'FAIL') + '  ' + label + (detail ? '  — ' + detail : ''));
-  if (!ok) fails.push(label);
-};
+const check = (ok, label, detail = '') => { console.log((ok ? 'PASS' : 'FAIL') + '  ' + label + (detail ? '  — ' + detail : '')); if (!ok) fails.push(label); };
+const ROOT = path.join(import.meta.dirname, '..', '..');
+const MAIN = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+const HTML = fs.readFileSync(path.join(ROOT, 'docs', 'index.html'), 'utf8');
+const RPC = process.env.RH_RPC || 'https://rpc.mainnet.chain.robinhood.com';
+const E = 10n ** 18n;
 
-// --- the contracts are real ----------------------------------------------------
-const names = Object.keys(ABYSS_LAUNCH);
-const codes = await Promise.all(names.map((n) => pub.getCode({ address: ABYSS_LAUNCH[n] }).catch(() => null)));
-const empty = names.filter((n, i) => !codes[i] || codes[i] === '0x');
-check(empty.length === 0,
-  'all six launch contracts have code on Robinhood Chain',
-  empty.length ? 'empty: ' + empty.join(', ') : `${names.length} live`);
+// --- wiring -------------------------------------------------------------------
+check(ABYSS_CHAIN_ID === 4663, 'the pad is on Robinhood Chain');
+check(abyssAddresses().launchOrchestrator.toLowerCase() === '0x91560876033d568d25cde98c78c33ff8fc43962c',
+  'and points at LaunchOrchestratorV1 from the SDK, not a hardcoded guess');
+check(ABYSS_FEE_TIER_LIST.length === 8 && ABYSS_FEE_TIER_LIST.some((t) => t.label === '0.01%') && ABYSS_FEE_TIER_LIST.some((t) => t.label === '15%'),
+  'all 8 fee tiers are offered, including the ones the site does not advertise', ABYSS_FEE_TIER_LIST.map((t) => t.label).join(' '));
+check(ABYSS_PROFILES.length === 4 && ABYSS_PROFILES.every((p) => typeof p.poolProfile === 'number' && typeof p.oracle === 'boolean'),
+  'each pool profile carries its config byte and whether it takes an oracle');
+const pad = MAIN.slice(MAIN.indexOf("id: 'abyss-robinhood'"), MAIN.indexOf("id: 'abyss-robinhood'") + 700);
+check(pad.length > 100 && /family: 'abyss'/.test(pad) && /chainId: 4663/.test(pad), 'main.js has the Abyss pad');
+for (const id of ['abyssQuote', 'abyssCap', 'abyssFee', 'abyssRewardMode', 'abyssShare', 'abyssBurn', 'abyssPreset', 'abyssPositions', 'abyssProfile', 'abyssKind', 'abyssDevBuy', 'abyssSummary']) {
+  check(HTML.includes(`id="${id}"`), `UI has #${id}`);
+}
+check(/OPENS AT \(<span id="abyssCapSym">/.test(HTML), 'the opening market cap is a field, priced in the pair token');
+check(/async function launchAbyss/.test(MAIN) && /abyssPlan\(client, \{ \.\.\.f, metadataURI \}\)/.test(MAIN), 'and the launch goes through the SDK plan');
 
-// The addresses came out of the site's checked-in map, NOT its env block - the
-// bundle also ships VITE_CHAIN_ID 31337 and a localhost RPC, which would have
-// been the wrong thing to trust.
-check(ABYSS_LAUNCH.launchFactory === getAddress('0xa7a4755fb907593f05fd1e289aa780f0d57f3a12'),
-  'the launch factory is the address the site ships, checksummed');
+// --- the geometry, no RPC -------------------------------------------------------
+{
+  const [eth] = abyssQuotes();
+  check(eth.symbol === 'ETH', 'ETH is the default pair');
+  const usdg = abyssQuotes().find((q) => q.symbol === 'USDG');
+  check(usdg.decimals === 6 && usdg.address === '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
+    'USDG is carried as 6 decimals with a valid checksum (18 would be wrong by 1e12)');
+  // the opening market cap is what sets the price
+  const g = (cap) => abyssGeometry({ supply: 1_000_000_000n * E, openingValuationQuote: cap, feePips: 20000, positions: 6, preset: 'staircase' });
+  const a = g(10n * E), b = g(100n * E);
+  // the launched token is the pool's token1, so a higher token price is a LOWER
+  // tick - the direction matters when reading these numbers
+  check(b.recipe.launchTick < a.recipe.launchTick, 'a higher opening market cap prices the token higher (lower tick, since it is token1)', `${a.recipe.launchTick} -> ${b.recipe.launchTick}`);
+  check(a.ranges.positions.length === 6 && a.ranges.tokenAmountMaximum === 1_000_000_000n * E,
+    'the whole supply goes into the ladder, nothing pre-sold', `${(Number(a.ranges.tokenAmountMaximum) / 1e18).toLocaleString()} tokens`);
+  check(a.ranges.positions.every((p, i, all) => i === 0 || all[i - 1].tickLower === p.tickUpper),
+    'the bands are contiguous, which is what the orchestrator demands');
+  check(abyssTier(20000).tickSpacing === 400 && a.ranges.positions.every((p) => p.tickLower % 400 === 0 || p.tickLower === -887200),
+    'and aligned to the fee tier\'s tick spacing');
+  let threw = '';
+  try { abyssTier(1234); } catch (e) { threw = e.message; }
+  check(/not an Abyss fee tier/.test(threw), 'an invalid fee tier is refused with the valid list');
+}
 
-// --- the gate -------------------------------------------------------------------
-//
-// Both factories answer `launcher()` with the launch factory, so a token cannot
-// be minted by calling the token factory directly. That is the gate, and it is
-// the reason a launch has to go through one entry point.
-const [tokLauncher, modLauncher] = await Promise.all([
-  pub.readContract({ address: ABYSS_LAUNCH.tokenFactory, abi: ABYSS_TOKEN_FACTORY_ABI, functionName: 'launcher' }).catch(() => null),
-  pub.readContract({ address: ABYSS_LAUNCH.moduleFactory, abi: ABYSS_TOKEN_FACTORY_ABI, functionName: 'launcher' }).catch(() => null),
-]);
-check(!!tokLauncher && getAddress(tokLauncher) === ABYSS_LAUNCH.launchFactory,
-  'the token factory only accepts the launch factory as launcher', tokLauncher);
-check(!!modLauncher && getAddress(modLauncher) === ABYSS_LAUNCH.launchFactory,
-  'and so does the module factory');
+// --- the rules the orchestrator enforces, refused up front ------------------------
+{
+  const [eth] = abyssQuotes();
+  const base = { creator: '0x7cb44b8693b3c350a2bcd4b681af85365aa27783', name: 'A', symbol: 'A', supply: 1_000_000_000n * E, quote: eth, feePips: 20000, positions: 6, preset: 'staircase', openingValuationQuote: 10n * E };
+  const refuses = (o, re, label) => {
+    let msg = '';
+    try { abyssPlanDraft({ ...base, ...o }); } catch (e) { msg = e.message; }
+    check(re.test(msg), label, msg.slice(0, 85) || 'it was ACCEPTED');
+  };
+  refuses({ rewardsBps: 5000 }, /reward mode set to staking or dividends/, 'a holders\' share without a reward mode is refused');
+  refuses({ rewardMode: LifecycleRewardMode.Dividends }, /need a share of the fees pointed at holders/, 'dividends with no holders\' share is refused');
+  refuses({ tokenKind: LifecycleTokenKind.ERC404 }, /needs a unit size/, 'an ERC-404 with no unit size is refused');
+  refuses({ preset: 'nope' }, /not an Abyss liquidity preset/, 'an unknown liquidity preset is refused');
+  refuses({ positions: 0 }, /between 1 and 16/, 'zero positions is refused');
+}
 
-const coordTok = await pub.readContract({
-  address: ABYSS_LAUNCH.coordinator, abi: ABYSS_COORDINATOR_ABI, functionName: 'tokenFactory',
-}).catch(() => null);
-check(!!coordTok && getAddress(coordTok) === ABYSS_LAUNCH.tokenFactory,
-  'and the coordinator points at the same token factory, so the set is one system');
+const client = createProtocolPublicClient({ chainId: ABYSS_CHAIN_ID });
+if (!(await client.getBlockNumber().catch(() => null))) { console.log('SKIP  Robinhood RPC unreachable'); process.exit(fails.length ? 1 : 0); }
 
-// --- the entry point's signature ------------------------------------------------
-//
-// Recovered from the deployed bytecode and resolved against openchain, then
-// rebuilt as an ABI here. If the ABI in abyss.js does not hash to the selector
-// the chain dispatches on, it is wrong - that is what this checks.
-const launchFn = ABYSS_LAUNCH_ABI.find((f) => f.name === 'launch');
-check(!!launchFn, 'abyss.js carries a launch() ABI');
-const selector = toFunctionSelector(launchFn);
-check(selector === LAUNCH_SELECTOR,
-  'and it hashes to the selector the deployed contract dispatches on',
-  `${selector} vs ${LAUNCH_SELECTOR}`);
+// --- live: plan it, then prove the built transaction executes ----------------------
+const CREATOR = '0x7cb44b8693b3c350a2bcd4b681af85365aa27783';   // funded on RH chain; read-only
+const [ETHQ, USDGQ] = abyssQuotes();
+const base = { creator: CREATOR, name: 'Abyss Wire', symbol: 'AWIRE', supply: 1_000_000_000n * E, quote: ETHQ, feePips: 20000, positions: 6, preset: 'staircase', openingValuationQuote: 10n * E };
+// a generous gas cap: these launches mint several liquidity positions and the
+// node's default eth_call cap is far below what 6+ bands need
+const exec = async (tx) => (await (await fetch(RPC, {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ from: CREATOR, to: tx.to, data: tx.data, value: '0x' + BigInt(tx.value ?? 0n).toString(16), gas: '0x3b9aca00' }, 'latest'] }),
+})).json());
 
-const params = launchFn.inputs[0].components;
-check(params.length === 10, 'the call takes ten fields', `${params.length}`);
-check(params[4].type === 'tuple' && params[4].components.length === 6,
-  'one of which is the token spec: type, data, name, symbol, decimals, supply');
-check(params.filter((p) => p.type === 'tuple' && p.components?.length === 3).length === 3,
-  'and three are triples - the price bounds and two fee splits');
+async function live(label, o, extra) {
+  try {
+    const r = await abyssPlan(client, { ...base, ...o });
+    const x = await exec(r.tx);
+    check(!!x.result, label, x.result ? (extra ? extra(r) : `token ${r.token.slice(0, 10)}… tick ${r.recipe.launchTick}`)
+      : 'revert ' + JSON.stringify(x.error?.data ?? x.error?.message).slice(0, 60));
+    return r;
+  } catch (e) { check(false, label, 'ERR ' + (e.message || '').split('\n')[0].slice(0, 80)); return null; }
+}
 
-// --- the pool key is the one we already trade through ---------------------------
-//
-// The nice part: the coordinator's computePoolId takes the SAME six-field key
-// src/swap.js reverse-engineered for trading, so launch and swap agree.
-const SWAP = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'swap.js'), 'utf8');
-check(ABYSS_POOL_KEY.length === 6
-  && ABYSS_POOL_KEY.map((f) => f.type).join(',') === 'address,address,uint8,uint24,bool,bytes32',
-  'the Abyss pool key is six fields, as the swap path found');
-check(/profile/.test(SWAP) && /AbyssPoolCreated/.test(SWAP),
-  'and the swap path already knows the same shape, so nothing new is invented here');
-
-// The ABI is checked by SELECTOR rather than by calling it. A first attempt
-// fed computePoolId a hand-made key and it reverted - correctly, since the
-// coordinator validates the key (it has an InvalidPoolKey error) and a pool
-// invented out of two unrelated addresses is not one. Fabricating a valid key
-// would be inventing exactly the thing this file refuses to invent, so: prove
-// the encoding by hashing it, and note that an invalid key is rejected.
-const computeFn = ABYSS_COORDINATOR_ABI.find((f) => f.name === 'computePoolId');
-check(toFunctionSelector(computeFn) === '0xf8c5761c',
-  'the six-field pool key encodes to the selector the coordinator dispatches on',
-  toFunctionSelector(computeFn));
-
-const bogus = await pub.readContract({
-  address: ABYSS_LAUNCH.coordinator,
-  abi: ABYSS_COORDINATOR_ABI,
-  functionName: 'computePoolId',
-  args: [{
-    currency0: getAddress('0x0bd7d308f8e1639fab988df18a8011f41eacad73'),
-    currency1: ABYSS_LAUNCH.coordinator,
-    profile: 3, fee: 10000, flag: true,
-    extra: '0xc0e9bed88d70a13fd3ab31451fefdd073b7266e838aee0ad1c236c8c9eff855d',
-  }],
-}).then(() => 'accepted').catch(() => 'rejected');
-check(bogus === 'rejected',
-  'and a made-up key is rejected, so the coordinator really does validate one');
-
-// --- the state, reported rather than asserted ----------------------------------
-const status = await abyssLaunchStatus({ connection: pub });
-console.log('');
-console.log(`   gate wired     ${status.gateWired}`);
-console.log(`   registrar      ${status.registrar}`);
-console.log(`   INITIAL_VERSION ${status.initialVersion}`);
-console.log(`   templates      ${status.templates.length}`);
-console.log(`   open           ${status.ready}${status.reason ? ' — ' + status.reason : ''}`);
-console.log('');
-
-check(status.gateWired, 'the live gate matches what this file records');
-check(typeof status.ready === 'boolean' && (status.ready || !!status.reason),
-  'readiness is answered from the chain, with a reason when it is not open');
-
-// Readiness must rest on something that can actually CHANGE. The first version
-// keyed it off a candidate-id list that is empty, so `ready` was false by
-// construction and would have stayed false after Abyss opened. This asserts the
-// signal is the coordinator itself, and that it is not the vacuous one.
-check(status.coordinatorLive === (status.nextTokenId !== null),
-  'readiness tracks the coordinator, which reverts until the system is initialised',
-  status.nextTokenId === null ? 'nextTokenId() reverts' : 'nextTokenId() = ' + status.nextTokenId);
-check(status.templatesChecked === 0 ? status.templates.length === 0 : true,
-  'the template helper reports how many ids it checked, so empty cannot read as "none exist"',
-  `checked ${status.templatesChecked}`);
-const ABI_SRC = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'abyss.js'), 'utf8');
-check(/ready: gateWired && live/.test(ABI_SRC) && !/ready: gateWired && templates.length/.test(ABI_SRC),
-  'and ready is no longer derived from the empty candidate list');
-
-// --- and the pad agrees with the chain ------------------------------------------
-const MAIN = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'main.js'), 'utf8');
-const pad = MAIN.slice(MAIN.indexOf("id: 'abyss-robinhood'"), MAIN.indexOf('\n  },', MAIN.indexOf("id: 'abyss-robinhood'")));
-check(pad.length > 0, 'the launcher has an Abyss pad');
-check(/enabled: false/.test(pad) === !status.ready,
-  status.ready
-    ? 'Abyss has opened, so the pad should no longer be hardcoded disabled — wire it against a real launch'
-    : 'the pad is disabled, which matches the chain saying it is not open');
-check(/paintAbyssLine/.test(MAIN) && /abyssLaunchStatus/.test(MAIN),
-  'and the page asks the chain whether it has opened rather than trusting a constant');
-
-// --- nothing sends --------------------------------------------------------------
-const SRC = fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'src', 'abyss.js'), 'utf8');
-check(!/writeContract|sendTransaction|privateKeyToAccount/.test(SRC),
-  'abyss.js cannot send a transaction at all - it reads and simulates');
-check(/simulateContract/.test(SRC) && typeof simulateAbyssLaunch === 'function',
-  'the only launch path offered is a simulation, which is what the chain can validate');
-check(Object.keys(ABYSS_LAUNCH_ERRORS).length >= 10,
-  'and its errors are named, so a revert reads as a reason rather than four bytes',
-  `${Object.keys(ABYSS_LAUNCH_ERRORS).length} errors`);
-check(ABYSS_LAUNCH_DEPLOYED.block > 0 && /2026-10-04/.test(ABYSS_LAUNCH_DEPLOYED.iso),
-  'the deployment date is recorded, since "deployed hours ago" is the main fact here',
-  ABYSS_LAUNCH_DEPLOYED.iso);
-check(ABYSS_REGISTRAR === getAddress('0x7cb44b8693b3c350a2bcd4b681af85365aa27783'),
-  'the registrar is recorded too - templates appear when that key registers them');
-
+const first = await live('a launch executes: 1B supply, ETH pair, 2% fee', {});
+if (first) {
+  check(BigInt(first.token) > BigInt(ETHQ.address), 'the launched token sorts above the pair token, so the ladder is the right way up');
+  check(first.plan.feeAssets.length === 2
+    && BigInt(first.plan.feeAssets[0].asset) < BigInt(first.plan.feeAssets[1].asset)
+    && first.plan.feeAssets.every((f) => f.ownerBps + f.rewardsBps + f.burnBps === 10000),
+    'the fee rows are unique, ascending, and each sums to 100%');
+}
+for (const cap of [1n * E, 50n * E, 250n * E]) {
+  await live(`the opening market cap is editable: ${Number(cap) / 1e18} ETH`, { openingValuationQuote: cap },
+    (r) => `tick ${r.recipe.launchTick}`);
+}
+for (const t of ABYSS_FEE_TIER_LIST) await live(`fee tier ${t.label} launches`, { feePips: t.feePips });
+await live('a USDG pair launches (6 decimals)', { quote: USDGQ, openingValuationQuote: 20000n * 10n ** 6n });
+await live('dividends to holders launches', { rewardMode: LifecycleRewardMode.Dividends, rewardsBps: 7500 });
+await live('staking rewards launch', { rewardMode: LifecycleRewardMode.Staking, rewardsBps: 5000 });
+await live('burning part of the token fees launches', { burnBps: 1000 });
+for (const p of ABYSS_PRESETS) await live(`the ${p} liquidity shape launches`, { preset: p, positions: 4 });
+for (const prof of ABYSS_PROFILES) await live(`pool profile ${prof.key} launches`, { profileKey: prof.key });
+await live('an atomic dev buy launches', { devBuyRaw: 5n * 10n ** 16n }, (r) => `${r.plan.buys.length} buy, ${Number(r.tx.value) / 1e18} ETH attached`);
 console.log('');
 process.exit(fails.length ? 1 : 0);
