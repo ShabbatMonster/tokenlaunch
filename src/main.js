@@ -10,7 +10,7 @@ import {
 } from './rpc.js';
 import { FAIRTOKEN_BYTECODE, FAIRTOKEN_ABI, FAIRTOKEN_TAX_BYTECODE, FAIRTOKEN_TAX_ABI } from './fairtoken.js';
 import { buildPoolsLaunch, buildPoolsTokenData, selfTestPoolsLaunch, POOLS_LAUNCHER, POOLS_POOL_STRATEGY } from './poolsAtomic.js';
-import { GENIUS_PAIRS } from './geniusPairs.js';
+import { GENIUS_PAIRS, GENIUS_SUPPLY } from './geniusPairs.js';
 selfTestPoolsLaunch(); // fail fast if the launch recipe ever drifts
 
 // ---------------------------------------------------------------------------
@@ -2546,6 +2546,7 @@ async function launch() {
     const buyback = document.getElementById('ponsBuyback').checked;
     const { token, pub, wallet } = await launchPonsV2(pad, {
       name, symbol, logo, description, twitter, website, feeRecipient, pair, devBuyStr, buyback,
+      ...readPonsExtras(),
     });
     if (token && dists.length) await runDistributions(pad, pub, wallet, token, dists, $('status'));
     refreshBalance();
@@ -4153,6 +4154,26 @@ function resolvePonsPair(pad) {
 // Pons v2 — bonding-curve launch on the (re-enabled) PonsV2LaunchFactory, paired
 // vs an approved stock. Dev buy runs on the returned curve (ERC-20 pair: approve
 // then buy). VOID-SAFETY: simulate-first + verify the pair is approved.
+/// The options genius.fun/create exposes that the pad used to leave empty: the
+/// rest of the socials, who the first buy's tokens go to, and the wallets the
+/// creator declares exempt from the sniper tax.
+function readPonsExtras() {
+  const one = (id) => (document.getElementById(id)?.value || '').trim();
+  const buyRecipient = one('ponsBuyRecipient');
+  if (buyRecipient && !/^0x[0-9a-fA-F]{40}$/.test(buyRecipient)) {
+    throw new Error('the first-buy recipient is not a valid address');
+  }
+  const exempt = one('ponsExempt').split(/[\s,]+/).filter(Boolean);
+  for (const a of exempt) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(a)) throw new Error(`"${a}" in the sniper-tax exemptions is not an address`);
+  }
+  return {
+    telegram: one('ponsTelegram'), discord: one('ponsDiscord'), farcaster: one('ponsFarcaster'),
+    buyRecipient: buyRecipient || undefined,
+    exemptExtra: exempt,
+  };
+}
+
 async function launchPonsV2(pad, inp) {
   // fail fast with a readable message instead of a raw MetadataTooLong revert
   checkPonsV2Metadata({
@@ -4208,7 +4229,10 @@ async function launchPonsV2(pad, inp) {
 
   const params = {
     name: inp.name, symbol: inp.symbol, logo: inp.logo, description: inp.description,
-    socials: { twitter: inp.twitter, telegram: '', discord: '', website: inp.website, farcaster: '' },
+    socials: {
+      twitter: inp.twitter, telegram: inp.telegram || '', discord: inp.discord || '',
+      website: inp.website, farcaster: inp.farcaster || '',
+    },
     creatorFeeRecipient: inp.feeRecipient,
     creatorTaxBps,
     // Genius reverts a launch with the buyback off, so it is pinned on there
@@ -4218,7 +4242,11 @@ async function launchPonsV2(pad, inp) {
   };
   // exempt the launcher + your whitelisted wallets from the 99%/3s snipe tax. dedupe
   // in case the connected wallet is already in the list.
-  const exemptions = [...new Set([account.address.toLowerCase(), ...PONS_V2_TAX_WHITELIST.map((a) => a.toLowerCase())])];
+  const exemptions = [...new Set([
+    account.address.toLowerCase(),
+    ...PONS_V2_TAX_WHITELIST.map((a) => a.toLowerCase()),
+    ...(inp.exemptExtra || []).map((a) => a.toLowerCase()),
+  ])];
 
   let token, curve, hash, buyNote = '';
 
@@ -4234,13 +4262,15 @@ async function launchPonsV2(pad, inp) {
       }
     }
     const value = isNative ? fee + devBuyRaw : fee; // native: fee + buy; ERC-20: fee only (quote pulled)
-    const args = [params, pad.launchConfigId, pairAddr, devBuyRaw, 0n, account.address, exemptions];
+    // the first buy's tokens can go elsewhere; any refund still returns to the payer
+    const buyTo = inp.buyRecipient || account.address;
+    const args = [params, pad.launchConfigId, pairAddr, devBuyRaw, 0n, buyTo, exemptions];
     setStatus('simulating atomic launch + dev buy…');
     const { result } = await pub.simulateContract({ address: forwarder, abi: PONS_V2_FORWARDER_ABI, functionName: 'launchAndBuy', args, value, account });
     [token, curve] = result;
     setStatus('sending atomic launch + dev buy tx…');
     hash = await wallet.writeContract({ address: forwarder, abi: PONS_V2_FORWARDER_ABI, functionName: 'launchAndBuy', args, value });
-    buyNote = ` · dev buy ✓ (${inp.devBuyStr} ${inp.pair.symbol}, atomic)`;
+    buyNote = ` · dev buy ✓ (${inp.devBuyStr} ${inp.pair.symbol}, atomic${inp.buyRecipient ? ' → ' + inp.buyRecipient.slice(0, 10) + '…' : ''})`;
   } else {
     // no dev buy — plain launchToken
     const args = [params, pad.launchConfigId, pairAddr, exemptions];
@@ -7135,7 +7165,14 @@ async function paintGeniusFees(pad) {
   const pct = (bps) => (bps / 100) + '%';
   const q = pad.quotes.find((x) => x.symbol === $('ponsQuoteSelect').value) || pad.quotes[0];
   const gradNote = q && q.grad ? ` · graduates at <b>${Number(q.grad).toLocaleString()} ${esc(q.symbol)}</b>` : '';
-  el.innerHTML = `<div><b>${f.launchFeeBnb} BNB</b> to launch${gradNote}</div>`
+  // the economics genius.fun/create shows read-only, worked out the same way:
+  // the phantom reserve against the fixed supply is the opening valuation
+  const econ = (q && q.phantom)
+    ? `<div>supply <b>${GENIUS_SUPPLY.toLocaleString()}</b> minted onto the curve · opens at`
+      + ` <b>${Number(q.phantom).toLocaleString()} ${esc(q.symbol)}</b>`
+      + ` (${(Number(q.phantom) / GENIUS_SUPPLY).toPrecision(3)} ${esc(q.symbol)} per token)</div>`
+    : '';
+  el.innerHTML = `<div><b>${f.launchFeeBnb} BNB</b> to launch${gradNote}</div>${econ}`
     + `<div>${pct(f.curveBps)} on every curve trade, split `
     + `${pct(f.destinationBps)} destination · ${pct(f.platformBps)} platform · ${pct(f.creatorBps)} you · ${pct(f.buybackBps)} buyback</div>`
     + `<div>${pct(f.hookBps)} in the PancakeSwap Infinity pool after it graduates (liquidity is locked)</div>`
@@ -7219,6 +7256,10 @@ function updatePonsUI(pad) {
   // buyback cannot be turned off - the launch reverts if it is
   const geniusFees = !!pad.fees;
   $('geniusFees').classList.toggle('hidden', !geniusFees);
+  // the first-buy recipient only means anything when there is a first buy
+  $('ponsBuyRecipient').placeholder = (+($('ponsDevBuy').value || 0) > 0)
+    ? 'your wallet (default) — the refund still comes back to you'
+    : 'set a dev buy above for this to apply';
   const bb = $('ponsBuyback');
   if (pad.forceBuyback) { bb.checked = true; bb.disabled = true; } else bb.disabled = false;
   if (geniusFees) paintGeniusFees(pad);

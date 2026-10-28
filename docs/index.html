@@ -811,6 +811,17 @@
         <input type="checkbox" id="ponsBuyback" checked style="width:auto;margin:0">
         <span>BUYBACK — Pons auto-spends part of <b>your</b> creator fee buying the token back (vested 5yr, split you/protocol · not burned)</span>
       </label>
+      <div class="row" style="margin-top:8px">
+        <div><label style="margin-top:0">TELEGRAM (OPT.)</label><input type="text" id="ponsTelegram" spellcheck="false" placeholder="t.me/yourcoin"></div>
+        <div><label style="margin-top:0">DISCORD (OPT.)</label><input type="text" id="ponsDiscord" spellcheck="false" placeholder="discord.gg/yourcoin"></div>
+        <div><label style="margin-top:0">FARCASTER (OPT.)</label><input type="text" id="ponsFarcaster" spellcheck="false" placeholder="@yourcoin"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label style="margin-top:0">SEND THE FIRST BUY TO (OPT.)</label>
+          <input type="text" id="ponsBuyRecipient" spellcheck="false" placeholder="your wallet (default) — the refund still comes back to you"></div>
+      </div>
+      <label style="margin-top:8px">WALLETS EXEMPT FROM THE SNIPER TAX <span class="hint">one address per line — they can buy during the launch window untaxed</span></label>
+      <textarea id="ponsExempt" spellcheck="false" rows="2" placeholder="0xabc…"></textarea>
       <div class="status hidden" id="geniusFees" style="font-size:11px;margin-top:8px;line-height:1.6"></div>
       <div class="hint" id="ponsHint" style="font-size:11px;margin-top:4px">bonding curve · paired vs an approved token · dev buy in that token (held in your wallet)</div>
 
