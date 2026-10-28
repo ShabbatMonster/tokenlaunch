@@ -3129,7 +3129,45 @@ function solParamsFromUI(pad) {
     pctSupplyOnMigration: num('solMigPct', '% on migration'),
     migrationThreshold,
     feeClaimer: feeWallet,
+    // Metaplex caps an SPL token's name at 32 bytes, its ticker at 10 and its
+    // URI at 200, in the program itself. A Token-2022 base keeps its metadata on
+    // the mint and has no cap, so anything longer switches to it rather than
+    // being refused — see solNeedsToken2022.
+    baseToken2022: $('solToken2022').checked || solNeedsToken2022(),
   };
+}
+
+/// Whether what is in the name/ticker fields is too big for a Metaplex metadata
+/// account, which is what a classic SPL launch has to use.
+function solNeedsToken2022() {
+  return metaplexOverflow().length > 0;
+}
+function metaplexOverflow() {
+  const max = { name: 32, symbol: 10 };
+  const over = [];
+  for (const [field, id] of [['name', 'name'], ['symbol', 'symbol']]) {
+    const bytes = new TextEncoder().encode($(id).value.trim()).length;
+    if (bytes > max[field]) over.push({ field, bytes, max: max[field] });
+  }
+  return over;
+}
+
+/// Say which standard the coin will be minted as, and why, before it is sent.
+function paintSolTokenStd() {
+  const el = $('solStdHint');
+  if (!el) return;
+  const over = metaplexOverflow();
+  const forced = over.length > 0;
+  const checked = $('solToken2022').checked;
+  if (forced) {
+    el.innerHTML = over.map((o) => `the ${o.field} is <b>${o.bytes} bytes</b> and Metaplex holds ${o.max}`).join(' · ')
+      + ' — minting as <b>Token-2022</b>, which keeps its metadata on the mint and has no such cap';
+  } else if (checked) {
+    el.innerHTML = 'minting as <b>Token-2022</b> — metadata lives on the mint, so there is no Metaplex cap on the name,'
+      + ' ticker or URI (only what fits in one transaction: about 240 bytes of name beside a normal IPFS URI)';
+  } else {
+    el.innerHTML = 'classic SPL, so Metaplex\'s caps apply: name 32 bytes, ticker 10, URI 200 (a longer one switches to Token-2022 on its own)';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3648,7 +3686,8 @@ async function launchSol(pad, inp) {
     `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">token on solscan</a> · ` +
     `<a href="${pad.explorer}/tx/${res.poolSig}" target="_blank" rel="noopener">pool tx</a>` +
     (res.devBuy ? ` · dev buy ✓ ~${res.devBuy.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-      + ` ${esc(inp.symbol)} (${res.devBuy.pctOfSupply.toFixed(2)}% of supply)` : '');
+      + ` ${esc(inp.symbol)} (${res.devBuy.pctOfSupply.toFixed(2)}% of supply)` : '')
+    + (params.baseToken2022 ? '<br>minted as Token-2022, with its metadata on the mint' : '');
   refreshBalance();
   renderTokenList();
 }
@@ -6048,6 +6087,7 @@ function applyPadUI(pad) {
   $('solRow').classList.toggle('hidden', !meteora);   // Meteora curve params
   if (meteora) paintSolSupplyHint();
   if (meteora) paintSolFeeHint();
+  if (meteora) paintSolTokenStd();
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
   if (pump) paintPumpDevSym();
@@ -7808,6 +7848,9 @@ function init() {
   $('pumpQuoteCustom').addEventListener('input', () => { paintPumpDevSym(); paintPumpDepth(); });
 
   for (const id of ['solSupply', 'solMigPct']) $(id).addEventListener('input', paintSolSupplyHint);
+  // the token standard follows what the name and ticker need, so repaint on both
+  for (const id of ['name', 'symbol']) $(id).addEventListener('input', () => { if (activePad.family === 'meteora') paintSolTokenStd(); });
+  $('solToken2022').addEventListener('change', paintSolTokenStd);
 
   $('abyssLine').addEventListener('click', paintAbyssLine);
   paintAbyssLine().catch(() => {});
