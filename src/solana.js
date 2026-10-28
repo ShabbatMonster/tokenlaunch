@@ -317,8 +317,12 @@ async function readQuoteMint(connection, quote) {
   if (!v) throw new Error('quote mint not found on-chain');
   const decimals = v.data?.parsed?.info?.decimals;
   if (decimals == null) throw new Error('quote mint is not a valid SPL/Token-2022 mint');
-  const extensions = (v.data?.parsed?.info?.extensions || []).map((e) => e.extension);
-  return { program: v.owner, decimals, extensions };
+  const exts = v.data?.parsed?.info?.extensions || [];
+  const extensions = exts.map((e) => e.extension);
+  // a Token-2022 mint carries its own name and ticker, which is the only way to
+  // name a pasted quote in an error or a hint without another round trip
+  const symbol = exts.find((e) => e.extension === 'tokenMetadata')?.state?.symbol || null;
+  return { program: v.owner, decimals, extensions, symbol };
 }
 
 // build the create-pool tx directly. The SDK's createPool hardcodes the classic
@@ -496,7 +500,7 @@ async function buildFirstBuyIxs(client, { payer, config, baseMint, quote, quoteP
 /// Refuse a dev buy the wallet cannot fund, before anything is signed. A
 /// create_config that lands and a create_pool that bounces leaves an orphaned
 /// config and a confusing error.
-async function checkDevBuyFunds(connection, payer, quote, quoteProgram, amountIn) {
+async function checkDevBuyFunds(connection, payer, quote, quoteProgram, amountIn, { decimals = 9, symbol = null } = {}) {
   if (quote.equals(NATIVE_MINT)) {
     // pool creation alone costs roughly 0.03 SOL in rent (mint, two vaults, the
     // metadata account), and none of it comes back
@@ -513,11 +517,22 @@ async function checkDevBuyFunds(connection, payer, quote, quoteProgram, amountIn
   }
   const held = await tokenBalance(connection, payer, quote, quoteProgram);
   if (held.lt(amountIn)) {
-    throw new Error(
-      `dev buy needs ${amountIn.toString()} of the quote token in base units and the wallet holds `
-      + `${held.toString()}. The curve is priced in the quote, so the buy has to be funded in it.`,
-    );
+    throw new Error(devBuyShortfall({ needed: amountIn, held, decimals, symbol, mint: quote.toBase58() }));
   }
+}
+
+/// A dev buy the wallet cannot cover, in whole tokens and named: base units read
+/// as a wall of digits, and the shortfall is the number that decides what next.
+export function devBuyShortfall({ needed, held, decimals = 9, symbol = null, mint = '' }) {
+  const whole = (v) => (Number(v.toString()) / 10 ** decimals)
+    .toLocaleString(undefined, { maximumFractionDigits: decimals });
+  const short = new BN(needed.toString()).sub(new BN(held.toString()));
+  if (symbol) {
+    return `the dev buy is ${whole(needed)} ${symbol} and the wallet holds ${whole(held)} ${symbol}`
+      + ` — ${whole(short)} short. The curve is priced in ${symbol}, so the buy is funded in ${symbol}, not SOL.`;
+  }
+  return `the dev buy is ${whole(needed)} of the quote token (${mint.slice(0, 6)}…) and the wallet holds`
+    + ` ${whole(held)} — ${whole(short)} short. The curve is priced in the quote, so the buy is funded in it, not SOL.`;
 }
 
 // wait for an account to be visible on the RPC node (config propagation guard)
@@ -555,7 +570,7 @@ export async function launchMeteora(opts) {
   const feeClaimer = params?.feeClaimer ? new PublicKey(params.feeClaimer) : actor;
   const quote = new PublicKey(quoteMint);
 
-  const { program: quoteProgram, decimals: quoteDecimals, extensions: quoteExtensions } = await readQuoteMint(connection, quote);
+  const { program: quoteProgram, decimals: quoteDecimals, extensions: quoteExtensions, symbol: quoteSymbol } = await readQuoteMint(connection, quote);
   const config = Keypair.generate();
   const baseMint = Keypair.generate();
   const curveConfig = configParams || (reuseConfig ? null : buildLaunchConfig(quoteDecimals, params));
@@ -589,7 +604,7 @@ export async function launchMeteora(opts) {
         + 'so the coin would graduate in the same transaction that creates it. Buy less than the threshold.',
       );
     }
-    if (!dryRun) await checkDevBuyFunds(connection, payer.publicKey, quote, quoteProgram, devBuyAmount);
+    if (!dryRun) await checkDevBuyFunds(connection, payer.publicKey, quote, quoteProgram, devBuyAmount, { decimals: quoteDecimals, symbol: quoteSymbol });
     say(`dev buy: ${devBuyQuote} → about ${devBuyPreview.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} `
       + `${symbol} (${devBuyPreview.pctOfSupply.toFixed(2)}% of supply, `
       + `${devBuyPreview.pctOfThreshold.toFixed(1)}% of the way to graduation), in the same tx as the pool`);
@@ -1183,9 +1198,11 @@ export async function quoteHoldings({ rpcUrl, owner, quoteMint }) {
     return { isNative: true, decimals: 9, raw: String(lamports), ui: lamports / 1e9 };
   }
   const mint = new PublicKey(quoteMint);
-  const { program, decimals } = await readQuoteMint(connection, mint);
+  const { program, decimals, symbol } = await readQuoteMint(connection, mint);
   const raw = await tokenBalance(connection, who, mint, program);
-  return { isNative: false, decimals, raw: raw.toString(), ui: Number(raw.toString()) / 10 ** decimals };
+  // the ticker lets a pasted mint be named everywhere it is spent, instead of
+  // every label reading "QUOTE"
+  return { isNative: false, decimals, symbol, raw: raw.toString(), ui: Number(raw.toString()) / 10 ** decimals };
 }
 
 /// What `uiSol` SOL would buy of the quote right now. No signing, no key.
