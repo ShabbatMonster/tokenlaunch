@@ -15,7 +15,7 @@
 import fs from 'node:fs'; import path from 'node:path';
 import { createPublicClient, http, keccak256, stringToBytes, parseEther, formatEther } from 'viem';
 import { bsc } from 'viem/chains';
-import { GENIUS_PAIRS } from '../../src/geniusPairs.js';
+import { GENIUS_PAIRS, GENIUS_SUPPLY, GENIUS_CURVE_FEE_BPS } from '../../src/geniusPairs.js';
 
 const fails = [];
 const check = (ok, label, detail = '') => { console.log((ok ? 'PASS' : 'FAIL') + '  ' + label + (detail ? '  — ' + detail : '')); if (!ok) fails.push(label); };
@@ -40,6 +40,21 @@ check(/const forwarder = pad\.forwarder \|\| PONS_V2_FORWARDER_ADDR/.test(MAIN)
 check(/buybackEnabled: pad\.forceBuyback \? true :/.test(MAIN), 'a launch cannot go out with the buyback off');
 check(/maxCreatorTaxBps is 0/.test(MAIN), 'and a creator tax it would reject is refused with the reason');
 check(HTML.includes('id="geniusFees"') && /paintGeniusFees/.test(MAIN), 'the pad shows the fee breakdown');
+// everything genius.fun/create offers, which the pad left out at first
+for (const id of ['ponsTelegram', 'ponsDiscord', 'ponsFarcaster', 'ponsBuyRecipient', 'ponsExempt']) {
+  check(HTML.includes(`id="${id}"`), `UI has #${id}`);
+}
+check(/telegram: inp\.telegram \|\| ''/.test(MAIN) && /discord: inp\.discord \|\| ''/.test(MAIN) && /farcaster: inp\.farcaster \|\| ''/.test(MAIN),
+  'all five socials reach the launch, not just twitter and website');
+check(/const buyTo = inp\.buyRecipient \|\| account\.address/.test(MAIN), 'the first buy can be sent to a different address');
+check(/\.\.\.\(inp\.exemptExtra \|\| \[\]\)\.map/.test(MAIN), 'and the creator can declare extra sniper-tax exemptions');
+check(/function readPonsExtras/.test(MAIN) && /is not a valid address/.test(MAIN), 'with the addresses validated before anything is sent');
+check(GENIUS_SUPPLY === 1_000_000_000 && GENIUS_CURVE_FEE_BPS === 200, 'the supply and curve fee come from the manifest', `${GENIUS_SUPPLY} / ${GENIUS_CURVE_FEE_BPS}bps`);
+check(GENIUS_PAIRS.filter((p) => p.address !== 'custom').every((p) => p.phantom > 0), 'every pair carries its phantom reserve, so the opening price can be shown');
+{
+  const bnb = GENIUS_PAIRS[0];
+  check(bnb.phantom === 6 && bnb.grad === 15, 'BNB opens against a 6 BNB phantom reserve and graduates at 15', `${bnb.phantom} / ${bnb.grad}`);
+}
 
 // --- the bundled pair list -------------------------------------------------------
 check(GENIUS_PAIRS.length === 467, 'the pair list has 465 approved tokens + native BNB + custom', `${GENIUS_PAIRS.length} entries`);
@@ -82,20 +97,20 @@ check(enabled, 'the factory is open for launches');
 check(formatEther(fee) === '0.002', 'the launch fee is 0.002 BNB, as the pad states', formatEther(fee) + ' BNB');
 check(Number(maxTax) === 0, 'and maxCreatorTaxBps is 0, so the pad is right to refuse a creator tax', String(maxTax));
 
-async function sim(label, { pair, buyback = true, creatorTaxBps = 0, devBuy = 0n, value, econBad = false }) {
+async function sim(label, { pair, buyback = true, creatorTaxBps = 0, devBuy = 0n, value, econBad = false, socials, exemptions, buyRecipient }) {
   const econ = econBad ? '0x' + '11'.repeat(32) : await c.readContract({ address: FACTORY, abi: ABI, functionName: 'previewLaunchEconomics', args: [0n, pair] });
   const p = {
     name: 'Genius test', symbol: 'GTEST', logo: 'ipfs://bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy',
-    description: 'wiring check', socials: { twitter: '', telegram: '', discord: '', website: '', farcaster: '' },
+    description: 'wiring check', socials: socials ?? { twitter: '', telegram: '', discord: '', website: '', farcaster: '' },
     creatorFeeRecipient: FROM, creatorTaxBps, buybackEnabled: buyback, expectedEconomics: econ,
     salt: keccak256(stringToBytes('g-' + label + Date.now() + Math.random())),
   };
   try {
     if (devBuy > 0n) {
-      const { result } = await c.simulateContract({ address: FORWARDER, abi: FWD, functionName: 'launchAndBuy', args: [p, 0n, pair, devBuy, 0n, FROM, [FROM]], account: FROM, value: value ?? fee + devBuy });
+      const { result } = await c.simulateContract({ address: FORWARDER, abi: FWD, functionName: 'launchAndBuy', args: [p, 0n, pair, devBuy, 0n, buyRecipient ?? FROM, exemptions ?? [FROM]], account: FROM, value: value ?? fee + devBuy });
       return { ok: true, token: result[0], out: result[2] };
     }
-    const { result } = await c.simulateContract({ address: FACTORY, abi: ABI, functionName: 'launchToken', args: [p, 0n, pair, [FROM]], account: FROM, value: value ?? fee });
+    const { result } = await c.simulateContract({ address: FACTORY, abi: ABI, functionName: 'launchToken', args: [p, 0n, pair, exemptions ?? [FROM]], account: FROM, value: value ?? fee });
     return { ok: true, token: result[0] };
   } catch (e) {
     const d = e.details || e.shortMessage || e.message || '';
@@ -120,6 +135,18 @@ for (const [label, opts] of [
 ]) {
   const r = await sim(label, opts);
   check(!r.ok, `the factory rejects a launch ${label}`, r.ok ? 'it was ACCEPTED' : r.why || 'reverted');
+}
+
+// --- the options the create page exposes, each proven on chain -------------------
+{
+  const FULL = { twitter: '@geniuscat', telegram: 't.me/geniuscat', discord: 'discord.gg/geniuscat', website: 'https://genius.cat', farcaster: '@geniuscat' };
+  const DEAD = '0x000000000000000000000000000000000000dEaD';
+  let r = await sim('all five socials', { pair: NATIVE, socials: FULL });
+  check(r.ok, 'a launch carrying all five socials goes through', r.ok ? r.token : r.why);
+  r = await sim('declared exemptions', { pair: NATIVE, socials: FULL, exemptions: [FROM, DEAD] });
+  check(r.ok, 'and one declaring extra sniper-tax exemptions', r.ok ? r.token : r.why);
+  r = await sim('first buy to another wallet', { pair: NATIVE, socials: FULL, devBuy: parseEther('0.05'), buyRecipient: DEAD });
+  check(r.ok && r.out > 0n, 'a first buy can be sent to a different address', r.ok ? `${(Number(r.out) / 1e18).toLocaleString()} tokens to 0x…dEaD` : r.why);
 }
 // the bundled list still matches the chain (spot check, the full 465 took one pass)
 {
