@@ -11,6 +11,7 @@ import {
 import { FAIRTOKEN_BYTECODE, FAIRTOKEN_ABI, FAIRTOKEN_TAX_BYTECODE, FAIRTOKEN_TAX_ABI } from './fairtoken.js';
 import { buildPoolsLaunch, buildPoolsTokenData, selfTestPoolsLaunch, POOLS_LAUNCHER, POOLS_POOL_STRATEGY } from './poolsAtomic.js';
 import { GENIUS_PAIRS, GENIUS_SUPPLY } from './geniusPairs.js';
+import { FLOAT_PAIRS } from './floatPairs.js';
 selfTestPoolsLaunch(); // fail fast if the launch recipe ever drifts
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1267,17 @@ const PADS = [
     site: (t) => `https://solscan.io/token/${t}`,
     nativeSymbol: 'SOL',
     quotes: RAYDIUM_LAUNCHLAB_QUOTES,
+  },
+  {
+    // Float (floatlaunch.xyz): LaunchLab coins paired with tokenised stocks,
+    // launched through Float's own program so they show up on its site and
+    // pay its fee split. 1% / 2% / 2.5% fee tiers, first-come tickers (a taken
+    // one is refused, never bought for 1 SOL). See src/float.js.
+    id: 'float-sol', label: 'Float · stock-paired', vm: 'sol', enabled: true, family: 'float',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://www.floatlaunch.xyz/tokens/${t}`,
+    nativeSymbol: 'SOL',
   },
   {
     // pump.fun. create_v2 (Token-2022) plus a buy_v2 dev buy in one transaction,
@@ -3548,8 +3560,156 @@ function raydiumQuoteMint(pad) {
   return q.mint;
 }
 
+// --- Float -------------------------------------------------------------------
+// Coins paired with tokenised stocks, through Float's own program. The ticker is
+// checked as it is typed: a taken one costs 1 SOL to reuse on Float, and this pad
+// refuses instead of paying. See src/float.js.
+const loadFloat = () => import('./float.js');
+const floatPair = () => FLOAT_PAIRS.find((q) => q.mint === $('floatQuote').value) || FLOAT_PAIRS[0];
+/// Float only takes A-Z and 0-9, so a ticker is registered upper-cased.
+const floatTicker = () => ($('symbol').value || '').trim().toUpperCase();
+
+function updateFloatUI(pad) {
+  const sel = $('floatQuote');
+  if (!sel.options.length) {
+    sel.innerHTML = FLOAT_PAIRS.map((q) => `<option value="${q.mint}">${esc(q.symbol)}${q.name ? ' — ' + esc(q.name) : ''}</option>`).join('');
+  }
+  const q = floatPair();
+  $('floatDevSym').textContent = q.symbol;
+  $('floatFundSym').textContent = q.symbol;
+  paintFloatTiers(pad).catch(() => {});
+  checkFloatTicker(pad);
+  refreshFloatHoldings(pad);
+}
+
+/// The tier labels from Float's own platforms, so a changed rate is shown as it is.
+let floatTiersPainted = false;
+async function paintFloatTiers(pad) {
+  if (floatTiersPainted) return;
+  const { readFloatConfig } = await loadFloat();
+  const { Connection } = await import('@solana/web3.js');
+  const cfg = await readFloatConfig(new Connection(pad.rpc, 'confirmed'));
+  const sel = $('floatTier');
+  const keep = sel.value;
+  sel.innerHTML = cfg.tiers.map((t) => `<option value="${t.index}">${t.totalBps / 100}%</option>`).join('');
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  floatTiersPainted = true;
+}
+
+let floatTickerSeq = 0, floatTickerTimer = null;
+function checkFloatTicker(pad) {
+  clearTimeout(floatTickerTimer);
+  floatTickerTimer = setTimeout(async () => {
+    const hint = $('floatTickerHint');
+    const t = floatTicker();
+    const seq = ++floatTickerSeq;
+    if (!t) { hint.textContent = 'type a ticker to check it is free on Float'; return; }
+    const { FLOAT_TICKER_RULE, floatTickerOwner } = await loadFloat();
+    if (!FLOAT_TICKER_RULE.test(t)) {
+      hint.innerHTML = `<span class="err">Float tickers are 1–10 characters, A–Z and 0–9 only</span>`;
+      return;
+    }
+    try {
+      const { Connection } = await import('@solana/web3.js');
+      const held = await floatTickerOwner(new Connection(pad.rpc, 'confirmed'), t);
+      if (seq !== floatTickerSeq) return;
+      hint.innerHTML = held
+        ? `<span class="err"><b>${esc(t)}</b> is taken on Float — by <a href="${pad.site(held.coin)}" target="_blank" rel="noopener">${esc(held.coin.slice(0, 8))}…</a>`
+          + ` since ${held.since.toISOString().slice(0, 10)}. Reusing it costs 1 SOL, so this pad won't launch it — pick another.</span>`
+        : `<b>${esc(t)}</b> is free on Float${t !== ($('symbol').value || '').trim() ? ' (registered upper-case)' : ''}`;
+    } catch (e) {
+      if (seq === floatTickerSeq) hint.textContent = 'could not check the ticker: ' + (e.message || e);
+    }
+  }, 350);
+}
+
+let floatHoldSeq = 0;
+async function refreshFloatHoldings(pad) {
+  const hint = $('floatHoldHint');
+  if (!solKeyB58) { hint.textContent = 'no SOL key loaded'; return; }
+  const seq = ++floatHoldSeq;
+  const q = floatPair();
+  try {
+    const { quoteHoldings } = await import('./solana.js');
+    const h = await quoteHoldings({ rpcUrl: pad.rpc, owner: solPubkeyFromSecret(solKeyB58), quoteMint: q.mint });
+    if (seq !== floatHoldSeq) return;
+    hint.innerHTML = `wallet holds <b>${h.ui.toLocaleString(undefined, { maximumFractionDigits: q.decimals })}</b> ${esc(q.symbol)}`
+      + (h.ui > 0 ? '' : ' — the dev buy is paid in it, so SWAP IN some first if you want one');
+  } catch (e) {
+    if (seq === floatHoldSeq) hint.textContent = e.message || String(e);
+  }
+}
+
+async function floatSwapIn(pad) {
+  const btn = $('floatFundBtn');
+  const amt = $('floatFundAmount').value.trim();
+  if (!(Number(amt) > 0)) { $('floatFundHint').textContent = 'set how much SOL to swap'; return; }
+  if (!solKeyB58) { $('floatFundHint').textContent = 'no SOL key loaded'; return; }
+  btn.disabled = true;
+  try {
+    const { swapIntoQuote } = await import('./solana.js');
+    const q = floatPair();
+    const r = await swapIntoQuote({
+      rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint: q.mint, uiSol: amt,
+      onStatus: (m) => { $('floatFundHint').textContent = m; },
+    });
+    $('floatFundHint').innerHTML = `swapped ✓ <a href="${pad.explorer}/tx/${r.sig}" target="_blank" rel="noopener">tx</a>`;
+    refreshFloatHoldings(pad);
+  } catch (e) {
+    $('floatFundHint').innerHTML = `<span class="err">${esc(e.message || String(e))}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/// Everything Float would refuse, checked before the image and metadata are
+/// uploaded - a taken ticker should cost nothing, not even an IPFS pin.
+async function precheckFloat(pad, inp) {
+  const { floatCheckMetadata, floatTickerOwner } = await loadFloat();
+  const { Connection } = await import('@solana/web3.js');
+  floatCheckMetadata({ name: inp.name, symbol: inp.symbol, uri: '' });
+  const held = await floatTickerOwner(new Connection(pad.rpc, 'confirmed'), inp.symbol);
+  if (held) {
+    throw new Error(`the ticker ${inp.symbol} is already taken on Float (by ${held.coin.slice(0, 8)}…). `
+      + 'Reusing it costs 1 SOL, so this launch stops here — pick another ticker.');
+  }
+  const creator = $('floatCreator').value.trim();
+  if (creator && !isSolAddress(creator)) throw new Error('the creator-fee wallet is not a valid Solana address');
+}
+
+async function launchFloatPad(pad, inp) {
+  const { launchFloat } = await loadFloat();
+  const q = floatPair();
+  const res = await launchFloat({
+    rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint: q.mint,
+    name: inp.name, symbol: inp.symbol, uri: inp.uri,
+    feeTier: Number($('floatTier').value || 0),
+    creatorWallet: $('floatCreator').value.trim() || null,
+    devBuyUi: $('floatDevBuy').value.trim() || '0',
+    onStatus: (m) => setStatus(m),
+  });
+  rememberLaunch(pad, res.mint, inp.symbol);
+  const buy = BigInt(res.devBuyRaw) > 0n
+    ? ` · dev buy ✓ ${(Number(res.devBuyRaw) / 10 ** q.decimals).toLocaleString(undefined, { maximumFractionDigits: q.decimals })} ${esc(q.symbol)}`
+    : '';
+  $('status').innerHTML = `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>`
+    + `paired with ${esc(q.symbol)} · ${res.feeBps / 100}% trading fee${buy}<br>`
+    + `<a href="${pad.site(res.mint)}" target="_blank" rel="noopener">on Float</a>`
+    + ` · <a href="${pad.explorer}/tx/${res.sig}" target="_blank" rel="noopener">launch tx</a>`;
+  refreshBalance();
+  renderTokenList();
+  refreshFloatHoldings(pad);
+}
+
 async function launchSol(pad, inp) {
   if (!solKeyB58) throw new Error('no SOL key stored — re-import your wallet with a SOL private key');
+
+  // Float registers tickers upper-case and charges 1 SOL for a taken one, so
+  // normalise it and refuse a taken one before anything is uploaded
+  if (pad.family === 'float') {
+    inp = { ...inp, symbol: inp.symbol.toUpperCase() };
+    await precheckFloat(pad, inp);
+  }
 
   // Jupiter Studio uploads the image and writes the metadata itself
   if (pad.family === 'jupstudio') {
@@ -3572,6 +3732,11 @@ async function launchSol(pad, inp) {
 
   if (pad.family === 'solmimic') {
     await launchSolMimic(pad, { ...inp, uri });
+    return;
+  }
+
+  if (pad.family === 'float') {
+    await launchFloatPad(pad, { ...inp, uri });
     return;
   }
 
@@ -6089,6 +6254,8 @@ function applyPadUI(pad) {
   if (meteora) paintSolFeeHint();
   if (meteora) paintSolTokenStd();
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
+  $('floatRow').classList.toggle('hidden', pad.family !== 'float');  // Float: stock pair, fee tier, ticker
+  if (pad.family === 'float') updateFloatUI(pad);
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
   if (pump) paintPumpDevSym();
   if (pump) renderArmed();
@@ -7798,6 +7965,10 @@ function init() {
     $(id).addEventListener('change', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
   }
   for (const id of ['name', 'symbol']) $(id).addEventListener('input', () => { if (activePad.family === 'jupstudio') updateJupUI(); });
+  // Float: the ticker is checked live, since a taken one would cost 1 SOL
+  $('symbol').addEventListener('input', () => { if (activePad.family === 'float') checkFloatTicker(activePad); });
+  $('floatQuote').addEventListener('change', () => { if (activePad.family === 'float') updateFloatUI(activePad); });
+  $('floatFundBtn').addEventListener('click', () => floatSwapIn(activePad));
   $('jupPreset').addEventListener('change', () => {
     if ($('jupPreset').value === 'meme') {
       $('jupQuote').value = 'USDC'; $('jupInitMc').value = '5000'; $('jupMigMc').value = '75000';

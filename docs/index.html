@@ -373,6 +373,40 @@
       yet and it will sit there returning <code>UnsupportedQuoteMint</code> until they do.</div>
     </div>
 
+    <!-- Float (floatlaunch.xyz): LaunchLab coins paired with tokenised stocks,
+         through Float's own program. See src/float.js. -->
+    <div id="floatRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST</label><select id="floatQuote"></select></div>
+        <div style="flex:0 0 150px"><label>TRADING FEE</label><select id="floatTier">
+          <option value="0">1%</option>
+          <option value="1">2%</option>
+          <option value="2">2.5%</option>
+        </select></div>
+        <div style="flex:0 0 160px"><label>DEV BUY (<span id="floatDevSym">SPYx</span>, OPT.)</label>
+          <input type="text" id="floatDevBuy" value="0" spellcheck="false"></div>
+      </div>
+      <div class="hint" id="floatTickerHint" style="font-size:11px;margin-top:6px"></div>
+      <div class="hint" id="floatHoldHint" style="font-size:11px;margin-top:2px"></div>
+      <div class="row" style="margin-top:8px">
+        <div><label style="margin-top:0">CREATOR FEES TO (OPT.)</label>
+          <input type="text" id="floatCreator" spellcheck="false" placeholder="your wallet (default) — where the 5% creator share is paid, in the pair token"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div style="flex:0 0 150px"><label style="margin-top:0">SWAP IN (SOL)</label>
+          <input type="text" id="floatFundAmount" value="0" spellcheck="false"></div>
+        <div style="flex:0 0 auto"><label style="margin-top:0">&nbsp;</label>
+          <button class="btn secondary" id="floatFundBtn" style="margin-top:0">JUP SWAP &rarr; <span id="floatFundSym">SPYx</span></button></div>
+        <div><label style="margin-top:0">&nbsp;</label><div class="hint" id="floatFundHint" style="line-height:1.5"></div></div>
+      </div>
+      <div class="hint" style="font-size:11px;margin-top:6px">Launches through Float&rsquo;s own program onto Raydium LaunchLab, with
+      a fixed 1,000,000,000 supply. The dev buy is in the <b>same transaction</b> and is paid in the pair token, not SOL &mdash; SWAP IN
+      gets you some first. Of the trading fee, Raydium keeps 0.25% and Float splits the rest: 15% to holders and 5% to the creator
+      (both in the pair token), 35% buys back $FLOAT, 35% to top traders and 10% to its treasury. Tickers are 1&ndash;10 letters or
+      digits and first-come: reusing one costs 1&nbsp;SOL, so a taken ticker is <b>refused here</b>, and the launch carries an
+      on-chain check that reverts it if someone takes the ticker while it is in flight.</div>
+    </div>
+
     <div id="raydiumRow" class="hidden">
       <div class="row">
         <div><label>PAIR AGAINST (QUOTE)</label><select id="raydiumQuoteSelect"></select></div>
