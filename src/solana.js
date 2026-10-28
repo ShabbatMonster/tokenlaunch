@@ -98,6 +98,27 @@ export const DBC_MAX_FEE_BPS = 9900;
 export const DBC_MIN_MIGRATED_FEE_BPS = 10;
 export const DBC_MAX_MIGRATED_FEE_BPS = 1000;
 
+/// Metaplex's own caps on a token metadata account, measured in UTF-8 BYTES and
+/// hardcoded in the immutable mpl-token-metadata program (so there is no setting
+/// anywhere that lifts them). An SPL launch CPIs into it, and over-long fields
+/// come back as "Name too long" / custom program error 0xb from metaqbxx…,
+/// which fails the whole launch. Pinned against the live program 2026-10-28:
+/// 32/10/200 pass, 33/11/201 do not, and 8 emoji (32 bytes) pass where 9 (36) do
+/// not. A Token-2022 base mint stores its metadata on the mint itself and has
+/// none of these caps - verified to a 200-byte name and a 400-byte URI.
+export const METAPLEX_METADATA_MAX = { name: 32, symbol: 10, uri: 200 };
+
+/// Which metadata fields a classic SPL launch could not carry, and by how much.
+export function metaplexMetadataOverflow({ name = '', symbol = '', uri = '' }) {
+  const over = [];
+  for (const [field, value] of [['name', name], ['symbol', symbol], ['uri', uri]]) {
+    const bytes = new TextEncoder().encode(value).length;
+    const max = METAPLEX_METADATA_MAX[field];
+    if (bytes > max) over.push({ field, bytes, max, chars: [...value].length });
+  }
+  return over;
+}
+
 /// The fixed post-bond options, for when one matches exactly - the program
 /// stores a cheaper enum instead of a custom fee config.
 const DBC_FIXED_MIGRATED_FEE = new Map([
@@ -128,7 +149,10 @@ function buildLaunchConfig(quoteDecimals, p) {
   const fixed = DBC_FIXED_MIGRATED_FEE.get(migratedBps);
   return buildCurve({
     token: {
-      tokenType: TokenType.SPLToken,          // base is a standard SPL mint
+      // A Token-2022 base keeps its metadata on the mint; an SPL one keeps it in
+      // a Metaplex account, whose name/symbol/uri caps are hardcoded in that
+      // program. See METAPLEX_METADATA_MAX.
+      tokenType: p.baseToken2022 ? TokenType.Token2022 : TokenType.SPLToken,
       tokenBaseDecimal: baseEnum,
       tokenQuoteDecimal: quoteEnum,
       tokenAuthorityOption: TokenAuthorityOption.Immutable, // minting + freeze disabled
@@ -423,17 +447,17 @@ export function previewMeteoraDevBuy({ quoteDecimals, params, devBuyQuote }) {
 }
 
 /// The instructions that buy from the pool being created in the same tx.
-async function buildFirstBuyIxs(client, { payer, config, baseMint, quote, quoteProgram, pool, amountIn }) {
+async function buildFirstBuyIxs(client, { payer, config, baseMint, quote, quoteProgram, pool, amountIn, baseProgram = TOKEN_PROGRAM_ID }) {
   const baseVault = deriveDbcTokenVaultAddress(pool, baseMint);
   const quoteVault = deriveDbcTokenVaultAddress(pool, quote);
   const inputTokenAccount = getAssociatedTokenAddressSync(quote, payer, true, quoteProgram);
-  const outputTokenAccount = getAssociatedTokenAddressSync(baseMint, payer, true, TOKEN_PROGRAM_ID);
+  const outputTokenAccount = getAssociatedTokenAddressSync(baseMint, payer, true, baseProgram);
 
   // idempotent: the quote account usually exists already, the base one never
   // can - its mint does not exist until the pool instruction ahead of it runs
   const pre = [
     createAssociatedTokenAccountIdempotentInstruction(payer, inputTokenAccount, payer, quote, quoteProgram),
-    createAssociatedTokenAccountIdempotentInstruction(payer, outputTokenAccount, payer, baseMint, TOKEN_PROGRAM_ID),
+    createAssociatedTokenAccountIdempotentInstruction(payer, outputTokenAccount, payer, baseMint, baseProgram),
   ];
   const post = [];
   // a SOL-quoted curve trades wrapped SOL, so wrap on the way in and close the
@@ -458,7 +482,7 @@ async function buildFirstBuyIxs(client, { payer, config, baseMint, quote, quoteP
       config, pool, inputTokenAccount, outputTokenAccount,
       baseVault, quoteVault, baseMint, quoteMint: quote,
       payer,
-      tokenBaseProgram: TOKEN_PROGRAM_ID,   // base is always a classic SPL mint
+      tokenBaseProgram: baseProgram,        // classic SPL, or Token-2022 when the config says so
       tokenQuoteProgram: quoteProgram,      // and the quote is whatever it is
       referralTokenAccount: null,
     })
@@ -535,6 +559,20 @@ export async function launchMeteora(opts) {
   const config = Keypair.generate();
   const baseMint = Keypair.generate();
   const curveConfig = configParams || (reuseConfig ? null : buildLaunchConfig(quoteDecimals, params));
+  // On a mimicked or reused config the base token program follows theirs; on our
+  // own config it is ours to pick, and picking Token-2022 is the only way past
+  // Metaplex's metadata caps.
+  const ownConfig = !reuseConfig && !configParams;
+  const baseIsT22 = ownConfig ? !!params?.baseToken2022 : baseToken2022;
+  if (!baseIsT22) {
+    const over = metaplexMetadataOverflow({ name, symbol, uri });
+    if (over.length) {
+      throw new Error(over.map((o) => `the ${o.field} is ${o.bytes} bytes and a Metaplex metadata account holds ${o.max}`).join('; ')
+        + (ownConfig
+          ? '. That cap is hardcoded in the token metadata program, so an SPL launch cannot carry it — launch the token as Token-2022 instead, which keeps its metadata on the mint and has no such cap.'
+          : '. That cap is hardcoded in the token metadata program, and this config mints a classic SPL token, so the field has to be shortened.'));
+    }
+  }
 
   // priced and funding-checked before the first signature, so a dev buy that
   // cannot work fails while nothing has been spent
@@ -564,7 +602,7 @@ export async function launchMeteora(opts) {
     const badgeKey = quoteProgram.equals(TOKEN_2022_PROGRAM_ID) ? meteoraTokenBadge(quote) : null;
     const badge = badgeKey && await connection.getAccountInfo(badgeKey) ? badgeKey : null;
     const { tx: poolTx, pool } = await buildCreatePoolTx(client, {
-      payer: actor, config: cfgKey, baseMint: baseMint.publicKey, quote, quoteProgram, name, symbol, uri, badge, baseToken2022,
+      payer: actor, config: cfgKey, baseMint: baseMint.publicKey, quote, quoteProgram, name, symbol, uri, badge, baseToken2022: baseIsT22,
     });
     addPriority(poolTx);
     poolTx.feePayer = actor;
@@ -634,7 +672,7 @@ export async function launchMeteora(opts) {
     // still be checked - and the shape is exactly what was wrong.
     const { tx: poolTx, pool: dryPool } = await buildCreatePoolTx(client, {
       payer: actor, config: config.publicKey, baseMint: baseMint.publicKey,
-      quote, quoteProgram, name, symbol, uri, badge, baseToken2022,
+      quote, quoteProgram, name, symbol, uri, badge, baseToken2022: baseIsT22,
     });
     const poolIx = poolTx.instructions.find((ix) => ix.programId.equals(DBC_PROGRAM));
 
@@ -644,6 +682,7 @@ export async function launchMeteora(opts) {
       const buyIxs = await buildFirstBuyIxs(client, {
         payer: actor, config: config.publicKey, baseMint: baseMint.publicKey,
         quote, quoteProgram, pool: dryPool, amountIn: devBuyAmount,
+        baseProgram: baseIsT22 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
       });
       const swapIx = buyIxs.find((ix) => ix.programId.equals(DBC_PROGRAM));
       firstBuyAccounts = swapIx ? swapIx.keys.map((k) => k.pubkey.toBase58()) : [];
@@ -694,7 +733,7 @@ export async function launchMeteora(opts) {
   await waitForAccount(connection, config.publicKey);
   const { tx: createPoolTx, pool } = await buildCreatePoolTx(client, {
     payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
-    quote, quoteProgram, name, symbol, uri, badge, baseToken2022,
+    quote, quoteProgram, name, symbol, uri, badge, baseToken2022: baseIsT22,
   });
 
   // appended, not sent separately: in a tx of its own the buy would sit a block
@@ -703,6 +742,7 @@ export async function launchMeteora(opts) {
     createPoolTx.add(...await buildFirstBuyIxs(client, {
       payer: payer.publicKey, config: config.publicKey, baseMint: baseMint.publicKey,
       quote, quoteProgram, pool, amountIn: devBuyAmount,
+      baseProgram: baseIsT22 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
     }));
     say('minting token, opening the curve and buying, in one transaction…');
   }
