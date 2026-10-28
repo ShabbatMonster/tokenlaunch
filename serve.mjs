@@ -11,6 +11,7 @@ import { join, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { handleAbyssProxy } from './abyssProxy.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, 'docs');
@@ -34,6 +35,8 @@ const MIME = {
 
 const server = createServer(async (req, res) => {
   try {
+    // the Abyss pad's metadata calls, which no other origin may make
+    if (await handleAbyssProxy(req, res)) return;
     let path = decodeURIComponent((req.url || '/').split('?')[0]);
     if (path === '/') path = '/index.html';
     // prevent path traversal outside docs/

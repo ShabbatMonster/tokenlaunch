@@ -573,6 +573,10 @@
       </div>
       <input type="text" id="abyssQuoteCustom" class="hidden" spellcheck="false" style="margin-top:8px"
              placeholder="pair token address (0x…) — any ERC-20 on Robinhood chain">
+      <div class="row" style="margin-top:8px">
+        <div><label style="margin-top:0">TELEGRAM (OPT.)</label><input type="text" id="abyssTelegram" spellcheck="false" placeholder="t.me/yourcoin"></div>
+        <div><label style="margin-top:0">DISCORD (OPT.)</label><input type="text" id="abyssDiscord" spellcheck="false" placeholder="discord.gg/yourcoin"></div>
+      </div>
       <div class="status" id="abyssSummary" style="font-size:11px;margin-top:8px;line-height:1.6"></div>
       <details open style="margin-top:8px">
         <summary class="hint" style="cursor:pointer">liquidity shape, pool profile, burn, ERC-404</summary>
@@ -591,14 +595,21 @@
             <option value="0">ERC-20</option>
             <option value="1">ERC-404 (tokens + NFTs)</option>
           </select></div>
-          <div style="flex:0 0 170px" id="abyssUnitWrap" class="hidden"><label style="margin-top:0">TOKENS PER NFT</label><input type="text" id="abyssUnit" value="1" spellcheck="false"></div>
+          <div style="flex:0 0 170px" id="abyssUnitWrap" class="hidden"><label style="margin-top:0">TOKENS PER NFT</label><input type="text" id="abyssUnit" value="100000" spellcheck="false"></div>
+        </div>
+        <div class="row hidden" style="margin-top:8px" id="abyssNftUriWrap">
+          <div><label style="margin-top:0">NFT BASE URI (OPT.)</label>
+            <input type="text" id="abyssNftUri" spellcheck="false" placeholder="ipfs://…/ — the NFT art; the coin's own image is set below"></div>
         </div>
         <div class="hint" style="font-size:11px;margin-top:6px">Liquidity is one-sided across price bands, so every token is sold into the
         pool on the way up and nothing is pre-sold. More positions shape the curve more finely and cost more gas. A burn share is only
-        allowed on the token&rsquo;s own fees, and sharing with holders needs dividends or staking selected above.</div>
+        allowed on the token&rsquo;s own fees, and sharing with holders needs dividends or staking selected above. An ERC-404 collection
+        is capped at 10,000 NFTs, so the tokens per NFT has to be at least a ten-thousandth of the supply.</div>
       </details>
       <div class="hint" style="font-size:11px;margin-top:6px">Launches through Abyss&rsquo;s own launchpad (Black Market) in one transaction,
-      using their SDK. The opening market cap is priced in the pair token, and the supply comes from the field above.</div>
+      using their SDK. The opening market cap is priced in the pair token, and the supply comes from the field above. Only the name and
+      ticker live on chain &mdash; the image, description and links are signed over to Abyss&rsquo;s own metadata API, which answers
+      browser calls from abyss.trading only, so they are attached through this site&rsquo;s local server (<code>node serve.mjs</code>).</div>
     </div>
 
     <!-- Pons v2: pair token + dev buy -->
