@@ -7094,7 +7094,9 @@ function updateSolQuoteUI(pad) {
     ? 'any SPL or Token-2022 mint (metadata-only extensions)'
     : `token pooled against ${q.symbol} · threshold in ${q.symbol}`;
   // the dev buy is funded in the quote, not in SOL - on a USDC-quoted curve a
-  // box labelled SOL would be asking for the wrong number entirely
+  // box labelled SOL would be asking for the wrong number entirely. A pasted
+  // mint reads as QUOTE until its own ticker has been read off the mint.
+  solCustomSymbol = null;
   $('solDevSym').textContent = custom ? 'QUOTE' : q.symbol;
 
   // Nothing to swap into when the curve is already quoted in SOL - the wallet
@@ -7110,6 +7112,8 @@ function updateSolQuoteUI(pad) {
 // curve trade actually spend. A wallet full of SOL buys nothing on a USDC-quoted
 // launch, and that is not obvious from the SOL balance in the header.
 let solHoldingsSeq = 0;
+/// A pasted quote's own ticker, once it has been read off the mint.
+let solCustomSymbol = null;
 async function refreshSolQuoteHoldings(pad) {
   const hint = $('solFundHint');
   if (!solKeyB58) { hint.textContent = 'no SOL key loaded'; return; }
@@ -7119,7 +7123,14 @@ async function refreshSolQuoteHoldings(pad) {
     const { quoteHoldings } = await import('./solana.js');
     const h = await quoteHoldings({ rpcUrl: pad.rpc, owner: solPubkeyFromSecret(solKeyB58), quoteMint });
     if (seq !== solHoldingsSeq) return;
-    const sym = pad.quoteSel === 'CUSTOM' ? 'of the quote' : SOL_QUOTES[pad.quoteSel].symbol;
+    // a pasted mint carries its own ticker; use it so the dev buy and the swap
+    // are labelled in what they spend rather than in the word QUOTE
+    if (pad.quoteSel === 'CUSTOM' && h.symbol) {
+      solCustomSymbol = h.symbol;
+      $('solDevSym').textContent = h.symbol;
+      $('solFundSym').textContent = h.symbol;
+    }
+    const sym = pad.quoteSel === 'CUSTOM' ? (h.symbol || 'of the quote') : SOL_QUOTES[pad.quoteSel].symbol;
     hint.innerHTML = `wallet holds <b>${h.ui.toLocaleString(undefined, { maximumFractionDigits: 6 })}</b> ${esc(sym)}`
       + (h.ui > 0 ? '' : ' — the dev buy and every curve trade are funded in it, not in SOL');
   } catch (e) {
@@ -7139,7 +7150,7 @@ async function previewSolFund(pad) {
     const { previewSwapIntoQuote } = await import('./solana.js');
     const p = await previewSwapIntoQuote({ rpcUrl: pad.rpc, quoteMint, uiSol: amt });
     if (seq !== solFundPreviewSeq || !p) return;
-    const sym = pad.quoteSel === 'CUSTOM' ? '' : ' ' + SOL_QUOTES[pad.quoteSel].symbol;
+    const sym = pad.quoteSel === 'CUSTOM' ? (solCustomSymbol ? ' ' + solCustomSymbol : '') : ' ' + SOL_QUOTES[pad.quoteSel].symbol;
     hint.innerHTML = `≈ <b>${p.out.toLocaleString(undefined, { maximumFractionDigits: 6 })}</b>${esc(sym)} `
       + `via ${esc(p.route.join(' → '))}`;
   } catch (e) {
@@ -7160,7 +7171,7 @@ async function doSolFund(pad, btn) {
       rpcUrl: pad.rpc, secretKey: solKeyB58, quoteMint, uiSol: amt,
       onStatus: (m) => { hint.textContent = m; },
     });
-    const sym = pad.quoteSel === 'CUSTOM' ? '' : ' ' + SOL_QUOTES[pad.quoteSel].symbol;
+    const sym = pad.quoteSel === 'CUSTOM' ? (solCustomSymbol ? ' ' + solCustomSymbol : '') : ' ' + SOL_QUOTES[pad.quoteSel].symbol;
     hint.innerHTML = `<span style="color:var(--accent)">SWAPPED ✓</span> `
       + `${r.received.toLocaleString(undefined, { maximumFractionDigits: 6 })}${esc(sym)} · `
       + `<a href="${pad.explorer}/tx/${r.sig}" target="_blank" rel="noopener">tx</a>`;
