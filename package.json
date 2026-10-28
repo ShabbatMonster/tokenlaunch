@@ -7,6 +7,7 @@
     "dev": "node build.mjs --dev"
   },
   "dependencies": {
+    "@black-market/sdk": "^0.13.0",
     "@bordrless/sdk": "^0.14.0",
     "@bordrless/shared": "^0.14.0",
     "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.10",

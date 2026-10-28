@@ -553,6 +553,52 @@
       <div class="hint" id="flapHint" style="font-size:11px;margin-top:4px">tax token · address mined to end in 7777 · buy/sell tax splits per mode</div>
     </div>
 
+    <div id="abyssRow" class="hidden">
+      <div class="row">
+        <div><label>PAIR AGAINST</label><select id="abyssQuote"></select></div>
+        <div><label>OPENS AT (<span id="abyssCapSym">ETH</span> market cap)</label>
+          <input type="text" id="abyssCap" value="10" spellcheck="false"></div>
+        <div style="flex:0 0 140px"><label>DEV BUY (<span id="abyssDevSym">ETH</span>)</label>
+          <input type="text" id="abyssDevBuy" value="0" spellcheck="false"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label style="margin-top:0">TRADING FEE</label><select id="abyssFee"></select></div>
+        <div><label style="margin-top:0">FEES GO TO</label><select id="abyssRewardMode">
+          <option value="0">all to me</option>
+          <option value="2">share with holders &middot; dividends</option>
+          <option value="1">share with holders &middot; staking</option>
+        </select></div>
+        <div style="flex:0 0 150px" id="abyssShareWrap" class="hidden"><label style="margin-top:0">HOLDERS&rsquo; SHARE (%)</label>
+          <input type="text" id="abyssShare" value="75" spellcheck="false"></div>
+      </div>
+      <div class="status" id="abyssSummary" style="font-size:11px;margin-top:8px;line-height:1.6"></div>
+      <details open style="margin-top:8px">
+        <summary class="hint" style="cursor:pointer">liquidity shape, pool profile, burn, ERC-404</summary>
+        <div class="row" style="margin-top:8px">
+          <div><label style="margin-top:0">LIQUIDITY SHAPE</label><select id="abyssPreset">
+            <option value="staircase">staircase</option>
+            <option value="early-scarcity">early scarcity</option>
+            <option value="smooth-ramp">smooth ramp</option>
+          </select></div>
+          <div style="flex:0 0 130px"><label style="margin-top:0">POSITIONS</label><input type="text" id="abyssPositions" value="6" spellcheck="false"></div>
+          <div><label style="margin-top:0">POOL PROFILE</label><select id="abyssProfile"></select></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <div style="flex:0 0 160px"><label style="margin-top:0">BURN OF TOKEN FEES (%)</label><input type="text" id="abyssBurn" value="0" spellcheck="false"></div>
+          <div><label style="margin-top:0">TOKEN TYPE</label><select id="abyssKind">
+            <option value="0">ERC-20</option>
+            <option value="1">ERC-404 (tokens + NFTs)</option>
+          </select></div>
+          <div style="flex:0 0 170px" id="abyssUnitWrap" class="hidden"><label style="margin-top:0">TOKENS PER NFT</label><input type="text" id="abyssUnit" value="1" spellcheck="false"></div>
+        </div>
+        <div class="hint" style="font-size:11px;margin-top:6px">Liquidity is one-sided across price bands, so every token is sold into the
+        pool on the way up and nothing is pre-sold. More positions shape the curve more finely and cost more gas. A burn share is only
+        allowed on the token&rsquo;s own fees, and sharing with holders needs dividends or staking selected above.</div>
+      </details>
+      <div class="hint" style="font-size:11px;margin-top:6px">Launches through Abyss&rsquo;s own launchpad (Black Market) in one transaction,
+      using their SDK. The opening market cap is priced in the pair token, and the supply comes from the field above.</div>
+    </div>
+
     <!-- Pons v2: pair token + dev buy -->
     <div id="lunchRow" class="hidden">
       <div class="row">

@@ -979,6 +979,19 @@ const PADS = [
     quotes: PONS_V2_PAIRS,
   },
   {
+    // Abyss / Black Market - abyss.trading's own launchpad on Robinhood chain,
+    // driven by their SDK (@black-market/sdk). One launchAtomic call mints the
+    // supply and opens a one-sided concentrated-liquidity ladder, so nothing is
+    // pre-sold. See src/abyssLaunch.js; the DEX side is in src/swap.js.
+    id: 'abyss-robinhood', label: 'Abyss · Black Market', vm: 'evm', enabled: true, family: 'abyss',
+    chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    factory: '0x91560876033d568d25CDe98C78c33ff8FC43962c',   // LaunchOrchestratorV1
+    startBlock: 96124965n,
+    explorer: 'https://robinhoodchain.blockscout.com',
+    site: (t) => `https://app.abyss.trading/token/${t}`,
+    nativeSymbol: 'ETH', curve: null, customSupply: true,
+  },
+  {
     // Genius.fun — Pons v2 on BNB Chain (DefiLlama's adapter calls it exactly
     // that), so the same launchToken/launchAndBuy ABI drives it. Verified live
     // 2026-10-26 by simulating against the m4.2 factory from the manifest at
@@ -1757,6 +1770,131 @@ async function launchB20(pad, { name, symbol, logo, description, twitter, websit
 }
 
 // ---------------------------------------------------------------------------
+// Abyss / Black Market (abyss.trading) on Robinhood chain
+//
+// Their SDK owns the curve geometry, so this only turns the form into its
+// inputs and sends the single transaction it builds. src/abyssLaunch.js has the
+// rules the orchestrator enforces and why.
+// ---------------------------------------------------------------------------
+let abyssMod = null;
+const loadAbyss = async () => (abyssMod ??= await import('./abyssLaunch.js'));
+
+async function updateAbyssUI(pad) {
+  const M = await loadAbyss();
+  const qs = $('abyssQuote');
+  if (qs.dataset.padId !== pad.id) {
+    qs.innerHTML = M.abyssQuotes().map((q) => `<option value="${esc(q.symbol)}">${esc(q.symbol)}</option>`).join('');
+    $('abyssFee').innerHTML = M.ABYSS_FEE_TIER_LIST.map((t) => `<option value="${t.feePips}"${t.feePips === 20000 ? ' selected' : ''}>${esc(t.label)}</option>`).join('');
+    $('abyssProfile').innerHTML = M.ABYSS_PROFILES.map((p) => `<option value="${esc(p.key)}">${esc(p.label)} — ${esc(p.note)}</option>`).join('');
+    qs.dataset.padId = pad.id;
+  }
+  const quote = M.abyssQuotes().find((q) => q.symbol === qs.value) || M.abyssQuotes()[0];
+  $('abyssCapSym').textContent = quote.symbol;
+  $('abyssDevSym').textContent = quote.symbol;
+  $('abyssShareWrap').classList.toggle('hidden', $('abyssRewardMode').value === '0');
+  $('abyssUnitWrap').classList.toggle('hidden', $('abyssKind').value !== '1');
+  paintAbyssSummary(pad).catch(() => {});
+}
+
+/// What the launch will open at, worked out by the SDK rather than guessed.
+async function paintAbyssSummary(pad) {
+  const el = $('abyssSummary');
+  if (!el) return;
+  try {
+    const M = await loadAbyss();
+    const f = abyssForm(await loadAbyss(), pad);
+    const { tier, recipe, ranges } = M.abyssGeometry(f);
+    const supplyWhole = Number(f.supply) / 1e18;
+    const capWhole = Number(f.openingValuationQuote) / 10 ** f.quoteDecimals;
+    const price = capWhole / supplyWhole;
+    const bands = ranges.positions.length;
+    el.innerHTML = `opens at <b>${capWhole.toLocaleString()} ${esc(f.quote.symbol)}</b> for the whole supply`
+      + ` — ${price.toPrecision(3)} ${esc(f.quote.symbol)} per token`
+      + `<div>${esc(tier.label)} trading fee · ${bands} liquidity band${bands === 1 ? '' : 's'} from tick ${recipe.launchTick}`
+      + ` · ${(Number(ranges.tokenAmountMaximum) / 1e18).toLocaleString()} tokens into the pool</div>`
+      + (f.rewardsBps ? `<div>holders get ${f.rewardsBps / 100}% of the fees${f.burnBps ? `, ${f.burnBps / 100}% of token fees burnt` : ''}</div>`
+        : f.burnBps ? `<div>${f.burnBps / 100}% of the token's fees burnt</div>` : '');
+  } catch (e) {
+    el.innerHTML = `<span class="err">${esc((e.message || String(e)).split('\n')[0])}</span>`;
+  }
+}
+
+/// The form, as the SDK's inputs.
+function abyssForm(M, pad) {
+  const num = (id, name) => {
+    const v = Number(($(id).value || '').replace(/,/g, ''));
+    if (!Number.isFinite(v) || v < 0) throw new Error(`${name} must be a number`);
+    return v;
+  };
+  const quote = M.abyssQuotes().find((q) => q.symbol === $('abyssQuote').value) || M.abyssQuotes()[0];
+  const supplyWhole = num('supply', 'total supply');
+  if (!(supplyWhole > 0)) throw new Error('set a total supply');
+  const cap = num('abyssCap', 'opening market cap');
+  if (!(cap > 0)) throw new Error('set the market cap it should open at');
+  const positions = Math.round(num('abyssPositions', 'positions'));
+  const rewardMode = Number($('abyssRewardMode').value);
+  const sharePct = rewardMode === 0 ? 0 : num('abyssShare', "holders' share");
+  const burnPct = num('abyssBurn', 'burn share');
+  const kind = Number($('abyssKind').value);
+  return {
+    // the summary is pure geometry, so it works before a wallet is loaded
+    creator: account?.address || ZERO_ADDR, name: $('name').value.trim(), symbol: $('symbol').value.trim(),
+    supply: parseUnits(String(supplyWhole), 18),
+    quote, quoteDecimals: quote.decimals,
+    openingValuationQuote: parseUnits(String(cap), quote.decimals),
+    feePips: Number($('abyssFee').value),
+    positions, preset: $('abyssPreset').value, profileKey: $('abyssProfile').value,
+    rewardMode, rewardsBps: Math.round(sharePct * 100), burnBps: Math.round(burnPct * 100),
+    tokenKind: kind,
+    nftUnit: kind === 1 ? parseUnits(String(num('abyssUnit', 'tokens per NFT') || 1), 18) : 0n,
+    devBuyRaw: parseUnits(String(num('abyssDevBuy', 'dev buy') || 0), quote.decimals),
+  };
+}
+
+async function launchAbyss(pad, inp) {
+  const M = await loadAbyss();
+  const { createProtocolPublicClient } = await import('@black-market/sdk');
+  const f = abyssForm(M, pad);
+  if (!account?.address) throw new Error('connect a wallet first');
+  if (!f.name || !f.symbol) throw new Error('name and ticker are required');
+
+  setStatus('uploading metadata...');
+  const metadataURI = await uploadJsonToIpfs({
+    name: inp.name, symbol: inp.symbol, description: inp.description, image: inp.logo,
+    ...((inp.twitter || inp.website) ? { extensions: { twitter: inp.twitter, website: inp.website } } : {}),
+  });
+
+  const client = createProtocolPublicClient({ chainId: M.ABYSS_CHAIN_ID });
+  setStatus('pricing the curve and building the launch...');
+  const built = await M.abyssPlan(client, { ...f, metadataURI });
+
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+  const pub = publicClientFor(pad);
+  const value = BigInt(built.tx.value ?? 0n);
+  const bal = await pub.getBalance({ address: account.address });
+  if (bal < value) throw new Error(`insufficient ETH: need ${formatEther(value)}+gas, have ${formatEther(bal)}`);
+
+  setStatus('simulating the launch...');
+  await pub.call({ account: account.address, to: built.tx.to, data: built.tx.data, value }).catch((e) => {
+    throw new Error('Abyss simulation failed: ' + (e.shortMessage || e.message || '').split('\n')[0]);
+  });
+
+  setStatus('sending launch tx...');
+  const hash = await wallet.sendTransaction({ to: built.tx.to, data: built.tx.data, value });
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
+  const rcpt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (rcpt.status !== 'success') throw new Error('Abyss launch reverted: ' + hash);
+
+  rememberLaunch(pad, built.token, inp.symbol);
+  const capWhole = Number(f.openingValuationQuote) / 10 ** f.quoteDecimals;
+  $('status').innerHTML = `<span style="color:var(--accent)">LAUNCHED ✓</span> ${built.token}<br>`
+    + `opened at ${capWhole.toLocaleString()} ${esc(f.quote.symbol)} · ${esc(built.tier.label)} fee · ${built.ranges.positions.length} bands<br>`
+    + `<a href="${pad.site(built.token)}" target="_blank" rel="noopener">on Abyss</a>`
+    + ` · <a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx</a>`;
+  return { token: built.token, hash };
+}
+
+// ---------------------------------------------------------------------------
 // flap.sh — Portal.newTokenV6 tax token (dividends / burn / stock pairings)
 // ---------------------------------------------------------------------------
 // See memory flap-sh-mechanism. Token addr must end in 7777 (vanity) — mined
@@ -2305,6 +2443,13 @@ async function launch() {
 
   if (pad.family === 'v4curve') {
     await launchV4Curve(pad, { name, symbol, logo, description, twitter, website });
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
+  if (pad.family === 'abyss') {
+    await launchAbyss(pad, { name, symbol, logo, description, twitter, website });
     refreshBalance();
     renderTokenList();
     return;
@@ -5748,6 +5893,9 @@ function applyPadUI(pad) {
   const dyor = pad.family === 'dyorswap';
   const b20 = pad.family === 'b20';
   const flap = pad.family === 'flap';
+  const abyss = pad.family === 'abyss';
+  $('abyssRow').classList.toggle('hidden', !abyss);
+  if (abyss) updateAbyssUI(pad).catch(() => {});
   const ponsV2 = pad.family === 'pons-v2';
   const v4curve = pad.family === 'v4curve';
   const long = pad.family === 'long';
@@ -7302,6 +7450,12 @@ function init() {
     for (const id of ['solDevBuy', 'solSupply', 'solFeeBps', 'solMigThreshold', 'solMigPct']) {
       $(id).addEventListener('input', reprice);
     }
+  }
+  for (const id of ['abyssQuote', 'abyssFee', 'abyssRewardMode', 'abyssKind', 'abyssPreset', 'abyssProfile']) {
+    $(id).addEventListener('change', () => { if (activePad.family === 'abyss') updateAbyssUI(activePad); });
+  }
+  for (const id of ['abyssCap', 'abyssShare', 'abyssBurn', 'abyssPositions', 'supply']) {
+    $(id).addEventListener('input', () => { if (activePad.family === 'abyss') paintAbyssSummary(activePad).catch(() => {}); });
   }
   $('raydiumQuoteSelect').addEventListener('change', () => { if (activePad.family === 'raydium') updateRaydiumUI(activePad); });
   $('raydiumScanBtn').addEventListener('click', () => { if (activePad.family === 'raydium') raydiumScanConfigs(activePad); });
