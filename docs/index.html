@@ -373,6 +373,56 @@
       yet and it will sit there returning <code>UnsupportedQuoteMint</code> until they do.</div>
     </div>
 
+    <!-- Bags (bags.fm): DBC launches built and co-signed by Bags' API, with its
+         fee modes and fee sharing. See src/bags.js. -->
+    <div id="bagsRow" class="hidden">
+      <div class="row">
+        <div><label>BAGS API KEY</label><input type="password" id="bagsApiKey" spellcheck="false" autocomplete="off"
+          placeholder="paste a key from dev.bags.fm — or get one with your wallet"></div>
+        <div style="flex:0 0 auto"><label>&nbsp;</label>
+          <button class="btn secondary" id="bagsLoginBtn" style="margin-top:0">GET KEY WITH MY WALLET</button></div>
+        <div style="flex:0 0 120px" id="bagsMfaWrap" class="hidden"><label>MFA CODE</label>
+          <input type="text" id="bagsMfa" spellcheck="false" inputmode="numeric" placeholder="123456"></div>
+      </div>
+      <div class="hint" id="bagsKeyHint" style="font-size:11px;margin-top:4px"></div>
+      <div class="row" style="margin-top:8px">
+        <div><label style="margin-top:0">PAIR AGAINST</label><select id="bagsQuote"><option value="">SOL</option></select></div>
+        <div><label style="margin-top:0">FEE MODE</label><select id="bagsMode"></select></div>
+        <div style="flex:0 0 150px"><label style="margin-top:0">DEV BUY (<span id="bagsDevSym">SOL</span>, OPT.)</label>
+          <input type="text" id="bagsDevBuy" value="0" spellcheck="false"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div style="flex:0 0 260px"><label style="margin-top:0">CREATOR FEES GO TO</label><select id="bagsFeesTo">
+          <option value="split">wallets &amp; social handles</option>
+          <option value="payout">cash — X Money / Cash App / Venmo</option>
+        </select></div>
+        <div id="bagsPayoutWrap" class="hidden" style="flex:0 0 140px"><label style="margin-top:0">PAID BY</label><select id="bagsPayoutMethod">
+          <option value="xmoney">X Money</option>
+          <option value="cashapp">Cash App</option>
+          <option value="venmo">Venmo</option>
+        </select></div>
+        <div id="bagsPayoutHandleWrap" class="hidden"><label style="margin-top:0">TO HANDLE</label>
+          <input type="text" id="bagsPayoutHandle" spellcheck="false" placeholder="@yourhandle"></div>
+      </div>
+      <div id="bagsClaimersWrap">
+        <label style="margin-top:8px">SHARE WITH (OPT.) <span class="hint">one per line: <b>@xhandle 30</b> · <b>github:name 20</b> · <b>wallet 10</b> — you keep the rest</span></label>
+        <textarea id="bagsClaimers" spellcheck="false" rows="3" placeholder="@friend 25&#10;tiktok:someone 10"></textarea>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label style="margin-top:0">FEE-SHARE MANAGER (OPT.)</label>
+          <input type="text" id="bagsAdmin" spellcheck="false" placeholder="your wallet (default) — can change the split later"></div>
+        <div><label style="margin-top:0">PARTNER WALLET (OPT.)</label>
+          <input type="text" id="bagsPartner" spellcheck="false" placeholder="a Bags partner key's wallet"></div>
+      </div>
+      <div class="status" id="bagsSummary" style="font-size:11px;margin-top:8px;line-height:1.6"></div>
+      <div class="hint hidden" id="bagsResume" style="font-size:11px;margin-top:6px"></div>
+      <div class="hint" style="font-size:11px;margin-top:6px">Bags builds and co-signs every launch — its creation authority and the
+      <code>…BAGS</code> mint it holds sign alongside you — so this goes through Bags&rsquo; API with your key. GET KEY signs Bags&rsquo;
+      plain-text wallet check (no transaction, no fee) to mint one. Before anything Bags hands back is signed, it is simulated and
+      refused if it would take more SOL than the launch should. Of every trade fee half goes to Bags and half to the creator pool;
+      whoever pays for the config (you) takes 25% of that pool as deployer, and the recipients above split the rest.</div>
+    </div>
+
     <!-- Float (floatlaunch.xyz): LaunchLab coins paired with tokenised stocks,
          through Float's own program. See src/float.js. -->
     <div id="floatRow" class="hidden">

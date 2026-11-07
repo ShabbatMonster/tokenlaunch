@@ -1204,6 +1204,17 @@ const PADS = [
     nativeSymbol: 'SOL',
   },
   {
+    // Bags (bags.fm): Meteora DBC launches built and co-signed by Bags' API -
+    // its seven fee modes, fee sharing with up to 100 wallets or social
+    // handles, cash payouts, partner keys, and custom (stock) quotes. Needs a
+    // Bags API key, which the wallet can mint. See src/bags.js.
+    id: 'bags-sol', label: 'Bags · fee sharing', vm: 'sol', enabled: true, family: 'bags',
+    rpc: SOL_RPC,
+    explorer: 'https://solscan.io',
+    site: (t) => `https://bags.fm/${t}`,
+    nativeSymbol: 'SOL',
+  },
+  {
     id: 'mimic-sol', label: 'Mimic · Solana', vm: 'sol', enabled: true, family: 'solmimic',
     rpc: SOL_RPC,
     explorer: 'https://solscan.io',
@@ -3560,6 +3571,176 @@ function raydiumQuoteMint(pad) {
   return q.mint;
 }
 
+// --- Bags --------------------------------------------------------------------
+// Launches built and co-signed by Bags' API (src/bags.js). The API key is the
+// user's own: pasted, or minted by signing Bags' wallet check, and kept in this
+// browser per wallet - never in the code, never sent anywhere but Bags.
+const loadBags = () => import('./bags.js');
+const BAGS_KEYS = 'bags.apikey.v1';            // { [wallet]: apiKey }
+const BAGS_PENDING = 'bags.pending.v1';        // an interrupted launch, to finish rather than repeat
+const bagsWallet = () => (solKeyB58 ? solPubkeyFromSecret(solKeyB58) : null);
+const readJson = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || 'null') ?? d; } catch { return d; } };
+const bagsKey = () => ($('bagsApiKey').value || '').trim() || readJson(BAGS_KEYS, {})[bagsWallet()] || '';
+function saveBagsKey(key) {
+  const all = readJson(BAGS_KEYS, {});
+  const w = bagsWallet();
+  if (!w) return;
+  if (key) all[w] = key; else delete all[w];
+  try { localStorage.setItem(BAGS_KEYS, JSON.stringify(all)); } catch { /* private mode: the field still holds it */ }
+}
+let bagsQuoteList = [];                         // Bags' approved custom quotes, once the key can read them
+let bagsAuthCode = null;                        // set while an MFA step is pending
+
+async function updateBagsUI(pad) {
+  const M = await loadBags();
+  const key = bagsKey();
+  if (key && !$('bagsApiKey').value) $('bagsApiKey').value = key;
+  if (!$('bagsMode').options.length) paintBagsModes(M);
+  const payout = $('bagsFeesTo').value === 'payout';
+  $('bagsPayoutWrap').classList.toggle('hidden', !payout);
+  $('bagsPayoutHandleWrap').classList.toggle('hidden', !payout);
+  $('bagsClaimersWrap').classList.toggle('hidden', payout);
+  $('bagsPayoutHandle').placeholder = { xmoney: '@yourhandle', cashapp: '$cashtag', venmo: 'venmo-username' }[$('bagsPayoutMethod').value];
+  const q = bagsSelectedQuote();
+  $('bagsDevSym').textContent = q ? (q.symbol || 'QUOTE') : 'SOL';
+  paintBagsResume(pad);
+  paintBagsSummary(M);
+  if (key && !bagsQuoteList.length) loadBagsQuotes(pad).catch(() => {});
+  if (!key) $('bagsKeyHint').textContent = 'Every Bags call needs a key. GET KEY signs Bags\' wallet check with your SOL key — no transaction, no fee.';
+}
+
+const bagsSelectedQuote = () => bagsQuoteList.find((q) => q.mint === $('bagsQuote').value) || null;
+
+/// The fee modes, limited to what Bags configured for the chosen quote.
+function paintBagsModes(M) {
+  const q = bagsSelectedQuote();
+  const keep = $('bagsMode').value;
+  const modes = q ? M.BAGS_FEE_MODES.filter((m) => !m.solOnly && q.configs.some((c) => c.id === m.id)) : M.BAGS_FEE_MODES;
+  $('bagsMode').innerHTML = modes.map((m) => `<option value="${m.id}">${esc(m.label)}</option>`).join('');
+  if (modes.some((m) => m.id === keep)) $('bagsMode').value = keep;
+}
+
+async function loadBagsQuotes(pad) {
+  const M = await loadBags();
+  const { Connection } = await import('@solana/web3.js');
+  bagsQuoteList = await M.bagsQuotes(bagsKey(), { connection: new Connection(pad.rpc, 'confirmed') });
+  const sel = $('bagsQuote');
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">SOL</option>' + bagsQuoteList.map((q) =>
+    `<option value="${q.mint}"${q.available ? '' : ' disabled'}>${esc(q.symbol || q.mint.slice(0, 6))}${q.available ? '' : ' (unavailable)'}</option>`).join('');
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  $('bagsKeyHint').textContent = `key works · ${bagsQuoteList.filter((q) => q.available).length} custom quotes Bags has approved`;
+}
+
+/// What a trade fee pays, by party, for the chosen mode and split.
+function paintBagsSummary(M) {
+  const el = $('bagsSummary');
+  const mode = M.bagsFeeMode($('bagsMode').value);
+  if (!mode) { el.textContent = ''; return; }
+  const q = bagsSelectedQuote();
+  const pct = (bps) => `${+(bps / 100).toFixed(4)}%`;
+  const b = M.bagsFeeBreakdown(mode, { custom: !!q });
+  const stage = (s, name) => `${name} <b>${pct(s.total)}</b>: Bags ${pct(s.bags)} · you as deployer ${pct(s.deployer)}`
+    + ` · recipients ${pct(s.recipients)}${s.compounding ? ` · ${pct(s.compounding)} back into liquidity` : ''}`;
+  let who;
+  if ($('bagsFeesTo').value === 'payout') {
+    const meth = M.BAGS_PAYOUT_METHODS[$('bagsPayoutMethod').value];
+    who = `recipients' share paid as cash to <b>${esc(meth.label)} ${esc($('bagsPayoutHandle').value.trim() || '…')}</b> (Bags claims it at 0.25 SOL, lists it at a 10% discount)`;
+  } else {
+    let lines = [];
+    try { lines = M.parseBagsClaimers($('bagsClaimers').value); } catch (e) { el.innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+    const shared = lines.reduce((s, c) => s + c.bps, 0);
+    who = shared > 10000 ? `<span class="err">the shares add up to ${shared / 100}%</span>`
+      : `recipients: you ${(10000 - shared) / 100}%${lines.map((c) => ` · ${esc(c.kind === 'wallet' ? c.wallet.slice(0, 6) + '…' : (c.provider === 'twitter' ? '@' : c.provider + ':') + c.username)} ${c.bps / 100}%`).join('')}`;
+  }
+  const grad = q ? (() => {
+    const c = q.configs.find((x) => x.id === mode.id);
+    return c ? `graduates at ${(Number(c.graduationThresholdRaw) / 10 ** (q.decimals ?? 0)).toLocaleString()} ${esc(q.symbol || '')}` : '';
+  })() : `graduates at ~${mode.gradSol} SOL`;
+  el.innerHTML = `<div>${stage(b.pre, 'on the curve')}</div><div>${stage(b.post, 'after graduation')}${mode.postFloor ? `, falling to ${pct(mode.postFloor)} as the market cap grows` : ''}</div>`
+    + `<div>${grad}${mode.supply ? ` · ${mode.supply.toLocaleString()} supply` : ''}${mode.locked ? ` · ${mode.locked}% of supply locked` : ''}</div><div>${who}</div>`;
+}
+
+function paintBagsResume(pad) {
+  const p = readJson(BAGS_PENDING, null);
+  const el = $('bagsResume');
+  const mine = p && p.wallet === bagsWallet() && !p.launched;
+  el.classList.toggle('hidden', !mine);
+  if (mine) {
+    el.innerHTML = `An earlier launch of <b>${esc(p.symbol)}</b> stopped after Bags made its mint <code>${esc(p.tokenMint.slice(0, 8))}…</code>`
+      + `${p.configKey ? ' and fee-share config' : ''}. LAUNCH with the same name and ticker finishes it instead of making a second coin.`
+      + ` <a href="#" id="bagsResumeClear">start over</a>`;
+    $('bagsResumeClear').onclick = (e) => { e.preventDefault(); localStorage.removeItem(BAGS_PENDING); paintBagsResume(pad); };
+  }
+}
+
+async function bagsLoginClick(pad) {
+  const btn = $('bagsLoginBtn');
+  const hint = $('bagsKeyHint');
+  if (!solKeyB58) { hint.textContent = 'load a SOL key first — its wallet is what signs in to Bags'; return; }
+  btn.disabled = true;
+  try {
+    const M = await loadBags();
+    const r = bagsAuthCode
+      ? await M.bagsLogin(null, { authCode: bagsAuthCode, mfaCode: $('bagsMfa').value.trim() })
+      : await M.bagsLogin(solKeyB58);
+    if (r.mfaRequired) {
+      bagsAuthCode = r.authCode;
+      $('bagsMfaWrap').classList.remove('hidden');
+      hint.textContent = 'your Bags account has MFA on — enter the code and press GET KEY again';
+      return;
+    }
+    bagsAuthCode = null;
+    $('bagsMfaWrap').classList.add('hidden');
+    $('bagsApiKey').value = r.apiKey;
+    saveBagsKey(r.apiKey);
+    hint.textContent = 'key minted and saved in this browser';
+    bagsQuoteList = [];
+    await loadBagsQuotes(pad).catch((e) => { hint.textContent = 'key saved, but the quote list did not load: ' + e.message; });
+  } catch (e) {
+    hint.innerHTML = `<span class="err">${esc(e.message || String(e))}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function launchBagsPad(pad, inp) {
+  const M = await loadBags();
+  const apiKey = bagsKey();
+  if (!apiKey) throw new Error('add a Bags API key, or press GET KEY WITH MY WALLET');
+  if (!logoBlob) throw new Error('add an image first');
+  const payout = $('bagsFeesTo').value === 'payout'
+    ? { method: $('bagsPayoutMethod').value, username: $('bagsPayoutHandle').value.trim() } : null;
+  const pending = readJson(BAGS_PENDING, null);
+  const wallet = bagsWallet();
+  // only the same launch is resumed: same wallet, name and ticker, not finished
+  const bagsPending = pending && pending.wallet === wallet && pending.name === inp.name
+    && pending.symbol === inp.symbol && !pending.launched ? pending : null;
+  if (bagsPending) setStatus(`resuming the launch of ${bagsPending.tokenMint}…`);
+  const res = await M.launchBags({
+    apiKey, rpcUrl: pad.rpc, secretKey: solKeyB58,
+    name: inp.name, symbol: inp.symbol, description: inp.description, image: logoBlob,
+    twitter: inp.twitter, website: inp.website,
+    mode: $('bagsMode').value, quote: bagsSelectedQuote(), devBuy: $('bagsDevBuy').value.trim() || '0',
+    claimers: payout ? [] : M.parseBagsClaimers($('bagsClaimers').value), payout,
+    admin: $('bagsAdmin').value.trim() || null, partner: $('bagsPartner').value.trim() || null,
+    resume: bagsPending,
+    onProgress: (st) => { try { localStorage.setItem(BAGS_PENDING, JSON.stringify(st)); } catch { /* best effort */ } },
+    onStatus: (m) => setStatus(m),
+  });
+  saveBagsKey(apiKey);
+  localStorage.removeItem(BAGS_PENDING);
+  rememberLaunch(pad, res.mint, inp.symbol);
+  const q = bagsSelectedQuote();
+  $('status').innerHTML = `<span style="color:var(--accent)">LAUNCHED ✓</span> ${res.mint}<br>`
+    + `${esc(res.feeMode.label)}${q ? ` · paired with ${esc(q.symbol || 'its quote')}` : ''}`
+    + ` · fees to ${payout ? esc(M.BAGS_PAYOUT_METHODS[payout.method].label + ' ' + payout.username) : `${res.split.claimersArray.length} recipient${res.split.claimersArray.length === 1 ? '' : 's'}`}<br>`
+    + `<a href="${res.url}" target="_blank" rel="noopener">on bags.fm</a>`
+    + ` · <a href="${pad.explorer}/tx/${res.sigs.at(-1)}" target="_blank" rel="noopener">launch tx</a>`;
+  refreshBalance();
+  renderTokenList();
+}
+
 // --- Float -------------------------------------------------------------------
 // Coins paired with tokenised stocks, through Float's own program. The ticker is
 // checked as it is typed: a taken one costs 1 SOL to reuse on Float, and this pad
@@ -3714,6 +3895,11 @@ async function launchSol(pad, inp) {
   // Jupiter Studio uploads the image and writes the metadata itself
   if (pad.family === 'jupstudio') {
     await launchJupStudio(pad, inp);
+    return;
+  }
+  // so does Bags, which also picks the mint
+  if (pad.family === 'bags') {
+    await launchBagsPad(pad, inp);
     return;
   }
 
@@ -6255,6 +6441,8 @@ function applyPadUI(pad) {
   if (meteora) paintSolTokenStd();
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
   $('floatRow').classList.toggle('hidden', pad.family !== 'float');  // Float: stock pair, fee tier, ticker
+  $('bagsRow').classList.toggle('hidden', pad.family !== 'bags');    // Bags: key, fee mode, fee sharing
+  if (pad.family === 'bags') updateBagsUI(pad);
   if (pad.family === 'float') updateFloatUI(pad);
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
   if (pump) paintPumpDevSym();
@@ -7969,6 +8157,13 @@ function init() {
   $('symbol').addEventListener('input', () => { if (activePad.family === 'float') checkFloatTicker(activePad); });
   $('floatQuote').addEventListener('change', () => { if (activePad.family === 'float') updateFloatUI(activePad); });
   $('floatFundBtn').addEventListener('click', () => floatSwapIn(activePad));
+  // Bags: the key, the quote (which decides the fee modes on offer), the split
+  const onBags = (fn) => () => { if (activePad.family === 'bags') fn(activePad); };
+  $('bagsLoginBtn').addEventListener('click', onBags(bagsLoginClick));
+  $('bagsApiKey').addEventListener('change', onBags((pad) => { saveBagsKey($('bagsApiKey').value.trim()); bagsQuoteList = []; updateBagsUI(pad); }));
+  $('bagsQuote').addEventListener('change', onBags(async (pad) => { paintBagsModes(await loadBags()); updateBagsUI(pad); }));
+  for (const id of ['bagsMode', 'bagsFeesTo', 'bagsPayoutMethod']) $(id).addEventListener('change', onBags(updateBagsUI));
+  for (const id of ['bagsClaimers', 'bagsPayoutHandle']) $(id).addEventListener('input', onBags(async () => paintBagsSummary(await loadBags())));
   $('jupPreset').addEventListener('change', () => {
     if ($('jupPreset').value === 'meme') {
       $('jupQuote').value = 'USDC'; $('jupInitMc').value = '5000'; $('jupMigMc').value = '75000';
