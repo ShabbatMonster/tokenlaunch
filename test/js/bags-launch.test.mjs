@@ -17,13 +17,14 @@ import fs from 'node:fs'; import path from 'node:path';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import {
-  Keypair, PublicKey, VersionedTransaction, TransactionMessage, SystemProgram, Connection,
+  Keypair, PublicKey, VersionedTransaction, TransactionMessage, SystemProgram, Connection, Transaction,
 } from '@solana/web3.js';
 import { ed25519 } from '@noble/curves/ed25519';
 import bs58 from 'bs58';
 import {
   BAGS_API, BAGS_FEE_MODES, BAGS_DEFAULT_MODE, BAGS_PAYOUT_WALLET, BAGS_FEE_SHARE_V2, BAGS_PROVIDERS,
   bagsLogin, bagsApi, bagsPartnerConfig, parseBagsClaimers, bagsSplit, bagsFeeBreakdown, checkBagsLaunch,
+  bagsClaimables, bagsClaim, bagsManaged, bagsUpdateSplit, bagsTransferManager, bagsPaySetHandle, bagsCreatePartnerKey, decodeBagsTx,
   launchBags, bagsQuotes, bagsFeeMode,
 } from '../../src/bags.js';
 import { SOL_RPC, SCAN_RPCS } from '../../src/rpc.js';
@@ -36,7 +37,11 @@ const MAIN = read(path.join(ROOT, 'src', 'main.js'));
 const HTML = read(path.join(ROOT, 'docs', 'index.html'));
 
 // --- Bags' live contract -------------------------------------------------------------
-const spec = await fetch('https://docs.bags.fm/api-reference/openapi.json').then((r) => r.json()).catch(() => null);
+let spec = null;
+for (let i = 0; i < 4 && !spec?.paths; i++) {
+  spec = await fetch('https://docs.bags.fm/api-reference/openapi.json').then((r) => r.json()).catch(() => null);
+  if (!spec?.paths) await new Promise((r) => setTimeout(r, 2000));
+}
 if (!spec?.paths) { console.log('SKIP  could not fetch Bags\' OpenAPI spec'); process.exit(1); }
 const deref = (x) => (x && x.$ref ? deref(x.$ref.split('/').slice(1).reduce((a, k) => a[k], spec)) : x);
 const bodySchema = (method, p) => deref(Object.values(spec.paths[p][method].requestBody.content)[0].schema);
@@ -170,6 +175,15 @@ function bagsTx(user, { mint = null } = {}) {
   tx.sign([BAGS_AUTH, ...(mint ? [mint] : [])]);
   return tx;
 }
+/// Older Bags claim endpoints can still return legacy transactions; one of those,
+/// fee paid by Bags' gas sponsor, the claimer as the second signer.
+function legacyClaimTx(user) {
+  const tx = new Transaction({ feePayer: BAGS_AUTH.publicKey, recentBlockhash: blockhash })
+    .add(SystemProgram.transfer({ fromPubkey: new PublicKey(user), toPubkey: BAGS_AUTH.publicKey, lamports: 1 }));
+  tx.partialSign(BAGS_AUTH);
+  return tx;
+}
+const MANAGED_MINT = Keypair.generate().publicKey.toBase58();
 const planStage = (id, kind, tx, dependsOn = []) => ({
   id, kind, dependsOn, format: 'v0', encoding: 'base64', transaction: Buffer.from(tx.serialize()).toString('base64'),
   messageSha256: sha(tx.message.serialize()),
@@ -263,6 +277,36 @@ const api = http.createServer(async (req, res) => {
     return ok({ contractVersion: 1, operation: { kind: 'launch', baseMint: json.tokenMint, flow: 'dbc' }, asset: { mint: QUOTE_MINT, tokenProgram: TOKEN_2022, decimals: 6 },
       feeLimits: [], transactions: [stage], readiness: { status: 'ready' } });
   }
+  // --- managing fees after launch
+  const wsol = 'So11111111111111111111111111111111111111112';
+  const claimant = url.searchParams.get('wallet') || json?.feeClaimer || json?.wallet || json?.partnerWallet || json?.payer;
+  if (p === '/token-launch/claimable-positions') return ok([
+    { baseMint: MANAGED_MINT, quoteMint: wsol, isCustomFeeVault: true, isMigrated: false, userBps: 6000, totalClaimableLamportsUserShare: 70000000 },
+    { baseMint: MANAGED_MINT, quoteMint: wsol, isCustomFeeVault: true, isMigrated: true, userBps: 6000, totalClaimableLamportsUserShare: 5000000 },
+    { baseMint: 'Empty1111111111111111111111111111111111111', quoteMint: wsol, isCustomFeeVault: true, isMigrated: false, totalClaimableLamportsUserShare: 0 },
+  ]);
+  if (p === '/fee-share/deployer/claimable-positions') return ok({ wallet: claimant, quoteMint: wsol, positions: [{ tokenMint: MANAGED_MINT, pendingDbcLamports: '1000', pendingDammLamports: '0', accruedLamports: '0', totalClaimableLamports: '1000' }], vaultClaimableLamports: '0', unattributedVaultLamports: '0', totalClaimableLamports: '1000' });
+  if (p === '/token-launch/claimable-positions/v2') return ok({ contractVersion: 1, wallet: claimant, complete: true, issues: [], items: [
+    { id: 'pair:x', wallet: claimant, asset: { mint: QUOTE_MINT, tokenProgram: TOKEN_2022, decimals: 6 }, source: { kind: 'pair_entitlement', baseMint: MANAGED_MINT, config: 'C', authority: 'A', claimerIndex: 0 }, rawAmount: '2500000', availability: { status: 'available' } }] });
+  if (p === '/fee-share/partner-config/stats') return ok({ claimedFees: '0', unclaimedFees: '42000' });
+  if (p === '/token-launch/claim-txs/v3') return ok([{ tx: bs58.encode(legacyClaimTx(json.feeClaimer).serialize({ requireAllSignatures: false })), blockhash: { blockhash, lastValidBlockHeight: 999999999 } }]);
+  if (p === '/fee-share/deployer/claim-txs' || p === '/fee-share/partner-config/claim-tx' || p === '/fee-share/admin/update-config') {
+    const transactions = [{ blockhash: { blockhash, lastValidBlockHeight: 999999999 }, transaction: bs58.encode(bagsTx(claimant).serialize()) }];
+    return ok(p === '/fee-share/deployer/claim-txs' ? { wallet: claimant, quoteMint: wsol, transactions, remainingTokenMints: [], deferredClaims: [{ tokenMint: null, protocol: 'vault', reason: 'needs_wallet_sol' }], transactionVersion: 0 } : { transactions });
+  }
+  if (p === '/token-launch/create-claim-txs/v2' || p === '/fee-share/admin/update-config/v2') {
+    return ok({ contractVersion: 1, operation: { kind: p.includes('claim') ? 'position_claim' : 'manager_update', baseMint: json.tokenMint || json.baseMint, wallet: claimant },
+      asset: { mint: QUOTE_MINT, tokenProgram: TOKEN_2022, decimals: 6 }, feeLimits: [], transactions: [planStage('s-1', p.includes('claim') ? 'claim' : 'manager_update', bagsTx(claimant))], readiness: { status: 'ready' } });
+  }
+  if (p === '/fee-share/admin/transfer-tx' || p === '/fee-share/partner-config/creation-tx') {
+    return ok({ blockhash: { blockhash, lastValidBlockHeight: 999999999 }, transaction: bs58.encode(bagsTx(claimant).serialize()) });
+  }
+  if (p === '/fee-share/admin/list') return ok({ tokenMints: [MANAGED_MINT] });
+  if (p === '/token-launch/creator/v3') return ok([{ provider: 'twitter', providerUsername: 'alice', royaltyBps: 6000, wallet: users['twitter:alice'], isAdmin: true }, { provider: 'unknown', royaltyBps: 4000, wallet: creator.publicKey.toBase58() }]);
+  if (p === '/token-launch/lifetime-fees') return ok('123000000');
+  if (p === '/bags-payout/token') return ok({ tokenMint: MANAGED_MINT, cashoutMethod: 'cashapp', cashoutMethodLabel: 'Cash App', username: '$coin', status: 'active', paysPayoutBot: true, stats: { totalFiatPaidCents: '1234', openPayoutCount: 1 }, pendingClaims: [] });
+  if (p === '/bags-payout/token/cashout') return ok({ tokenMint: json.tokenMint, cashoutMethod: json.cashout.method, username: json.cashout.username, status: 'active' });
+  if (p === '/token-launch') return ok({ name: 'Managed', symbol: 'MGD', tokenMint: MANAGED_MINT, quoteMint: wsol });
   return fail(404, 'not in the stand-in');
 });
 
@@ -433,6 +477,67 @@ try {
     check(r.mint === saved.tokenMint && !cs.some((c) => c.path === '/token-launch/create-token-info'),
       'resuming it launches that same mint and never asks Bags for a second one');
   }
+  // --- managing fee sharing after launch ---------------------------------------------
+  {
+    const opts = { rpcUrl: RPC_URL, secretKey, fetchImpl };
+    // a claim pays the wallet, so the stand-in RPC simulates a gain
+    rpcHooks.spend = -0.05e9;
+    const n = calls.length;
+    const c = await bagsClaimables('test-key', creator.publicKey.toBase58(), { fetchImpl, rpcUrl: RPC_URL });
+    check(c.creator.rows.length === 1 && c.creator.rows[0].lamports === 75000000, 'SOL earnings are added up per coin, and empty ones left out', `${c.creator.rows[0]?.lamports / 1e9} SOL`);
+    check(c.deployer.totalLamports === 1000 && c.custom.rows.length === 1 && c.partner?.unclaimedFees === '42000',
+      'and the deployer share, custom-quote earnings and partner fees are read too');
+    let s0 = sent.length;
+    await bagsClaim('test-key', { ...opts, kind: 'creator', mint: MANAGED_MINT });
+    check(sent.length === s0 + 1 && sent.at(-1).verified, "a creator claim (a legacy transaction from Bags) is co-signed and sent, Bags' signature kept");
+    const dep = await bagsClaim('test-key', { ...opts, kind: 'deployer' });
+    check(dep.sigs.length === 1 && dep.deferred[0]?.reason === 'needs_wallet_sol', 'the deployer claim is sent, and what Bags deferred is reported with its reason');
+    await bagsClaim('test-key', { ...opts, kind: 'custom', item: c.custom.rows[0] });
+    const cq = calls.filter((x) => x.path === '/token-launch/create-claim-txs/v2').at(-1)?.json;
+    check(cq?.tokenMint === MANAGED_MINT && cq.quoteMint === QUOTE_MINT && cq.source?.kind === 'pair', "a custom-quote claim goes through Bags' plan with the entitlement it is for");
+    await bagsClaim('test-key', { ...opts, kind: 'partner' });
+    check(specOk(since(n)), "every claim request fits Bags' schema", since(n).filter((x) => x.problems.length).flatMap((x) => x.problems).join('; '));
+    rpcHooks.spend = 1e9;
+    let msg = '';
+    s0 = sent.length;
+    await bagsClaim('test-key', { ...opts, kind: 'creator', mint: MANAGED_MINT }).catch((e) => { msg = e.message; });
+    rpcHooks.spend = -0.05e9;
+    check(/not signed/.test(msg) && sent.length === s0, 'a "claim" that would take SOL from the wallet instead of paying it is refused unsigned');
+
+    const managed = await bagsManaged('test-key', creator.publicKey.toBase58(), { fetchImpl });
+    const m = managed[0];
+    check(m?.mint === MANAGED_MINT && m.recipients.length === 2 && m.recipients[0].who === '@alice' && m.lifetimeLamports === 123000000 && m.bagsPay?.label === 'Cash App',
+      'the coins this wallet manages are listed with who is paid, lifetime fees and their BagsPay handle');
+    const n2 = calls.length;
+    await bagsUpdateSplit('test-key', { ...opts, mint: MANAGED_MINT, claimers: parseBagsClaimers('@alice 50\ngithub:bob 25') });
+    const up = calls.filter((x) => x.path === '/fee-share/admin/update-config').at(-1)?.json;
+    check(up?.claimersArray.length === 3 && up.basisPointsArray.join(',') === '5000,2500,2500' && up.baseMint === MANAGED_MINT,
+      'as manager, the split is replaced: handles resolved, the rest to the manager', up?.basisPointsArray.join('+'));
+    await bagsUpdateSplit('test-key', { ...opts, mint: MANAGED_MINT, quoteMint: QUOTE_MINT, claimers: parseBagsClaimers('@alice 100') });
+    check(calls.some((x) => x.path === '/fee-share/admin/update-config/v2'), 'and on a custom-quote coin through the v2 plan');
+    const newAdmin = Keypair.generate().publicKey.toBase58();
+    await bagsTransferManager('test-key', { ...opts, mint: MANAGED_MINT, newAdmin });
+    const tr = calls.filter((x) => x.path === '/fee-share/admin/transfer-tx').at(-1)?.json;
+    check(tr?.newAdmin === newAdmin && tr.currentAdmin === creator.publicKey.toBase58(), 'the manager role can be handed to another wallet');
+    msg = '';
+    await bagsTransferManager('test-key', { ...opts, mint: MANAGED_MINT, newAdmin: BAGS_PAYOUT_WALLET }).catch((e) => { msg = e.message; });
+    check(/cannot be the fee-share manager/.test(msg), 'but never to the BagsPay wallet');
+    const pay = await bagsPaySetHandle('test-key', MANAGED_MINT, { method: 'venmo', username: 'new-handle' }, { fetchImpl });
+    const ca = calls.filter((x) => x.path === '/bags-payout/token/cashout').at(-1)?.json;
+    check(pay.username === 'new-handle' && ca?.cashout?.method === 'venmo', 'BagsPay can be pointed at a different cash handle');
+    msg = '';
+    await bagsPaySetHandle('test-key', MANAGED_MINT, { method: 'xmoney', username: '@way_too_long_handle' }, { fetchImpl }).catch((e) => { msg = e.message; });
+    check(/not a valid X Money handle/.test(msg), 'and a bad handle is refused before Bags is asked');
+    msg = '';
+    await bagsCreatePartnerKey('test-key', opts).catch((e) => { msg = e.message; });
+    check(/already has a Bags partner key/.test(msg), 'a wallet that already is a partner is not charged for a second key');
+    rpcHooks.partnerExists = false;
+    const pk = await bagsCreatePartnerKey('test-key', opts);
+    rpcHooks.partnerExists = true;
+    check(pk.partnerConfig === bagsPartnerConfig(creator.publicKey).toBase58() && pk.sigs.length === 1, 'and a new partner key is created at the PDA launches will name');
+    check(specOk(since(n2)), "every management request fits Bags' schema", since(n2).filter((x) => x.problems.length).flatMap((x) => x.problems).join('; '));
+    rpcHooks.spend = 0.02e9;
+  }
 } finally {
   console.error = quiet;
   api.close(); rpc.close();
@@ -460,6 +565,34 @@ try {
   }
 }
 
+// --- live, with a key (BAGS_API_KEY in the environment; never stored) ---------------------
+if (process.env.BAGS_API_KEY) {
+  const key = process.env.BAGS_API_KEY;
+  const me = await bagsApi(key, 'GET', '/auth/me').catch((e) => ({ err: e.message }));
+  check(!me.err, 'the key is accepted by Bags', me.err || 'auth/me ok');
+  // a real coin's real manager: read-only, and the claim transaction is only
+  // decoded and simulated, never signed
+  const W = '3wruVjV7iftKiQwoUwNNNDBd5JiZm2wW4yixscHv7Gwd', M = '4rRkeKx9qDwrebNeRy9Nmf5cATTPYoG9DXpRpH5ABAGS';
+  const cl = await bagsClaimables(key, W, { rpcUrl: SOL_RPC });
+  check(!cl.creator.error && !cl.deployer.error && !cl.custom.error, "live: a wallet's creator, deployer and custom-quote earnings all read", `${cl.creator.rows.length} coins with SOL to claim`);
+  const mg = await bagsManaged(key, W);
+  check(mg.some((t) => t.mint === M && t.recipients.length > 0), 'live: the coins a wallet manages read back with their split', mg.map((t) => t.symbol).join(' '));
+  const txs = await bagsApi(key, 'POST', '/token-launch/claim-txs/v3', { json: { feeClaimer: W, tokenMint: M } }).catch(() => []);
+  if (!txs.length) console.log('SKIP  live: nothing to claim on the reference coin right now');
+  else {
+    const tx = decodeBagsTx(txs[0].tx);
+    const signers = tx.message.staticAccountKeys.slice(0, tx.message.header.numRequiredSignatures).map((k) => k.toBase58());
+    const c = new Connection(SOL_RPC, 'confirmed');
+    const before = await c.getBalance(new PublicKey(W));
+    const sim = await c.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true, accounts: { addresses: [W], encoding: 'base64' } });
+    const gain = (sim.value.accounts?.[0]?.lamports ?? before) - before;
+    check(signers.includes(W) && !sim.value.err && gain > 0, "live: a real claim from Bags needs the claimer's signature and pays the claimer", `+${(gain / 1e9).toFixed(4)} SOL`);
+  }
+  const qs = await bagsQuotes(key, { connection: new Connection(SOL_RPC, 'confirmed') });
+  check(qs.length > 0 && qs.every((q) => q.mint && q.configs.every((x) => BAGS_FEE_MODES.some((m) => m.id === x.id))),
+    "live: Bags' custom quotes read, and every mode they offer is one the pad knows", `${qs.length} quotes`);
+} else console.log('SKIP  set BAGS_API_KEY to run the live reads');
+
 // --- the pad ------------------------------------------------------------------------------
 check(/id: 'bags-sol'/.test(MAIN) && /family: 'bags'/.test(MAIN), 'main.js has the Bags pad');
 for (const id of ['bagsRow', 'bagsApiKey', 'bagsLoginBtn', 'bagsMfa', 'bagsQuote', 'bagsMode', 'bagsDevBuy', 'bagsFeesTo', 'bagsClaimers', 'bagsPayoutMethod', 'bagsPayoutHandle', 'bagsAdmin', 'bagsPartner', 'bagsSummary']) {
@@ -467,6 +600,11 @@ for (const id of ['bagsRow', 'bagsApiKey', 'bagsLoginBtn', 'bagsMfa', 'bagsQuote
 }
 check(/bags\.apikey/.test(MAIN) && !/test-key/.test(MAIN), 'the API key is kept in this browser only, never in the code');
 check(/async function launchBagsPad/.test(MAIN) && /resume: bagsPending/.test(MAIN), 'the pad launches through the module and resumes an interrupted launch');
+check(/if \(activePad\.family === 'bags'\) return renderBagsClaims\(box\)/.test(MAIN) && /if \(activePad\.family === 'bags'\) \{ await claimAllBags\(btn\)/.test(MAIN),
+  'MY TOKENS shows Bags earnings and coins managed, and CLAIM ALL claims every kind');
+check(['data-bags-claim', 'data-bags-partner', 'data-bags-edit="split"', 'data-bags-edit="admin"', 'data-bags-edit="pay"'].every((a) => MAIN.includes(a)),
+  "with a claim for each earning, partner-key creation, and the manager's edit split / move manager / BagsPay");
+check(['twitter:', 'tiktok:', 'kick:', 'github:', 'instagram:', 'domain:'].every((x) => HTML.includes(x)), 'the pad lists every provider Bags resolves');
 
 console.log('');
 process.exit(fails.length ? 1 : 0);

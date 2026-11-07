@@ -3741,6 +3741,161 @@ async function launchBagsPad(pad, inp) {
   renderTokenList();
 }
 
+// The Bags view of MY TOKENS · CLAIM FEES: everything this wallet earns on Bags
+// (as a recipient, the deployer, on custom-quote coins, as a partner) with a
+// claim for each, then every coin it manages, with its split, BagsPay handle
+// and the manager's three actions - edit the split, hand the role on, change
+// the cash handle.
+let bagsView = { claim: null, managed: [] };
+async function renderBagsClaims(box) {
+  if (!solKeyB58) { box.innerHTML = '<div class="empty">load your SOL key to see your Bags fees</div>'; return; }
+  const key = bagsKey();
+  if (!key) { box.innerHTML = '<div class="empty">add a Bags API key in the pad above (or GET KEY WITH MY WALLET)</div>'; return; }
+  box.innerHTML = '<div class="empty">reading Bags…</div>';
+  const M = await loadBags();
+  const wallet = bagsWallet();
+  try {
+    const [claim, managed] = await Promise.all([
+      M.bagsClaimables(key, wallet, { rpcUrl: activePad.rpc }),
+      M.bagsManaged(key, wallet).catch((e) => { throw new Error('could not read the coins you manage: ' + e.message); }),
+    ]);
+    bagsView = { claim, managed };
+  } catch (e) { box.innerHTML = `<div class="empty">couldn't read Bags: ${esc(e.message)}</div>`; return; }
+  const { claim, managed } = bagsView;
+  const sol = (l) => `${(Number(l) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 6 })} SOL`;
+  const btn = (attrs, label = 'CLAIM') => `<button class="mini accent" ${attrs}>${label}</button>`;
+  const rows = [];
+  for (const r of claim.creator.rows) rows.push(`<div class="token-row"><span><code>${esc(r.mint.slice(0, 8))}…</code> fees ${sol(r.lamports)}</span>${btn(`data-bags-claim="creator" data-mint="${r.mint}"`)}</div>`);
+  if (claim.deployer.totalLamports > 0) rows.push(`<div class="token-row"><span>deployer share ${sol(claim.deployer.totalLamports)}</span>${btn('data-bags-claim="deployer"')}</div>`);
+  claim.custom.rows.forEach((i, n) => {
+    const amt = i.asset.decimals != null ? (Number(i.rawAmount) / 10 ** i.asset.decimals).toLocaleString(undefined, { maximumFractionDigits: 6 }) : i.rawAmount + ' raw';
+    rows.push(`<div class="token-row"><span>${esc(i.source?.kind?.replace('_', ' ') || 'custom quote')} · ${amt} of <code>${esc(i.asset.mint.slice(0, 6))}…</code>`
+      + `${i.availability?.status !== 'available' ? ` <span class="err">(${esc(i.availability?.reason || i.availability?.status)})</span>` : ''}</span>`
+      + `${i.availability?.status === 'available' ? btn(`data-bags-claim="custom" data-i="${n}"`) : ''}</div>`);
+  });
+  if (claim.partner) {
+    rows.push(`<div class="token-row"><span>partner fees ${sol(claim.partner.unclaimedFees || 0)} unclaimed · ${sol(claim.partner.claimedFees || 0)} claimed</span>`
+      + `${Number(claim.partner.unclaimedFees || 0) > 0 ? btn('data-bags-claim="partner"') : ''}</div>`);
+  } else {
+    rows.push(`<div class="token-row"><span class="hint">not a Bags partner — a partner key earns a share of every launch that names it</span>${btn('data-bags-partner', 'BECOME A PARTNER')}</div>`);
+  }
+  const earnings = rows.length ? rows.join('') : '<div class="empty">nothing to claim on Bags right now</div>';
+  const mgr = managed.map((t, n) => {
+    const split = t.recipients.map((r) => `${esc(r.who || (r.wallet === bagsWallet() ? 'you' : r.wallet.slice(0, 6) + '…'))} ${r.bps / 100}%`).join(', ');
+    const pay = t.bagsPay ? ` · BagsPay ${esc(t.bagsPay.label)} ${esc(t.bagsPay.username)} (${esc(t.bagsPay.status)}, $${(t.bagsPay.paidCents / 100).toFixed(2)} paid)` : '';
+    return `<div class="token-row" style="flex-wrap:wrap"><span><b>${esc(t.symbol || '?')}</b> <a href="https://bags.fm/${t.mint}" target="_blank" rel="noopener"><code>${esc(t.mint.slice(0, 8))}…</code></a>`
+      + `${t.lifetimeLamports != null ? ` · lifetime ${sol(t.lifetimeLamports)}` : ''}${t.quoteMint ? ' · custom quote' : ''}<br><span class="hint">paid to ${split || '—'}${pay}</span></span>`
+      + `<span><button class="mini" data-bags-edit="split" data-n="${n}">EDIT SPLIT</button> <button class="mini" data-bags-edit="admin" data-n="${n}">MOVE MANAGER</button>`
+      + ` <button class="mini" data-bags-edit="pay" data-n="${n}">BAGSPAY</button></span>`
+      + `<div class="hidden" id="bagsEdit${n}" style="width:100%;margin-top:6px"></div></div>`;
+  }).join('');
+  box.innerHTML = `<div class="hint" style="margin:2px 0 4px">EARNINGS</div>${earnings}`
+    + `<div class="hint" style="margin:10px 0 4px">COINS YOU MANAGE${managed.length ? '' : ' — none'}</div>${mgr}`;
+  box.onclick = (e) => onBagsClaimsClick(e).catch((err) => { $('claimStatus').innerHTML = `<span class="err">${esc(err.message || String(err))}</span>`; });
+}
+
+async function onBagsClaimsClick(e) {
+  const el = e.target.closest('button');
+  if (!el) return;
+  const M = await loadBags();
+  const key = bagsKey();
+  const base = { rpcUrl: activePad.rpc, secretKey: solKeyB58, onStatus: (m) => { $('claimStatus').textContent = m; } };
+  const done = (what, sigs) => {
+    $('claimStatus').innerHTML = `<span style="color:var(--accent)">${what} ✓</span>`
+      + (sigs || []).map((s) => ` <a href="https://solscan.io/tx/${esc(s)}" target="_blank" rel="noopener">tx</a>`).join('');
+    refreshBalance();
+    renderTokenList();
+  };
+  if (el.dataset.bagsClaim) {
+    el.disabled = true;
+    const kind = el.dataset.bagsClaim;
+    const item = kind === 'custom' ? bagsView.claim.custom.rows[Number(el.dataset.i)] : null;
+    const r = await M.bagsClaim(key, { ...base, kind, mint: el.dataset.mint, item });
+    done(`CLAIMED ${kind}`, r.sigs);
+    if (r.deferred?.length) $('claimStatus').innerHTML += `<br><span class="hint">Bags held back ${r.deferred.length}: ${esc(r.deferred.map((d) => d.reason).join(', '))}</span>`;
+    return;
+  }
+  if (el.dataset.bagsPartner !== undefined) {
+    el.disabled = true;
+    const r = await M.bagsCreatePartnerKey(key, base);
+    done('PARTNER KEY CREATED', r.sigs);
+    $('claimStatus').innerHTML += `<br>launches can now name <code>${esc(bagsWallet())}</code> as partner`;
+    return;
+  }
+  if (el.dataset.bagsEdit) {
+    const n = Number(el.dataset.n);
+    const t = bagsView.managed[n];
+    const box = $(`bagsEdit${n}`);
+    box.classList.remove('hidden');
+    const kind = el.dataset.bagsEdit;
+    if (kind === 'split') {
+      const now = t.recipients.filter((r) => r.wallet !== bagsWallet()).map((r) => `${r.who || r.wallet} ${r.bps / 100}`).join('\n');
+      box.innerHTML = `<textarea rows="3" spellcheck="false" placeholder="@friend 25&#10;github:name 10">${esc(now)}</textarea>`
+        + `<div class="hint">one per line — you keep the rest. Unpaid shares have to be claimed before a recipient can be removed.</div><button class="mini accent" data-bags-save="split" data-n="${n}">SAVE SPLIT</button>`;
+    } else if (kind === 'admin') {
+      box.innerHTML = `<input type="text" spellcheck="false" placeholder="the new manager's wallet"> <button class="mini accent" data-bags-save="admin" data-n="${n}">MOVE MANAGER</button>`
+        + '<div class="hint">the new wallet takes over editing the split and BagsPay; this wallet loses it</div>';
+    } else {
+      box.innerHTML = `<select><option value="xmoney">X Money</option><option value="cashapp">Cash App</option><option value="venmo">Venmo</option></select>`
+        + ` <input type="text" spellcheck="false" placeholder="@handle / $cashtag" value="${esc(t.bagsPay?.username || '')}"> <button class="mini accent" data-bags-save="pay" data-n="${n}">SET HANDLE</button>`
+        + `<div class="hint">${t.bagsPay ? 'fees already claimed stay with the old handle' : 'BagsPay only pays a coin whose only fee recipient is the BagsPay wallet — launch it with cash payouts to use this'}</div>`;
+      if (t.bagsPay) box.querySelector('select').value = t.bagsPay.method;
+    }
+    return;
+  }
+  if (el.dataset.bagsSave) {
+    const n = Number(el.dataset.n);
+    const t = bagsView.managed[n];
+    const box = $(`bagsEdit${n}`);
+    el.disabled = true;
+    const kind = el.dataset.bagsSave;
+    if (kind === 'split') {
+      const r = await M.bagsUpdateSplit(key, { ...base, mint: t.mint, quoteMint: t.quoteMint, claimers: M.parseBagsClaimers(box.querySelector('textarea').value) });
+      done(`SPLIT UPDATED (${r.split.claimersArray.length} recipients)`, r.sigs);
+    } else if (kind === 'admin') {
+      const r = await M.bagsTransferManager(key, { ...base, mint: t.mint, newAdmin: box.querySelector('input').value.trim() });
+      done('MANAGER MOVED', r.sigs);
+    } else {
+      const r = await M.bagsPaySetHandle(key, t.mint, { method: box.querySelector('select').value, username: box.querySelector('input').value.trim() });
+      done(`BAGSPAY NOW PAYS ${esc(r.cashoutMethodLabel || r.cashoutMethod)} ${esc(r.username)}`);
+    }
+  }
+}
+
+/// CLAIM ALL on the Bags pad: every earning, one by one, each simulated first;
+/// one that fails is reported and the rest still go.
+async function claimAllBags(btn) {
+  const out = $('claimStatus');
+  if (!solKeyB58 || !bagsKey()) { out.innerHTML = '<span class="err">load your SOL key and a Bags API key first</span>'; return; }
+  btn.disabled = true;
+  try {
+    const M = await loadBags();
+    const key = bagsKey();
+    out.textContent = 'reading what you can claim on Bags…';
+    const c = await M.bagsClaimables(key, bagsWallet(), { rpcUrl: activePad.rpc });
+    const work = [
+      ...c.creator.rows.map((r) => ({ kind: 'creator', mint: r.mint, label: `fees on ${r.mint.slice(0, 6)}…` })),
+      ...(c.deployer.totalLamports > 0 ? [{ kind: 'deployer', label: 'deployer share' }] : []),
+      ...c.custom.rows.filter((i) => i.availability?.status === 'available').map((item) => ({ kind: 'custom', item, label: `${item.asset.mint.slice(0, 6)}… earnings` })),
+      ...(c.partner && Number(c.partner.unclaimedFees || 0) > 0 ? [{ kind: 'partner', label: 'partner fees' }] : []),
+    ];
+    if (!work.length) { out.textContent = 'nothing to claim on Bags right now'; return; }
+    const ok = [], bad = [];
+    for (const [i, w] of work.entries()) {
+      out.textContent = `claiming ${i + 1}/${work.length}: ${w.label}…`;
+      try { ok.push({ ...w, sigs: (await M.bagsClaim(key, { rpcUrl: activePad.rpc, secretKey: solKeyB58, ...w })).sigs }); }
+      catch (e) { bad.push({ ...w, why: e.message }); }
+    }
+    out.innerHTML = `<span style="color:var(--accent)">CLAIMED ${ok.length}/${work.length} ✓</span>`
+      + ok.map((d) => ` · ${esc(d.label)} ${d.sigs.map((s) => `<a href="https://solscan.io/tx/${esc(s)}" target="_blank" rel="noopener">tx</a>`).join(' ')}`).join('')
+      + (bad.length ? '<br><span class="err">' + bad.map((x) => `${esc(x.label)}: ${esc(x.why)}`).join('<br>') + '</span>' : '');
+    refreshBalance();
+    renderTokenList();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // --- Float -------------------------------------------------------------------
 // Coins paired with tokenised stocks, through Float's own program. The ticker is
 // checked as it is typed: a taken one costs 1 SOL to reuse on Float, and this pad
@@ -5804,6 +5959,8 @@ async function renderTokenList() {
   if (activePad.vm === 'sol' && activePad.family === 'meteora') return renderMeteoraClaims(box);
   // Jupiter Studio pays curve fees, pool fees, the migration allocation and LP
   if (activePad.family === 'jupstudio') return renderStudioClaims(box);
+  // Bags: earnings by kind, and the coins this wallet manages the fee sharing of
+  if (activePad.family === 'bags') return renderBagsClaims(box);
   if (!account) { box.innerHTML = '<div class="empty">unlock wallet to load your launches</div>'; return; }
   // Hooke keeps creator fees in the hook itself, per coin, in hXMAX
   if (activePad.family === 'hooke') return renderHookeClaims(box, activePad);
@@ -5843,6 +6000,7 @@ async function claimAllFees(btn) {
   // Solana / Meteora claims run off the SOL key, not an EVM account
   if (activePad.vm === 'sol' && activePad.family === 'meteora') { await claimAllMeteora(btn); return; }
   if (activePad.family === 'jupstudio') { await claimAllStudio(btn); return; }
+  if (activePad.family === 'bags') { await claimAllBags(btn); return; }
   if (!account) { say('unlock wallet first', true); return; }
   if (activePad.family === 'hooke') { await claimAllHooke(activePad, btn); return; }
   const pad = claimPad();

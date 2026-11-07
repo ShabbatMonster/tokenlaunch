@@ -21,7 +21,7 @@
 // the launch should cost.
 import {
   Connection, Keypair, PublicKey, VersionedTransaction, TransactionMessage, ComputeBudgetProgram,
-  SystemProgram, AddressLookupTableProgram,
+  SystemProgram, AddressLookupTableProgram, Transaction,
 } from '@solana/web3.js';
 import { ed25519 } from '@noble/curves/ed25519';
 import bs58 from 'bs58';
@@ -211,7 +211,8 @@ export async function bagsQuotes(apiKey, { connection, fetchImpl } = {}) {
       mint: t.asset.mint, tokenProgram: t.asset.tokenProgram, decimals: t.asset.decimals,
       available: flow.profileEligible && flow.launchAvailability?.status === 'available',
       reason: flow.launchAvailability?.reason || (flow.profileEligible ? null : 'not eligible for DBC'),
-      configs: (flow.configs || []).map((c) => ({ id: c.configType, graduationThresholdRaw: c.graduationThresholdRaw })),
+      // the live catalog also marks each mode enabled or not (not in the spec yet)
+      configs: (flow.configs || []).filter((c) => c.enabled !== false).map((c) => ({ id: c.configType, graduationThresholdRaw: c.graduationThresholdRaw })),
     });
   }
   if (connection && rows.length) {
@@ -252,10 +253,14 @@ async function mintSymbols(connection, mints) {
 /// refused unsigned, because the bytes came from Bags, not from us.
 async function signAndSend(connection, tx, signer, { maxSpendLamports, lifetime, label = 'transaction', onStatus } = {}) {
   const who = signer.publicKey.toBase58();
-  const required = tx.message.staticAccountKeys.slice(0, tx.message.header.numRequiredSignatures).map((k) => k.toBase58());
+  // some older Bags endpoints still hand back legacy transactions
+  const legacy = tx instanceof Transaction;
+  const message = legacy ? tx.compileMessage() : tx.message;
+  const keys = legacy ? message.accountKeys : message.staticAccountKeys;
+  const required = keys.slice(0, message.header.numRequiredSignatures).map((k) => k.toBase58());
   if (!required.includes(who)) throw new Error(`Bags' ${label} is not signed by this wallet, so it is not ours to send`);
   const before = await connection.getBalance(signer.publicKey, 'confirmed');
-  const sim = await connection.simulateTransaction(tx, {
+  const sim = await connection.simulateTransaction(legacy ? new VersionedTransaction(message) : tx, {
     sigVerify: false, replaceRecentBlockhash: false, commitment: 'confirmed',
     accounts: { addresses: [who], encoding: 'base64' },
   });
@@ -266,12 +271,20 @@ async function signAndSend(connection, tx, signer, { maxSpendLamports, lifetime,
   const after = sim.value.accounts?.[0]?.lamports;
   if (after != null && maxSpendLamports != null && before - after > maxSpendLamports) {
     throw new Error(`Bags' ${label} would take ${((before - after) / 1e9).toFixed(4)} SOL from the wallet, more than the `
-      + `${(maxSpendLamports / 1e9).toFixed(4)} SOL this launch should cost — not signed`);
+      + `${(maxSpendLamports / 1e9).toFixed(4)} SOL it should cost — not signed`);
   }
-  tx.sign([signer]);   // keeps the signatures Bags already put on it
-  if (tx.signatures.some((s) => s.every((b) => b === 0))) throw new Error(`Bags' ${label} still needs a signature this wallet cannot give`);
+  // both keep the signatures Bags already put on it
+  if (legacy) tx.partialSign(signer); else tx.sign([signer]);
+  const sigs = legacy ? tx.signatures.map((s) => s.signature) : tx.signatures;
+  if (sigs.some((s) => !s || s.every((b) => b === 0))) throw new Error(`Bags' ${label} still needs a signature this wallet cannot give`);
   onStatus && onStatus(`sending ${label}…`);
   return sendAndConfirm(connection, tx.serialize(), label, lifetime);
+}
+
+/// A base58 transaction from Bags, whichever version it is.
+export function decodeBagsTx(b58) {
+  const raw = bs58.decode(b58);
+  try { return VersionedTransaction.deserialize(raw); } catch { return Transaction.from(raw); }
 }
 
 /// Send, then poll the signature and re-send until it confirms or its blockhash
@@ -598,4 +611,189 @@ function toRaw(ui, decimals) {
   if (!/^\d*\.?\d*$/.test(s)) throw new Error(`"${ui}" is not an amount`);
   const [w, f = ''] = s.split('.');
   return BigInt((w || '0') + f.padEnd(decimals, '0').slice(0, decimals));
+}
+
+// --- managing fee sharing after launch ------------------------------------------
+//
+// Everything Bags lets a wallet do with fees once a coin exists: see and claim
+// what it has earned (as a recipient, as the deployer, on custom-quote coins,
+// as a partner), and - as a coin's fee-share manager - change who the fees go
+// to, hand the manager role on, and point BagsPay at a different cash handle.
+// Claims and edits come back as transactions from Bags and go through the same
+// simulate-then-sign check as a launch; a claim should pay the wallet, so it
+// may cost at most a little rent.
+const CLAIM_SPEND = 0.01e9;
+const EDIT_SPEND = 0.05e9;
+
+/// What a wallet can claim on Bags right now, by kind.
+export async function bagsClaimables(apiKey, wallet, { fetchImpl, rpcUrl } = {}) {
+  const get = (path, query) => bagsApi(apiKey, 'GET', path, { query, fetchImpl });
+  const [creator, deployer, custom] = await Promise.all([
+    get('/token-launch/claimable-positions', { wallet }).catch((e) => ({ error: e.message })),
+    get('/fee-share/deployer/claimable-positions', { wallet }).catch((e) => ({ error: e.message })),
+    get('/token-launch/claimable-positions/v2', { wallet }).catch((e) => ({ error: e.message })),
+  ]);
+  // the SOL positions come one per fee source; add them up per coin
+  const byMint = new Map();
+  for (const p of Array.isArray(creator) ? creator : []) {
+    if ((p.quoteMint || WSOL) !== WSOL) continue;           // custom quotes are listed by the v2 endpoint
+    const r = byMint.get(p.baseMint) || { mint: p.baseMint, lamports: 0, bps: p.userBps ?? null, migrated: !!p.isMigrated };
+    r.lamports += Number(p.totalClaimableLamportsUserShare || 0);
+    byMint.set(p.baseMint, r);
+  }
+  let partner = null;
+  if (rpcUrl) {
+    const pc = bagsPartnerConfig(wallet);
+    const acct = await new Connection(rpcUrl, 'confirmed').getAccountInfo(pc).catch(() => null);
+    if (acct) partner = { config: pc.toBase58(), ...(await get('/fee-share/partner-config/stats', { partner: wallet }).catch((e) => ({ error: e.message }))) };
+  }
+  return {
+    creator: { rows: [...byMint.values()].filter((r) => r.lamports > 0), error: creator.error || null },
+    deployer: deployer.error ? { error: deployer.error, rows: [], totalLamports: 0 }
+      : { rows: (deployer.positions || []).filter((p) => BigInt(p.totalClaimableLamports || 0) > 0n), totalLamports: Number(deployer.totalClaimableLamports || 0), vaultLamports: Number(deployer.vaultClaimableLamports || 0) },
+    custom: custom.error ? { error: custom.error, rows: [] }
+      : { rows: (custom.items || []).filter((i) => i.asset?.mint !== WSOL && i.rawAmount && BigInt(i.rawAmount) > 0n), issues: custom.issues || [] },
+    partner,
+  };
+}
+
+const sendAll = async (connection, signer, list, label, maxSpendLamports, onStatus) => {
+  const sigs = [];
+  for (const [i, t] of list.entries()) {
+    const tx = decodeBagsTx(t.tx || t.transaction);
+    sigs.push(await signAndSend(connection, tx, signer, { maxSpendLamports, lifetime: t.blockhash, label: list.length > 1 ? `${label} ${i + 1}/${list.length}` : label, onStatus }));
+  }
+  return sigs;
+};
+
+/// A claimable item names where its money is in one vocabulary (pair_entitlement,
+/// pool_estimate, holding_balance) and the claim request takes another (pair,
+/// pool, holding) - the two are not the same shape, and Bags refuses a mix.
+export function claimSource(src) {
+  if (!src) return undefined;
+  if (src.kind === 'pair_entitlement') return { kind: 'pair' };
+  if (src.kind === 'pool_estimate') return { kind: 'pool', protocol: src.protocol, pool: src.pool };
+  if (src.kind === 'holding_balance') return { kind: 'holding', authority: src.authority };
+  if (src.kind === 'position') return { kind: 'position' };
+  return undefined;
+}
+
+/// Claim one thing. `kind` is creator | deployer | custom | partner.
+export async function bagsClaim(apiKey, { rpcUrl, secretKey, kind, mint, item, fetchImpl, onStatus } = {}) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const signer = keypairOf(secretKey);
+  const wallet = signer.publicKey.toBase58();
+  if (kind === 'creator') {
+    const txs = await bagsApi(apiKey, 'POST', '/token-launch/claim-txs/v3', { json: { feeClaimer: wallet, tokenMint: mint }, fetchImpl });
+    if (!txs?.length) throw new Error('Bags has nothing to claim on that coin right now');
+    return { sigs: await sendAll(connection, signer, txs, 'the claim', CLAIM_SPEND, onStatus) };
+  }
+  if (kind === 'deployer') {
+    const r = await bagsApi(apiKey, 'POST', '/fee-share/deployer/claim-txs', { json: { wallet, ...(mint ? { tokenMints: [mint] } : {}) }, fetchImpl });
+    const sigs = await sendAll(connection, signer, r.transactions || [], 'the deployer claim', CLAIM_SPEND, onStatus);
+    return { sigs, remaining: r.remainingTokenMints || [], deferred: r.deferredClaims || [] };
+  }
+  if (kind === 'partner') {
+    const r = await bagsApi(apiKey, 'POST', '/fee-share/partner-config/claim-tx', { json: { partnerWallet: wallet }, fetchImpl });
+    return { sigs: await sendAll(connection, signer, r.transactions || [], 'the partner claim', CLAIM_SPEND, onStatus) };
+  }
+  if (kind === 'custom') {
+    // a partner or deployer share of a custom-quote coin sits in a per-wallet
+    // vault, swept by its own endpoint rather than by a claim plan
+    if (item.source?.kind === 'role_balance') {
+      const r = await bagsApi(apiKey, 'POST', '/token-launch/damm-v2/claim-vault', {
+        json: { kind: item.source.role, wallet, quoteMint: item.asset?.mint, transactionFormat: 'v0' }, fetchImpl,
+      });
+      return { sigs: await sendAll(connection, signer, [r], `the ${item.source.role} vault`, CLAIM_SPEND, onStatus) };
+    }
+    const { sigs } = await runPlan(connection, signer, (tables) => bagsApi(apiKey, 'POST', '/token-launch/create-claim-txs/v2', {
+      json: {
+        feeClaimer: wallet, tokenMint: item.source?.baseMint || mint, quoteMint: item.asset?.mint,
+        ...(claimSource(item.source) ? { source: claimSource(item.source) } : {}), transactionFormat: 'v0',
+        ...(tables.length ? { additionalLookupTables: tables } : {}),
+      },
+      fetchImpl,
+    }), { maxSpendLamports: CLAIM_SPEND, onStatus });
+    return { sigs };
+  }
+  throw new Error(`nothing to claim of kind "${kind}"`);
+}
+
+/// The coins this wallet manages the fee sharing of, with who is paid now.
+export async function bagsManaged(apiKey, wallet, { fetchImpl } = {}) {
+  const list = await bagsApi(apiKey, 'GET', '/fee-share/admin/list', { query: { wallet }, fetchImpl });
+  const mints = list?.tokenMints || [];
+  return Promise.all(mints.map(async (mint) => {
+    const [recipients, lifetime, payout, launch] = await Promise.all([
+      bagsApi(apiKey, 'GET', '/token-launch/creator/v3', { query: { tokenMint: mint }, fetchImpl }).catch(() => []),
+      bagsApi(apiKey, 'GET', '/token-launch/lifetime-fees', { query: { tokenMint: mint }, fetchImpl }).catch(() => null),
+      bagsApi(apiKey, 'GET', '/bags-payout/token', { query: { tokenMint: mint }, fetchImpl }).catch(() => null),
+      bagsApi(apiKey, 'GET', '/token-launch', { query: { tokenMint: mint }, fetchImpl }).catch(() => null),
+    ]);
+    return {
+      mint, name: launch?.name || '', symbol: launch?.symbol || '',
+      quoteMint: launch?.quoteMint && launch.quoteMint !== WSOL ? launch.quoteMint : null,
+      recipients: (recipients || []).filter((r) => (r.royaltyBps || 0) > 0).map((r) => ({
+        wallet: r.wallet, bps: r.royaltyBps, who: r.providerUsername ? `${r.provider === 'twitter' ? '@' : r.provider + ':'}${r.providerUsername}` : null,
+      })),
+      lifetimeLamports: lifetime != null ? Number(lifetime) : null,
+      bagsPay: payout ? {
+        method: payout.cashoutMethod, label: payout.cashoutMethodLabel, username: payout.username, status: payout.status,
+        paidCents: Number(payout.stats?.totalFiatPaidCents || 0), open: payout.stats?.openPayoutCount || 0,
+      } : null,
+    };
+  }));
+}
+
+/// As manager: replace who a coin's fees go to. Same split rules as a launch.
+export async function bagsUpdateSplit(apiKey, { rpcUrl, secretKey, mint, claimers, quoteMint = null, fetchImpl, onStatus } = {}) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const signer = keypairOf(secretKey);
+  const wallet = signer.publicKey.toBase58();
+  const resolved = await resolveBagsClaimers(apiKey, claimers, { fetchImpl, onStatus });
+  const split = bagsSplit(wallet, resolved);
+  const body = { baseMint: mint, payer: wallet, ...split };
+  if (quoteMint) {
+    const { sigs } = await runPlan(connection, signer, (tables) => bagsApi(apiKey, 'POST', '/fee-share/admin/update-config/v2', {
+      json: { ...body, transactionFormat: 'v0', ...(tables.length ? { additionalLookupTables: tables } : {}) }, fetchImpl,
+    }), { maxSpendLamports: EDIT_SPEND, onStatus });
+    return { sigs, split };
+  }
+  const lut = split.claimersArray.length > BAGS_CLAIMERS_WITHOUT_LUT ? await claimersLookupTable(connection, signer, split.claimersArray, { onStatus }) : null;
+  const r = await bagsApi(apiKey, 'POST', '/fee-share/admin/update-config', { json: { ...body, ...(lut ? { additionalLookupTables: [lut] } : {}) }, fetchImpl });
+  return { sigs: await sendAll(connection, signer, r.transactions || [], 'the new split', EDIT_SPEND, onStatus), split };
+}
+
+/// As manager: hand the manager role to another wallet.
+export async function bagsTransferManager(apiKey, { rpcUrl, secretKey, mint, newAdmin, fetchImpl, onStatus } = {}) {
+  if (!isWallet(newAdmin)) throw new Error('the new manager is not a valid Solana wallet');
+  if (newAdmin === BAGS_PAYOUT_WALLET) throw new Error('the Bags payout wallet cannot be the fee-share manager');
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const signer = keypairOf(secretKey);
+  const wallet = signer.publicKey.toBase58();
+  const r = await bagsApi(apiKey, 'POST', '/fee-share/admin/transfer-tx', { json: { baseMint: mint, currentAdmin: wallet, newAdmin, payer: wallet }, fetchImpl });
+  return { sigs: await sendAll(connection, signer, [r], 'the manager transfer', EDIT_SPEND, onStatus) };
+}
+
+/// BagsPay: where a coin's fees are paid out as cash, and its payouts.
+export const bagsPayStatus = (apiKey, mint, o = {}) => bagsApi(apiKey, 'GET', '/bags-payout/token', { query: { tokenMint: mint }, ...o });
+export const bagsPayHistory = (apiKey, mint, o = {}) => bagsApi(apiKey, 'GET', '/bags-payout/history', { query: { tokenMint: mint, limit: 10 }, ...o });
+/// As manager: point BagsPay at a different handle. A direct change on Bags'
+/// side (no transaction); fees already claimed stay with the old handle.
+export async function bagsPaySetHandle(apiKey, mint, { method, username }, o = {}) {
+  const rule = BAGS_PAYOUT_METHODS[method];
+  if (!rule) throw new Error('pick X Money, Cash App or Venmo');
+  if (!rule.rule.test(username || '')) throw new Error(`"${username}" is not a valid ${rule.label} handle: ${rule.hint}`);
+  return bagsApi(apiKey, 'POST', '/bags-payout/token/cashout', { json: { tokenMint: mint, cashout: { method, username } }, ...o });
+}
+
+/// Make this wallet a Bags partner: once its partner key exists, any launch can
+/// name it as partner and it earns a share of those coins' fees.
+export async function bagsCreatePartnerKey(apiKey, { rpcUrl, secretKey, fetchImpl, onStatus } = {}) {
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const signer = keypairOf(secretKey);
+  const wallet = signer.publicKey.toBase58();
+  if (await connection.getAccountInfo(bagsPartnerConfig(wallet))) throw new Error('this wallet already has a Bags partner key');
+  const r = await bagsApi(apiKey, 'POST', '/fee-share/partner-config/creation-tx', { json: { partnerWallet: wallet }, fetchImpl });
+  return { sigs: await sendAll(connection, signer, [r], 'the partner key', EDIT_SPEND, onStatus), partnerConfig: bagsPartnerConfig(wallet).toBase58() };
 }
