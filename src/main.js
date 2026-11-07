@@ -3580,12 +3580,28 @@ const BAGS_KEYS = 'bags.apikey.v1';            // { [wallet]: apiKey }
 const BAGS_PENDING = 'bags.pending.v1';        // an interrupted launch, to finish rather than repeat
 const bagsWallet = () => (solKeyB58 ? solPubkeyFromSecret(solKeyB58) : null);
 const readJson = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || 'null') ?? d; } catch { return d; } };
-const bagsKey = () => ($('bagsApiKey').value || '').trim() || readJson(BAGS_KEYS, {})[bagsWallet()] || '';
+// The local server relays Bags calls (Bags refuses browser origins) and can
+// hold the key itself, in .bags-api-key - then nothing has to be entered here.
+let bagsLocal = null;                          // { proxy, presetKey } once asked
+async function bagsLocalServer(M) {
+  if (bagsLocal) return bagsLocal;
+  const st = await fetch('/bags-api/_status', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  bagsLocal = st?.proxy ? st : { proxy: false, presetKey: false };
+  if (bagsLocal.proxy) M.useBagsProxy(location.origin + '/bags-api');
+  return bagsLocal;
+}
+/// A typed key, else one saved in this browser (for this wallet, or for any),
+/// else the one the local server keeps.
+const bagsKey = () => {
+  const saved = readJson(BAGS_KEYS, {});
+  return ($('bagsApiKey').value || '').trim() || saved[bagsWallet()] || saved['*']
+    || (bagsLocal?.presetKey ? 'preset' : '');
+};
 function saveBagsKey(key) {
   const all = readJson(BAGS_KEYS, {});
   const w = bagsWallet();
-  if (!w) return;
-  if (key) all[w] = key; else delete all[w];
+  // kept for this wallet and as the default, so it is entered once, not per wallet
+  for (const slot of [w, '*']) { if (!slot) continue; if (key) all[slot] = key; else delete all[slot]; }
   try { localStorage.setItem(BAGS_KEYS, JSON.stringify(all)); } catch { /* private mode: the field still holds it */ }
 }
 let bagsQuoteList = [];                         // Bags' approved custom quotes, once the key can read them
@@ -3593,8 +3609,12 @@ let bagsAuthCode = null;                        // set while an MFA step is pend
 
 async function updateBagsUI(pad) {
   const M = await loadBags();
+  const local = await bagsLocalServer(M);
   const key = bagsKey();
-  if (key && !$('bagsApiKey').value) $('bagsApiKey').value = key;
+  // a key saved in the browser is shown; the server's own one never is
+  if (key && key !== 'preset' && !$('bagsApiKey').value) $('bagsApiKey').value = key;
+  $('bagsApiKey').placeholder = local.presetKey ? 'using the key saved on this computer — paste one only to override it'
+    : 'paste a key from dev.bags.fm — or get one with your wallet';
   if (!$('bagsMode').options.length) paintBagsModes(M);
   const payout = $('bagsFeesTo').value === 'payout';
   $('bagsPayoutWrap').classList.toggle('hidden', !payout);
@@ -3605,7 +3625,12 @@ async function updateBagsUI(pad) {
   $('bagsDevSym').textContent = q ? (q.symbol || 'QUOTE') : 'SOL';
   paintBagsResume(pad);
   paintBagsSummary(M);
-  if (key && !bagsQuoteList.length) loadBagsQuotes(pad).catch(() => {});
+  if (!local.proxy) {
+    $('bagsKeyHint').innerHTML = '<span class="err">Bags refuses calls from this page\'s address (it only answers bags.fm or a server).'
+      + ' Open the launcher from the local server — <code>node serve.mjs</code>, localhost:8080 — which relays them.</span>';
+    return;
+  }
+  if (key && !bagsQuoteList.length) loadBagsQuotes(pad).catch((e) => { $('bagsKeyHint').innerHTML = `<span class="err">${esc(e.message)}</span>`; });
   if (!key) $('bagsKeyHint').textContent = 'Every Bags call needs a key. GET KEY signs Bags\' wallet check with your SOL key — no transaction, no fee.';
 }
 
@@ -3629,7 +3654,8 @@ async function loadBagsQuotes(pad) {
   sel.innerHTML = '<option value="">SOL</option>' + bagsQuoteList.map((q) =>
     `<option value="${q.mint}"${q.available ? '' : ' disabled'}>${esc(q.symbol || q.mint.slice(0, 6))}${q.available ? '' : ' (unavailable)'}</option>`).join('');
   if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
-  $('bagsKeyHint').textContent = `key works · ${bagsQuoteList.filter((q) => q.available).length} custom quotes Bags has approved`;
+  $('bagsKeyHint').textContent = `${bagsKey() === 'preset' ? 'using the key saved on this computer' : 'key works'}`
+    + ` · ${bagsQuoteList.filter((q) => q.available).length} custom quotes Bags has approved`;
 }
 
 /// What a trade fee pays, by party, for the chosen mode and split.
@@ -3706,6 +3732,7 @@ async function bagsLoginClick(pad) {
 
 async function launchBagsPad(pad, inp) {
   const M = await loadBags();
+  await bagsLocalServer(M);
   const apiKey = bagsKey();
   if (!apiKey) throw new Error('add a Bags API key, or press GET KEY WITH MY WALLET');
   if (!logoBlob) throw new Error('add an image first');
@@ -3728,7 +3755,7 @@ async function launchBagsPad(pad, inp) {
     onProgress: (st) => { try { localStorage.setItem(BAGS_PENDING, JSON.stringify(st)); } catch { /* best effort */ } },
     onStatus: (m) => setStatus(m),
   });
-  saveBagsKey(apiKey);
+  if (apiKey !== 'preset') saveBagsKey(apiKey);
   localStorage.removeItem(BAGS_PENDING);
   rememberLaunch(pad, res.mint, inp.symbol);
   const q = bagsSelectedQuote();
@@ -3749,6 +3776,8 @@ async function launchBagsPad(pad, inp) {
 let bagsView = { claim: null, managed: [] };
 async function renderBagsClaims(box) {
   if (!solKeyB58) { box.innerHTML = '<div class="empty">load your SOL key to see your Bags fees</div>'; return; }
+  const M0 = await loadBags();
+  if (!(await bagsLocalServer(M0)).proxy) { box.innerHTML = '<div class="empty">Bags only answers bags.fm or a server — open the launcher from the local server (localhost:8080) to see your Bags fees</div>'; return; }
   const key = bagsKey();
   if (!key) { box.innerHTML = '<div class="empty">add a Bags API key in the pad above (or GET KEY WITH MY WALLET)</div>'; return; }
   box.innerHTML = '<div class="empty">reading Bags…</div>';
@@ -3866,10 +3895,11 @@ async function onBagsClaimsClick(e) {
 /// one that fails is reported and the rest still go.
 async function claimAllBags(btn) {
   const out = $('claimStatus');
+  const M = await loadBags();
+  await bagsLocalServer(M);
   if (!solKeyB58 || !bagsKey()) { out.innerHTML = '<span class="err">load your SOL key and a Bags API key first</span>'; return; }
   btn.disabled = true;
   try {
-    const M = await loadBags();
     const key = bagsKey();
     out.textContent = 'reading what you can claim on Bags…';
     const c = await M.bagsClaimables(key, bagsWallet(), { rpcUrl: activePad.rpc });

@@ -9,3 +9,6 @@ cache/
 
 # launch bot: secrets, strategy and run artifacts stay local
 bot/
+
+# the Bags API key the local server adds to Bags calls - never committed, never served
+.bags-api-key

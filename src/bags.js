@@ -71,6 +71,15 @@ export const BAGS_PAYOUT_METHODS = {
   venmo: { label: 'Venmo', rule: /^@?[A-Za-z0-9_-]{5,30}$/, hint: '5–30 letters, digits, - or _' },
 };
 
+/// Where calls go. Bags refuses a browser origin (403 "Origin not allowed"
+/// on everything but /auth/me), so in the page they go through the local
+/// server's /bags-api proxy instead - see bagsProxy.mjs.
+let apiBase = BAGS_API;
+export function useBagsProxy(base) { apiBase = base || BAGS_API; }
+/// Stands in for the key when the local server holds it: no header is sent,
+/// and the proxy adds the key it keeps.
+export const BAGS_PRESET_KEY = 'preset';
+
 export class BagsApiError extends Error {
   constructor(status, message) { super(message); this.name = 'BagsApiError'; this.status = status; }
 }
@@ -78,10 +87,10 @@ export class BagsApiError extends Error {
 /// One call to the Bags API. Errors come back as { success: false } with the
 /// reason in `error` (or, on some endpoints, `response`).
 export async function bagsApi(apiKey, method, path, { query, json, form, fetchImpl = globalThis.fetch } = {}) {
-  const url = new URL(BAGS_API + path);
+  const url = new URL(apiBase + path);
   for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
   const headers = {};
-  if (apiKey) headers['x-api-key'] = apiKey;
+  if (apiKey && apiKey !== BAGS_PRESET_KEY) headers['x-api-key'] = apiKey;
   let body;
   if (json) { headers['content-type'] = 'application/json'; body = JSON.stringify(json); } else if (form) body = form;
   const res = await fetchImpl(url.toString(), { method, headers, body });
@@ -90,7 +99,9 @@ export async function bagsApi(apiKey, method, path, { query, json, form, fetchIm
   if (!res.ok || !data || data.success === false) {
     const why = (data && (typeof data.error === 'string' ? data.error : typeof data.response === 'string' ? data.response : null))
       || `HTTP ${res.status}`;
-    throw new BagsApiError(res.status, res.status === 401 ? `Bags refused the API key (${why})` : why);
+    throw new BagsApiError(res.status, res.status === 401 ? `Bags refused the API key (${why})`
+      : /origin not allowed/i.test(why) ? 'Bags only answers its own site or a server — open the launcher from the local server (localhost:8080), which relays Bags calls'
+        : why);
   }
   return data.response;
 }
