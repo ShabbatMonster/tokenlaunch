@@ -132,7 +132,7 @@ check(quote.symbol === 'SPYx' && quote.decimals === 8, 'SPYx is read as an 8-dec
   const { ix } = floatLaunchIx({ payer, creator: payer, nonce: BigInt(Date.now()), name: 'x', symbol: 'FLOAT', uri: URI, quote, cfg });
   const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
   const bare = await simWith([cu, ix]);
-  check(!bare.err && bare.gained === 1, 'without the guard Float would take the ticker over and charge 1 SOL — the program does not refuse',
+  check(!bare.err && bare.gained >= 1, 'without the guard Float would take the ticker over and charge 1 SOL or more — the program does not refuse',
     `treasury +${bare.gained} SOL`);
   await sleep(500);
   const guarded = await simWith([cu, floatTickerFreeGuardIx('FLOAT'), ix]);

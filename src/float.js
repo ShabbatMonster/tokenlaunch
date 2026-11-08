@@ -265,7 +265,7 @@ export async function launchFloat(opts) {
   const held = await floatTickerOwner(connection, symbol);
   if (held) {
     throw new Error(`the ticker ${symbol} is already taken on Float — by ${held.coin.slice(0, 8)}… since `
-      + `${held.since.toISOString().slice(0, 10)}. Reusing it means paying Float 1 SOL to take it over, so this launch `
+      + `${held.since.toISOString().slice(0, 10)}. Reusing it means paying Float at least 1 SOL to take it over, so this launch `
       + 'stops here instead; pick another ticker.');
   }
 
