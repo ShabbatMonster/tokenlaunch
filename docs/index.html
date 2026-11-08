@@ -832,16 +832,58 @@
 
     <div id="ascendRow" class="hidden">
       <div class="row">
-        <div><label>PAIRED WITH</label><input type="text" value="KNTQ (Kinetiq) — fixed by the factory" readonly></div>
-        <div style="flex:0 0 160px"><label>DEV BUY (KNTQ)</label><input type="text" id="ascendDevBuy" value="0" spellcheck="false" placeholder="0 = none"></div>
+        <div><label>PAIRED WITH</label><select id="ascendQuote">
+          <option value="HYPE">HYPE (wrapped to WHYPE)</option>
+          <option value="KNTQ" selected>KNTQ (Kinetiq)</option>
+          <option value="USDC">USDC</option>
+          <option value="custom">another token Ascend allows…</option>
+        </select></div>
+        <div style="flex:0 0 120px"><label>TRADE FEE %</label><input type="text" id="ascendFee" value="1" spellcheck="false" placeholder="1 – 10"></div>
+        <div style="flex:0 0 160px"><label>DEV BUY (<span id="ascendBuySym">KNTQ</span>)</label><input type="text" id="ascendDevBuy" value="0" spellcheck="false" placeholder="0 = none"></div>
       </div>
-      <label style="margin-top:8px">FEE RECIPIENTS <span class="hint">blank = all to you; or one per line: address percent, adding up to 100</span></label>
-      <textarea id="ascendSplit" rows="2" spellcheck="false" placeholder="0xabc... 70&#10;0xdef... 30"></textarea>
+      <input type="text" id="ascendQuoteCustom" class="hidden" spellcheck="false" placeholder="0x… quote token (checked against Ascend's launchpad)" style="margin-top:8px">
+      <div class="row" style="margin-top:8px">
+        <div><label>CREATOR FEES</label><select id="ascendType">
+          <option value="vanilla">Vanilla — your creator share to your wallet</option>
+          <option value="holders">Holder Rewards — holders share the fees</option>
+          <option value="buyback">Buyback — fees buy the coin back</option>
+          <option value="custom">Custom mix — holders / buyback / creator</option>
+        </select></div>
+      </div>
+      <div id="ascendVanillaWrap">
+        <label style="margin-top:8px">CREATOR WALLET (BLANK = YOU)</label>
+        <input type="text" id="ascendCreator" spellcheck="false" placeholder="0x... (defaults to your address)">
+      </div>
+      <div id="ascendHoldersWrap" class="hidden">
+        <label style="margin-top:8px">HOLDERS GET <span class="hint">of the creator share &mdash; 100 = every creator fee to holders</span></label>
+        <div class="row">
+          <div><label>OF QUOTE FEES %</label><input type="text" id="ascendHoldersQuote" value="50" spellcheck="false"></div>
+          <div><label>OF COIN FEES %</label><input type="text" id="ascendHoldersToken" value="50" spellcheck="false"></div>
+        </div>
+      </div>
+      <div id="ascendMixWrap" class="hidden">
+        <label style="margin-top:8px">SPLIT % <span class="hint">holders / buyback / creator &mdash; adds up to 100</span></label>
+        <div class="row">
+          <div><input type="text" id="ascendMixHolders" value="40" spellcheck="false" title="holders %"></div>
+          <div><input type="text" id="ascendMixBuyback" value="40" spellcheck="false" title="buyback %"></div>
+          <div><input type="text" id="ascendMixCreator" value="20" spellcheck="false" title="creator %"></div>
+        </div>
+      </div>
+      <label id="ascendBurnWrap" class="hidden" style="margin-top:8px"><input type="checkbox" id="ascendBurn" checked style="width:auto;margin-right:6px"> burn bought-back coins <span class="hint">off = they go to the first payee</span></label>
+      <div id="ascendSeatWrap" class="hidden">
+        <label style="margin-top:8px">PAYEES <span class="hint">who gets the rest of the creator share &mdash; blank = you; or up to 10 lines of "address percent", adding up to 100</span></label>
+        <textarea id="ascendSplit" rows="2" spellcheck="false" placeholder="0xabc... 70&#10;0xdef... 30"></textarea>
+        <label style="margin-top:8px">DEV BUY GOES TO (BLANK = FIRST PAYEE)</label>
+        <input type="text" id="ascendDevBuyTo" spellcheck="false" placeholder="0x...">
+      </div>
+      <label style="margin-top:8px">ALLOCATION PLAN <span class="hint">needed when the dev buy is over 10% of supply &mdash; what you will do with the coins (up to 500 characters)</span></label>
+      <textarea id="ascendPlan" rows="2" spellcheck="false" placeholder="e.g. 5% team, vested 6 months; the rest held for a community airdrop"></textarea>
       <div class="hint" id="ascendLine" style="font-size:11px;margin-top:6px"></div>
-      <div class="hint" style="font-size:11px;margin-top:6px">Ascend opens the coin straight into a Uniswap v4 hook pool paired with KNTQ &mdash; no bonding curve, 1B supply, one fixed opening price.
-      Ascend publishes no ABI, so the launch call was rebuilt from its real launches on-chain and is sent exactly as its site sends it.
-      A dev buy is paid in KNTQ (approved to the factory first) and pays no fee; what it gets is exact, with a 1% floor.
-      The launch costs only gas.</div>
+      <div class="hint" style="font-size:11px;margin-top:6px">Ascend opens the coin straight into a Uniswap v4 pool &mdash; no bonding curve, 1B supply &mdash; paired with HYPE, KNTQ or USDC
+      (the pairs are re-checked on Ascend's launchpad before each launch). The creator share of every trade fee can stay yours (Vanilla) or go to a
+      seat contract that pays holders, buys the coin back, and/or pays up to 10 wallets &mdash; the same four coin types as Ascend's site, through the same factories.
+      A dev buy is the launch's own first trade: it pays no fee and what it gets is exact (1% floor). HYPE is wrapped and the quote approved first.
+      Ascend keeps a coin's image on its own servers, so on-chain it holds the name and ticker; the launch costs only gas.</div>
     </div>
 
     <div id="mimicRow" class="hidden">

@@ -1,20 +1,20 @@
 // Launches on Elysium (Kinetiq's chain 99901): Volta, Montra and Ascend,
 // checked against the live contracts.
 //
-// None of the three publishes an ABI. Volta's and Montra's come from their own
-// frontends; Ascend's was worked out from two real launches and simulation. So
-// the strongest checks are the ones against real launches: Ascend's encoder
-// rebuilds e/acc's launch byte for byte, the dev-buy maths reproduces Blob's
-// and HYPEY's real outputs to the wei, and every launch shape the pads build is
-// simulated against the contracts from a stand-in wallet (state overrides give
-// it HYPE, and KNTQ plus an allowance for Ascend's dev buy).
+// None of the three publishes an ABI; all three come from their own frontends'
+// bundles. The strongest checks are the ones against real launches - Ascend's
+// ABI rebuilds e/acc's launch byte for byte, the dev-buy maths reproduces Blob's
+// and HYPEY's real outputs to the wei - and every launch shape the pads build
+// is simulated against the contracts from a stand-in wallet (state overrides
+// give it HYPE, and the quote plus an allowance for a dev buy).
 //   node test/js/elysium-launch.test.mjs
 import fs from 'node:fs'; import path from 'node:path';
-import { createPublicClient, http, fallback, decodeFunctionData, pad, numberToHex, getAddress } from 'viem';
+import { createPublicClient, http, fallback, decodeFunctionData, encodeFunctionData, pad, numberToHex, getAddress, formatUnits } from 'viem';
 import { ELYSIUM_CHAIN_ID, ELYSIUM_RPCS, KNTQ, parseFeeSplit, elysiumChain } from '../../src/elysium.js';
-import { voltaPlan, voltaCheck, voltaPremine, VOLTA_LIMITS, VOLTA_PAIRS } from '../../src/volta.js';
+import { voltaPlan, voltaCheck, voltaPremine, VOLTA_LIMITS, VOLTA_PAIRS, VOLTA_TOKEN } from '../../src/volta.js';
 import { montraPlan, montraConfigs, montraPickConfig, MONTRA_ABI, MONTRA_HOLDERS } from '../../src/montra.js';
-import { ascendCalldata, ascendDevBuyOut, ascendPlan, ASCEND_FACTORY, ASCEND_SEED } from '../../src/ascend.js';
+import { ascendDevBuyOut, ascendPlan, ascendQuote, ascendSeat, ascendDevBuyNeeds, ASCEND_QUOTES, ASCEND_SEAT_ABI, ASCEND_ERC20_ABI, WHYPE } from '../../src/ascend.js';
+const fmt = (raw) => Number(formatUnits(raw, 18)).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
 const fails = [];
 const check = (ok, label, detail = '') => { console.log((ok ? 'PASS' : 'FAIL') + '  ' + label + (detail ? '  — ' + detail : '')); if (!ok) fails.push(label); };
@@ -28,9 +28,6 @@ const pub = createPublicClient({ chain: elysiumChain, transport: fallback(ELYSIU
 // a stand-in wallet; overrides give it HYPE (and, for Ascend, KNTQ + an allowance)
 const FROM = '0x1111111111111111111111111111111111111111';
 const rich = [{ address: FROM, balance: 10n ** 22n }];
-// KNTQ's balance / allowance slots for FROM, found with eth_createAccessList
-const KNTQ_BAL = '0x8df201bd27f2966348a2a146b04f0d259c4e6d127bc13c15dc7ac7298c950197';
-const KNTQ_ALLOW = '0xf6bcc57364d09afc5100cedb209ea7a55e7819b17a80789c123bc618bd59eeee';
 
 // --- the chain -----------------------------------------------------------------------
 {
@@ -45,26 +42,90 @@ const KNTQ_ALLOW = '0xf6bcc57364d09afc5100cedb209ea7a55e7819b17a80789c123bc618bd
 
 // --- Ascend ----------------------------------------------------------------------------
 {
+  // the storage slots behind a token's balanceOf / allowance, found by trying each slot the call touches
+  const slotFor = async (token, call) => {
+    const data = encodeFunctionData(call);
+    const al = await pub.request({ method: 'eth_createAccessList', params: [{ from: WHYPE, to: token, data }, 'latest'] });
+    for (const { address, storageKeys } of al.accessList) for (const k of storageKeys) {
+      const r = await pub.call({ to: token, data, stateOverride: [{ address, stateDiff: [{ slot: k, value: pad(numberToHex(10n ** 30n)) }] }] }).catch(() => null);
+      if (r?.data && BigInt(r.data) === 10n ** 30n) return { address: getAddress(address), slot: k };
+    }
+    throw new Error('no slot for ' + call.functionName);
+  };
+  const funded = async (token, spender) => {
+    const xs = [await slotFor(token, { abi: ASCEND_ERC20_ABI, functionName: 'balanceOf', args: [FROM] }), await slotFor(token, { abi: ASCEND_ERC20_ABI, functionName: 'allowance', args: [FROM, spender] })];
+    const by = {}; for (const x of xs) (by[x.address] ||= []).push({ slot: x.slot, value: pad(numberToHex(10n ** 30n)) });
+    return [...rich, ...Object.entries(by).map(([address, stateDiff]) => ({ address, stateDiff }))];
+  };
+  const run = (req, ov = rich) => pub.call({ account: FROM, ...req, gas: 30_000_000n, stateOverride: ov }).then((r) => '0x' + r.data.slice(26, 66), (e) => 'ERR ' + why(e));
+
   const eacc = await pub.getTransaction({ hash: '0xb89c3ee665ffb373a1a8ddc1cf0cf5d0d676f190ae615bb0383fac08b21bff24' });
-  const salt = '0x' + eacc.input.slice(10 + 64 * 2, 10 + 64 * 3);
-  check(ascendCalldata({ name: 'e/acc', symbol: 'e/acc', salt, recipients: [eacc.from], shares: [10000n] }) === eacc.input,
-    'Ascend: the encoder rebuilds the real e/acc launch byte for byte');
-  check(ascendDevBuyOut(220n * 10n ** 18n) === 26851265031092631154437968n,
-    "Ascend: a 220 KNTQ dev buy gets exactly Blob's real 26,851,265 tokens — the launch's own buy pays no fee");
-  const plan = await ascendPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE' }).catch((e) => ({ err: why(e) }));
-  check(!plan.err && BigInt(plan.token) < BigInt(KNTQ), 'Ascend: a fresh launch simulates, its coin sorting below KNTQ', plan.err || plan.token);
-  const ov = (amt) => [{ address: KNTQ, stateDiff: [{ slot: KNTQ_BAL, value: pad(numberToHex(amt)) }, { slot: KNTQ_ALLOW, value: pad(numberToHex(amt)) }] }, ...rich];
-  const buy = await ascendPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', devBuyKntq: '220' });
-  const ok = await pub.call({ account: FROM, ...buy.request, gas: 30_000_000n, stateOverride: ov(500n * 10n ** 18n) }).then(() => 'OK').catch(why);
-  check(ok === 'OK' && buy.devBuyMinOut === buy.expectedOut * 99n / 100n, 'Ascend: a 220 KNTQ dev buy simulates, its minimum out 1% under the exact figure', ok);
-  const greedy = { ...buy.request, data: ascendCalldata({ name: 'Wire Test', symbol: 'WIRE', devBuy: buy.devBuy, devBuyMinOut: buy.expectedOut + 10n ** 18n, salt: buy.salt, recipients: buy.recipients, shares: buy.shares }) };
-  const r = await pub.call({ account: FROM, ...greedy, gas: 30_000_000n, stateOverride: ov(500n * 10n ** 18n) }).then(() => 'OK').catch(why);
-  check(/873e2c9a/.test(r), 'Ascend: and a minimum out above the exact figure is refused by the chain — so the figure is the real one');
-  const noAllow = await pub.call({ account: FROM, ...buy.request, gas: 30_000_000n, stateOverride: rich }).then(() => 'OK').catch(why);
-  check(noAllow !== 'OK', 'Ascend: without KNTQ and an allowance the dev buy cannot go through');
-  const split = await ascendPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', split: parseFeeSplit(`${FROM} 70\n0x000000000000000000000000000000000000dEaD 30`) }).catch((e) => ({ err: why(e) }));
-  check(!split.err && split.recipients.length === 2, 'Ascend: fees can be split across wallets', split.err || '70/30');
-  check(ASCEND_SEED.startTick === -117600 && ASCEND_SEED.tickLower === -117400, 'Ascend: the seed range is the one the real launches opened with');
+  const d = decodeFunctionData({ abi: ASCEND_SEAT_ABI, data: eacc.input });
+  check(d.functionName === 'launchChecked' && encodeFunctionData({ abi: ASCEND_SEAT_ABI, functionName: d.functionName, args: d.args }) === eacc.input,
+    "Ascend: the SeatFactory ABI from Ascend's own app rebuilds the real e/acc launch byte for byte");
+  check(d.args[1].holderBpsQuote === 10000 && d.args[1].holderBpsToken === 10000 && d.args[0].fee === 10000,
+    'Ascend: and reads e/acc as a Holder Rewards coin — 100% of its creator fees to holders, 1% trade fee');
+  check(ascendDevBuyOut({ quoteIn: 220n * 10n ** 18n, startTick: -117400, tokenIs0: true }).tokensOut === 26851265031092631154437968n,
+    "Ascend: a 220 KNTQ dev buy gets exactly Blob's real 26,851,265 coins — the launch's own buy pays no fee");
+
+  const ticks = { HYPE: -168600, KNTQ: -117400, USDC: -400600 };
+  for (const q of ASCEND_QUOTES) {
+    const live = await ascendQuote(pub, q.key).catch((e) => ({ err: e.message }));
+    check(!live.err && live.startTick === ticks[q.key], `Ascend: ${q.key} is a live pair on Ascend's launchpad`, live.err || `opens at tick ${live.startTick}`);
+  }
+  const notQuote = await ascendQuote(pub, VOLTA_TOKEN).then(() => 'taken', (e) => e.message);
+  check(/does not take/.test(notQuote), 'Ascend: a token the launchpad does not allow is refused as a pair', notQuote);
+
+  // every pair x every coin type: the coin lands where predicted, the dev buy exactly as worked out
+  const buys = { HYPE: '0.5', KNTQ: '100', USDC: '25' };
+  const types = [
+    ['Vanilla', { type: 'vanilla' }], ['Holder Rewards 100%', { type: 'holders', holdersQuotePct: '100', holdersTokenPct: '100' }],
+    ['Holder Rewards 50/50', { type: 'holders', holdersQuotePct: '50', holdersTokenPct: '50' }], ['Buyback (burned)', { type: 'buyback', burn: true }],
+    ['Custom 40/40/20', { type: 'custom', holdersPct: '40', buybackPct: '40', creatorPct: '20', burn: false }],
+  ];
+  for (const q of ASCEND_QUOTES) {
+    const orderings = new Set();
+    for (const [label, t] of types) {
+      const plan = await ascendPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', quote: q.key, feePct: '2', devBuy: buys[q.key], ...t });
+      orderings.add(plan.tokenIs0);
+      const ov = await funded(q.token, plan.target);
+      const exact = await run(plan.withMinOut(plan.expectedOut), ov);
+      const over = await run(plan.withMinOut(plan.expectedOut + 1n), ov);
+      check(exact.toLowerCase() === plan.token.toLowerCase() && /873e2c9a/.test(over),
+        `Ascend: ${q.key} · ${label} with a ${buys[q.key]} ${q.key} dev buy launches where predicted, its output exact to the wei`,
+        exact.startsWith('ERR') ? exact : `${fmt(plan.expectedOut)} coins, coin ${plan.tokenIs0 ? 'below' : 'above'} the quote`);
+    }
+    // both sides of the quote, since the coin's address decides the price direction
+    for (let i = 0; i < 12 && orderings.size < 2; i++) {
+      const plan = await ascendPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', quote: q.key, feePct: '2', devBuy: buys[q.key] });
+      if (orderings.has(plan.tokenIs0)) continue;
+      orderings.add(plan.tokenIs0);
+      const ov = await funded(q.token, plan.target);
+      const ok = (await run(plan.withMinOut(plan.expectedOut), ov)).toLowerCase() === plan.token.toLowerCase() && /873e2c9a/.test(await run(plan.withMinOut(plan.expectedOut + 1n), ov));
+      check(ok, `Ascend: ${q.key} · the dev buy is exact with the coin ${plan.tokenIs0 ? 'below' : 'above'} the quote too`);
+    }
+  }
+
+  const bare = await ascendPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', quote: 'HYPE', feePct: '10' });
+  check((await run(bare.request)).toLowerCase() === bare.token.toLowerCase(), 'Ascend: a HYPE pair with a 10% fee and no dev buy launches (only gas)');
+  const fees = await Promise.all(['0.99', '10.01', '2.555'].map((f) => ascendPlan(pub, { account: FROM, name: 'x', symbol: 'x', feePct: f }).then(() => 'taken', (e) => e.message)));
+  check(fees.every((m) => /1%–10%/.test(m)), 'Ascend: a fee under 1%, over 10% or with three decimals is refused');
+  const noPlan = await ascendPlan(pub, { account: FROM, name: 'Big', symbol: 'BIG', quote: 'KNTQ', devBuy: '3000' }).then(() => 'taken', (e) => e.message);
+  check(/allocation plan/.test(noPlan), 'Ascend: a dev buy over 10% of supply asks for an allocation plan, as Ascend does');
+  const big = await ascendPlan(pub, { account: FROM, name: 'Big', symbol: 'BIG', quote: 'KNTQ', devBuy: '3000', plan: 'held for a community airdrop' });
+  check((await run(big.request, await funded(KNTQ, big.target))).toLowerCase() === big.token.toLowerCase(), 'Ascend: and with one it launches, the plan disclosed after the call', `${fmt(big.expectedOut)} coins`);
+
+  const seatErr = (o) => { try { ascendSeat(o); return 'taken'; } catch (e) { return e.message; } };
+  check(/add up to 90%/.test(seatErr({ type: 'custom', holdersPct: '50', buybackPct: '20', creatorPct: '20', payees: [{ wallet: FROM, bps: 10000 }] })), 'Ascend: a custom mix that does not make 100% is refused');
+  check(/add up to 100%/.test(seatErr({ type: 'holders', payees: [{ wallet: FROM, bps: 6000 }] })), 'Ascend: payees that do not make 100% are refused');
+  check(/at most 10/.test(seatErr({ type: 'holders', payees: [...Array(11)].map(() => ({ wallet: FROM, bps: 909 })) })), 'Ascend: more than 10 payees is refused');
+  check(/burn address/.test(seatErr({ type: 'holders', payees: [{ wallet: '0x000000000000000000000000000000000000dEaD', bps: 10000 }] })), 'Ascend: the burn address cannot be a payee');
+  // a HYPE dev buy from a wallet holding native HYPE but no WHYPE: wrap first, then approve
+  const hypeBuy = await ascendPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', quote: 'HYPE', devBuy: '0.5' });
+  const rpc = createPublicClient({ chain: elysiumChain, transport: http('https://rpc.volta.family') });
+  const holder = getAddress('0x0000000000000000000000000000000000000000');
+  const steps = await ascendDevBuyNeeds({ ...rpc, getBalance: async () => 10n ** 21n, readContract: (a) => rpc.readContract(a) }, holder, hypeBuy).catch((e) => ({ err: e.message }));
+  check(!steps.err && steps.steps.map((s) => s.kind).join() === 'wrap,approve', 'Ascend: a HYPE dev buy wraps the HYPE, then approves WHYPE to the factory it calls', steps.err || steps.steps.map((s) => s.kind).join(', '));
 }
 
 // --- Montra ----------------------------------------------------------------------------
@@ -137,8 +198,22 @@ for (const [id, fam] of [['volta-elysium', 'volta'], ['montra-elysium', 'montra'
 }
 for (const id of ['voltaRow', 'voltaPair', 'voltaFee', 'voltaSplitCreator', 'voltaSplitBuyback', 'voltaSplitHolders', 'voltaDevBuy', 'voltaSnipe', 'voltaSnipeStart', 'voltaSnipeMinutes', 'voltaSchedule', 'voltaCreator',
   'montraRow', 'montraFee', 'montraSnipe', 'montraSupply', 'montraBuy', 'montraFeesTo', 'montraSplit',
-  'ascendRow', 'ascendDevBuy', 'ascendSplit']) {
+  'ascendRow', 'ascendQuote', 'ascendQuoteCustom', 'ascendFee', 'ascendDevBuy', 'ascendType', 'ascendCreator', 'ascendHoldersQuote', 'ascendHoldersToken',
+  'ascendMixHolders', 'ascendMixBuyback', 'ascendMixCreator', 'ascendBurn', 'ascendSplit', 'ascendDevBuyTo', 'ascendPlan']) {
   check(HTML.includes(`id="${id}"`), `UI has #${id}`);
+}
+
+// --- every pair each contract allows is in the form ------------------------------------
+{
+  const opts = (id) => {
+    const m = HTML.match(new RegExp(`<select id="${id}">([\\s\\S]*?)</select>`));
+    return m ? [...m[1].matchAll(/value="([^"]+)"/g)].map((x) => x[1]) : [];
+  };
+  const asc = opts('ascendQuote'), vol = opts('voltaPair');
+  check(ASCEND_QUOTES.every((q) => asc.includes(q.key)) && asc.includes('custom'), 'UI: Ascend offers every live pair (HYPE, KNTQ, USDC) and any other its launchpad allows', asc.join(' / '));
+  check(VOLTA_PAIRS.every((p) => vol.includes(p.key)), 'UI: Volta offers every pair its registry approves (HYPE, KNTQ, VOLTA)', vol.join(' / '));
+  check(['vanilla', 'holders', 'buyback', 'custom'].every((t) => opts('ascendType').includes(t)), 'UI: Ascend offers all four coin types, Holder Rewards among them');
+  check(opts('montraFeesTo').includes('holders'), 'UI: Montra can send fees to holders');
 }
 
 console.log('');

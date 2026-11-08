@@ -5409,27 +5409,45 @@ async function launchMontra(pad, { name, symbol, logo, description, twitter, web
   return { token, hash };
 }
 
+/// The Ascend form, as ascendPlan options.
+async function ascendFormOptions() {
+  const E = await import('./elysium.js');
+  const quoteSel = $('ascendQuote').value;
+  const type = $('ascendType').value;
+  const payees = E.parseFeeSplit($('ascendSplit').value);
+  return {
+    quote: quoteSel === 'custom' ? $('ascendQuoteCustom').value.trim() : quoteSel,
+    feePct: $('ascendFee').value.trim() || '1',
+    devBuy: $('ascendDevBuy').value.trim() || '0',
+    type,
+    recipient: $('ascendCreator').value.trim() || null,
+    holdersQuotePct: $('ascendHoldersQuote').value.trim() || '0', holdersTokenPct: $('ascendHoldersToken').value.trim() || '0',
+    holdersPct: $('ascendMixHolders').value.trim() || '0', buybackPct: $('ascendMixBuyback').value.trim() || '0', creatorPct: $('ascendMixCreator').value.trim() || '0',
+    burn: $('ascendBurn').checked,
+    payees: payees.length ? payees : null,
+    devBuyTo: $('ascendDevBuyTo').value.trim() || null,
+    plan: $('ascendPlan').value.trim() || null,
+  };
+}
+
 async function launchAscend(pad, { name, symbol }) {
   const A = await import('./ascend.js');
-  const E = await import('./elysium.js');
   const pub = publicClientFor(pad);
   const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
-  const split = E.parseFeeSplit($('ascendSplit').value);
-  const devBuyKntq = $('ascendDevBuy').value.trim() || '0';
+  const o = { account: account.address, name, symbol, ...(await ascendFormOptions()) };
 
-  // Ascend stores only the name and ticker on-chain; its site keeps the image itself
-  setStatus('finding the coin’s address...');
-  const plan = await A.ascendPlan(pub, { account: account.address, name, symbol, split, devBuyKntq });
+  setStatus('reading Ascend’s launch terms and finding the coin’s address...');
+  const plan = await A.ascendPlan(pub, o);
+  const sym = plan.quote.symbol;
 
-  if (plan.devBuy > 0n) {
-    const need = await A.ascendDevBuyNeeds(pub, account.address, plan.devBuy);
-    if (need.short > 0n) throw new Error(`the dev buy is ${devBuyKntq} KNTQ, the wallet holds ${formatUnits(need.balance, 18)} KNTQ`);
-    if (need.needsApproval) {
-      setStatus(`approving ${devBuyKntq} KNTQ to the Ascend factory...`);
-      const ah = await wallet.writeContract({ address: E.KNTQ, abi: A.ASCEND_KNTQ_ABI, functionName: 'approve', args: [A.ASCEND_FACTORY, plan.devBuy] });
-      const ar = await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
-      if (ar.status !== 'success') throw new Error('the KNTQ approval reverted: ' + ah);
-    }
+  // fund the dev buy: wrap HYPE if it is the pair, then approve the factory
+  const needs = await A.ascendDevBuyNeeds(pub, account.address, plan);
+  if (needs.short > 0n) throw new Error(`the dev buy is ${formatUnits(plan.devBuy, plan.quote.decimals)} ${sym}, the wallet holds ${formatUnits(needs.balance, plan.quote.decimals)}`);
+  for (const step of needs.steps) {
+    setStatus(step.kind === 'wrap' ? `wrapping ${formatEther(step.amount)} HYPE to WHYPE...` : `approving ${formatUnits(step.amount, plan.quote.decimals)} ${sym} to the Ascend factory...`);
+    const h = await wallet.writeContract(step.request);
+    const r = await pub.waitForTransactionReceipt({ hash: h, confirmations: 1 });
+    if (r.status !== 'success') throw new Error(`the ${step.kind} transaction reverted: ${pad.explorer}/tx/${h}`);
   }
 
   setStatus('simulating the launch...');
@@ -5441,13 +5459,14 @@ async function launchAscend(pad, { name, symbol }) {
     throw new Error('Ascend would refuse this launch: ' + elysiumReason(e, A.ASCEND_ERRORS));
   }
   const { hash } = await elysiumSend(pad, pub, wallet, plan.request, 'Ascend');
-  const token = getAddress(plan.token);
+  const token = plan.token;
 
   rememberLaunch(pad, token, symbol);
   $('status').innerHTML =
     `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}<br>` +
-    `Ascend · paired with KNTQ · fees to ${plan.recipients.length === 1 ? 'one wallet' : plan.recipients.length + ' wallets'}` +
-    (plan.devBuy > 0n ? ` · dev buy ${esc(devBuyKntq)} KNTQ → ${fmtTok(plan.expectedOut)} ${esc(symbol)}` : ' · no dev buy') + '<br>' +
+    `Ascend · paired with ${esc(sym)} · ${plan.fee / 10000}% trade fee · ${esc(A.ascendSeatSummary(plan.seatConfig))}` +
+    (plan.seat ? ` (seat ${plan.seat.slice(0, 10)}…)` : '') +
+    (plan.devBuy > 0n ? ` · dev buy ${esc(formatUnits(plan.devBuy, plan.quote.decimals))} ${esc(sym)} → ${fmtTok(plan.expectedOut)} ${esc(symbol)}` : ' · no dev buy') + '<br>' +
     `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a> · ` +
     `<a href="${pad.site(token)}" target="_blank" rel="noopener">token</a> · ` +
     `<a href="https://app.ascendlaunch.xyz/" target="_blank" rel="noopener">Ascend</a>`;
@@ -5489,13 +5508,35 @@ async function updateElysiumUI(pad) {
           + ` · ${whole.toLocaleString('en-US')} supply · fees to ${mode}`;
       } catch (e) { $('montraLine').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     } else if (pad.family === 'ascend') {
+      const qSel = $('ascendQuote').value, type = $('ascendType').value;
+      $('ascendQuoteCustom').classList.toggle('hidden', qSel !== 'custom');
+      $('ascendBuySym').textContent = qSel === 'custom' ? 'quote' : qSel;
+      $('ascendVanillaWrap').classList.toggle('hidden', type !== 'vanilla');
+      $('ascendHoldersWrap').classList.toggle('hidden', type !== 'holders');
+      $('ascendMixWrap').classList.toggle('hidden', type !== 'custom');
+      $('ascendBurnWrap').classList.toggle('hidden', type !== 'buyback' && type !== 'custom');
+      $('ascendSeatWrap').classList.toggle('hidden', type === 'vanilla');
       try {
         const A = await import('./ascend.js');
         const E = await import('./elysium.js');
-        const split = E.parseFeeSplit($('ascendSplit').value);
-        const devBuy = E.parseAmount($('ascendDevBuy').value.trim() || '0', 18);
-        $('ascendLine').textContent = (devBuy > 0n ? `dev buy ${formatUnits(devBuy, 18)} KNTQ → ${fmtTok(A.ascendDevBuyOut(devBuy))} tokens (no fee on the first trade)` : 'no dev buy')
-          + ` · fees to ${split.length ? split.length + ' wallets' : 'you'}`;
+        const o = await ascendFormOptions();
+        const fee = Math.round(Number(o.feePct) * 10000);
+        if (!/^\d{1,2}(\.\d{1,2})?$/.test(o.feePct) || fee < A.ASCEND_FEE.minPips || fee > A.ASCEND_FEE.maxPips) throw new Error('the trade fee is 1%–10%, with at most two decimals');
+        const seat = A.ascendSeat({ ...o, payees: o.payees || [{ wallet: account?.address || '0x000000000000000000000000000000000000beef', bps: 10000 }] });
+        const q = A.ASCEND_QUOTES.find((x) => x.key === qSel);
+        let buy = 'no dev buy';
+        if (q) {
+          const devBuy = E.parseAmount(o.devBuy, q.decimals);
+          if (devBuy > 0n) {
+            // the exact figure depends on whether the coin sorts below the quote; show the smaller
+            const startTick = { HYPE: -168600, KNTQ: -117400, USDC: -400600 }[q.key];
+            const outs = [true, false].map((tokenIs0) => A.ascendDevBuyOut({ quoteIn: devBuy, startTick, tokenIs0 }).tokensOut);
+            const out = outs[0] < outs[1] ? outs[0] : outs[1];
+            buy = `dev buy ${formatUnits(devBuy, q.decimals)} ${q.symbol} → ~${fmtTok(out)} coins (${(Number(out * 10000n / A.ASCEND_SUPPLY) / 100).toFixed(2)}% of supply, no fee)`
+              + (out * 10n > A.ASCEND_SUPPLY && !o.plan ? ' — over 10%: add an allocation plan' : '');
+          }
+        } else if (o.devBuy && o.devBuy !== '0') buy = `dev buy ${o.devBuy} of the quote`;
+        $('ascendLine').textContent = `${fee / 10000}% trade fee · ${A.ascendSeatSummary(seat)} · ${buy}`;
       } catch (e) { $('ascendLine').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     }
   } catch { /* preview only */ }
@@ -8595,7 +8636,8 @@ function init() {
   $('hookePay').addEventListener('change', () => { if (activePad.family === 'hooke') updateHookeUI(activePad); });
   // Elysium pads: repaint the preview line as the form changes
   for (const id of ['voltaPair', 'voltaFee', 'voltaSplitCreator', 'voltaSplitBuyback', 'voltaSplitHolders', 'voltaDevBuy', 'voltaSnipe', 'voltaSnipeStart', 'voltaSnipeMinutes', 'voltaSchedule', 'voltaCreator',
-    'montraFee', 'montraSnipe', 'montraSupply', 'montraBuy', 'montraFeesTo', 'montraFeeWallet', 'montraSplit', 'ascendDevBuy', 'ascendSplit']) {
+    'montraFee', 'montraSnipe', 'montraSupply', 'montraBuy', 'montraFeesTo', 'montraFeeWallet', 'montraSplit', 'ascendDevBuy', 'ascendSplit',
+    'ascendQuote', 'ascendQuoteCustom', 'ascendFee', 'ascendType', 'ascendCreator', 'ascendHoldersQuote', 'ascendHoldersToken', 'ascendMixHolders', 'ascendMixBuyback', 'ascendMixCreator', 'ascendBurn', 'ascendDevBuyTo', 'ascendPlan']) {
     $(id).addEventListener('input', () => { if (['volta', 'montra', 'ascend'].includes(activePad.family)) updateElysiumUI(activePad); });
     $(id).addEventListener('change', () => { if (['volta', 'montra', 'ascend'].includes(activePad.family)) updateElysiumUI(activePad); });
   }
