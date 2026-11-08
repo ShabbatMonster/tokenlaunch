@@ -1185,6 +1185,33 @@ const PADS = [
     site: (t) => `https://robinhoodchain.blockscout.com/token/${t}`,
     nativeSymbol: 'ETH', curve: null,
   },
+  // Elysium (Kinetiq's Orbit L2 on Hyperliquid, chain 99901, HYPE gas): three
+  // launchpads, each opening a coin straight into a Uniswap v4 pool. Volta's
+  // RPC is used because it serves state overrides. See src/elysium.js.
+  {
+    // Volta - a Flaunch fork: HYPE / KNTQ / VOLTA pairs, 3-way fee split,
+    // anti-snipe, scheduling. See src/volta.js.
+    id: 'volta-elysium', label: 'Volta · Elysium', vm: 'evm', enabled: true, family: 'volta',
+    chainId: 99901, rpc: 'https://rpc.volta.family', explorer: 'https://explorer.volta.family',
+    site: (t) => `https://www.volta.family/token/${t}`,
+    nativeSymbol: 'HYPE', curve: null,
+  },
+  {
+    // Montra - a HYPE-paired LaunchFactory; picks one of its live fee x
+    // anti-snipe configs, custom supply, fees to creator/holders/split. See src/montra.js.
+    id: 'montra-elysium', label: 'Montra · Elysium', vm: 'evm', enabled: true, family: 'montra',
+    chainId: 99901, rpc: 'https://rpc.volta.family', explorer: 'https://explorer.volta.family',
+    site: (t) => `https://montramarkets.xyz/token/${t}`,
+    nativeSymbol: 'HYPE', curve: null,
+  },
+  {
+    // Ascend - KNTQ-paired v4 hook pool, no curve; the launch call was
+    // rebuilt from the chain (no published ABI). See src/ascend.js.
+    id: 'ascend-elysium', label: 'Ascend · Elysium', vm: 'evm', enabled: true, family: 'ascend',
+    chainId: 99901, rpc: 'https://rpc.volta.family', explorer: 'https://explorer.volta.family',
+    site: (t) => `https://explorer.volta.family/token/${t}`,
+    nativeSymbol: 'HYPE', curve: null,
+  },
   {
     // Mimic - launch on whatever Robinhood factory another token came from.
     // Paste that token; its launch call is recovered and decoded, your name,
@@ -2476,6 +2503,14 @@ async function launch() {
 
   if (pad.family === 'mimic') {
     await launchMimic(pad, { name, symbol, logo, description, twitter, website });
+    refreshBalance();
+    renderTokenList();
+    return;
+  }
+
+  if (pad.family === 'volta' || pad.family === 'montra' || pad.family === 'ascend') {
+    const fn = { volta: launchVolta, montra: launchMontra, ascend: launchAscend }[pad.family];
+    await fn(pad, { name, symbol, logo, description, twitter, website });
     refreshBalance();
     renderTokenList();
     return;
@@ -5243,6 +5278,230 @@ async function launchHooke(pad, { name, symbol, logo, description, twitter, webs
   return { token: predicted, hash };
 }
 
+// --- Elysium: Volta, Montra, Ascend ------------------------------------------
+// Every launch is planned in src/volta.js / montra.js / ascend.js, simulated
+// against the live contracts from your own wallet, and only then signed with
+// the key you unlocked this session. Nothing is sent if the simulation fails.
+
+/// A revert, said plainly: the contract's named error if viem decoded one.
+function elysiumReason(e, known = {}) {
+  const raw = JSON.stringify(e?.cause?.data ?? e?.data ?? '') + ' ' + (e?.message || '');
+  for (const [sel, why] of Object.entries(known)) if (raw.includes(sel.slice(2))) return why;
+  const named = e?.cause?.data?.errorName || e?.data?.errorName;
+  if (named) return named + (e.cause?.data?.args?.length ? `(${e.cause.data.args.map(String).join(', ')})` : '');
+  return e?.shortMessage || e?.message || String(e);
+}
+
+/// One metadata JSON for both Volta and Montra: their sites write the same fields.
+async function elysiumMetadata({ name, symbol, logo, description, twitter, website }) {
+  const meta = { name, symbol, description: description || '', image: 'ipfs://' + logo };
+  if (twitter) meta.twitter = twitter;
+  if (website) meta.website = website;
+  return 'ipfs://' + await uploadJsonToIpfs(meta);
+}
+
+const fmtTok = (raw) => Number(formatUnits(raw, 18)).toLocaleString(undefined, { maximumFractionDigits: 0 });
+
+async function elysiumSend(pad, pub, wallet, request, label) {
+  setStatus(`sending the ${label} launch...`);
+  const hash = request.abi ? await wallet.writeContract(request) : await wallet.sendTransaction(request);
+  setStatus(`tx sent: ${hash}\nwaiting for confirmation...`);
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  if (receipt.status !== 'success') throw new Error(`${label} launch reverted: ${pad.explorer}/tx/${hash}`);
+  return { hash, receipt };
+}
+
+async function launchVolta(pad, { name, symbol, logo, description, twitter, website }) {
+  const V = await import('./volta.js');
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+  const sched = $('voltaSchedule').value;
+  const o = {
+    account: account.address, name, symbol, pair: $('voltaPair').value,
+    swapFeePct: $('voltaFee').value.trim() || '2',
+    split: { creator: $('voltaSplitCreator').value.trim() || 0, buyback: $('voltaSplitBuyback').value.trim() || 0, holders: $('voltaSplitHolders').value.trim() || 0 },
+    antiSnipe: $('voltaSnipe').checked ? { startPct: $('voltaSnipeStart').value.trim(), minutes: $('voltaSnipeMinutes').value.trim() } : null,
+    flaunchAt: sched ? new Date(sched).toISOString() : null,
+    creator: $('voltaCreator').value.trim() || null,
+    devBuyHype: $('voltaDevBuy').value.trim() || '0',
+  };
+  V.voltaCheck(o);   // refuse a bad form before uploading anything
+
+  setStatus('publishing token metadata to IPFS...');
+  o.tokenUri = await elysiumMetadata({ name, symbol, logo, description, twitter, website });
+
+  setStatus('reading Volta’s launch fee and price...');
+  const plan = await V.voltaPlan(pub, o);
+  const bal = await pub.getBalance({ address: account.address });
+  if (bal < plan.request.value) throw new Error(`the launch needs ${formatEther(plan.request.value)} HYPE (fee ${formatEther(plan.fee)} + dev buy), the wallet has ${formatEther(bal)}`);
+
+  setStatus('simulating the launch...');
+  let token;
+  try {
+    ({ result: token } = await pub.simulateContract({ ...plan.request, account }));
+  } catch (e) {
+    throw new Error('Volta would refuse this launch: ' + elysiumReason(e));
+  }
+  const { hash } = await elysiumSend(pad, pub, wallet, plan.request, 'Volta');
+
+  rememberLaunch(pad, token, symbol);
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}<br>` +
+    `Volta · paired with ${esc(plan.pair.symbol)} · ${plan.swapFee / 100}% fee split ${plan.split.creator / 100}/${plan.split.buyback / 100}/${plan.split.holders / 100}` +
+    (plan.premineAmount > 0n ? ` · dev buy ${esc(o.devBuyHype)} HYPE → ${fmtTok(plan.premineAmount)} ${esc(symbol)}` : ' · no dev buy') +
+    (plan.antiSnipe.duration ? ` · anti-snipe ${plan.antiSnipe.startFee / 100}% for ${plan.antiSnipe.duration / 60} min` : '') +
+    (plan.flaunchAt ? ` · opens ${esc(new Date(Number(plan.flaunchAt) * 1000).toLocaleString())}` : '') + '<br>' +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a> · ` +
+    `<a href="${pad.site(token)}" target="_blank" rel="noopener">coin on Volta</a>`;
+  return { token, hash };
+}
+
+/// The Montra fee recipients the form describes.
+async function montraFeesFromForm() {
+  const E = await import('./elysium.js');
+  const M = await import('./montra.js');
+  const mode = $('montraFeesTo').value;
+  if (mode === 'wallet') return { mode, wallet: $('montraFeeWallet').value.trim() };
+  if (mode === 'split') return { mode, split: E.parseFeeSplit($('montraSplit').value, { holdersSentinel: M.MONTRA_HOLDERS }) };
+  return { mode };
+}
+
+async function launchMontra(pad, { name, symbol, logo, description, twitter, website }) {
+  const M = await import('./montra.js');
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+  const o = {
+    account: account.address, name, symbol, description, twitter, website, logo: 'ipfs://' + logo,
+    feePct: +$('montraFee').value, antiSnipeSeconds: +$('montraSnipe').value,
+    supply: $('montraSupply').value.trim() || '1000000000',
+    firstBuyHype: $('montraBuy').value.trim() || '0',
+    fees: await montraFeesFromForm(),
+  };
+  M.montraFeeRecipients(o.fees);   // refuse a bad recipient before uploading anything
+
+  setStatus('publishing token metadata to IPFS...');
+  o.metadataURI = await elysiumMetadata({ name, symbol, logo, description, twitter, website });
+
+  setStatus('reading Montra’s configs and fee...');
+  const plan = await M.montraPlan(pub, o);
+  const bal = await pub.getBalance({ address: account.address });
+  if (bal < plan.request.value) throw new Error(`the launch needs ${formatEther(plan.request.value)} HYPE (fee ${formatEther(plan.launchFee)} + first buy), the wallet has ${formatEther(bal)}`);
+
+  setStatus('simulating the launch...');
+  let token;
+  try {
+    const { result } = await pub.simulateContract({ ...plan.request, account });
+    token = result[0];
+  } catch (e) {
+    throw new Error('Montra would refuse this launch: ' + elysiumReason(e));
+  }
+  const { hash } = await elysiumSend(pad, pub, wallet, plan.request, 'Montra');
+
+  rememberLaunch(pad, token, symbol);
+  const c = plan.config;
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}<br>` +
+    `Montra · config ${c.id}: ${c.feePct}% fee (floor ${c.feeFloorPct}%), ` + (c.antiSnipeSeconds ? `${c.antiSnipeSeconds}s anti-snipe` : 'no anti-snipe') +
+    ` · fees to ${esc(o.fees.mode)}` +
+    (plan.expectedOut > 0n ? ` · first buy ${esc(o.firstBuyHype)} HYPE → ${fmtTok(plan.expectedOut)} ${esc(symbol)}` : ' · no first buy') + '<br>' +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a> · ` +
+    `<a href="${pad.site(token)}" target="_blank" rel="noopener">coin on Montra</a>`;
+  return { token, hash };
+}
+
+async function launchAscend(pad, { name, symbol }) {
+  const A = await import('./ascend.js');
+  const E = await import('./elysium.js');
+  const pub = publicClientFor(pad);
+  const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
+  const split = E.parseFeeSplit($('ascendSplit').value);
+  const devBuyKntq = $('ascendDevBuy').value.trim() || '0';
+
+  // Ascend stores only the name and ticker on-chain; its site keeps the image itself
+  setStatus('finding the coin’s address...');
+  const plan = await A.ascendPlan(pub, { account: account.address, name, symbol, split, devBuyKntq });
+
+  if (plan.devBuy > 0n) {
+    const need = await A.ascendDevBuyNeeds(pub, account.address, plan.devBuy);
+    if (need.short > 0n) throw new Error(`the dev buy is ${devBuyKntq} KNTQ, the wallet holds ${formatUnits(need.balance, 18)} KNTQ`);
+    if (need.needsApproval) {
+      setStatus(`approving ${devBuyKntq} KNTQ to the Ascend factory...`);
+      const ah = await wallet.writeContract({ address: E.KNTQ, abi: A.ASCEND_KNTQ_ABI, functionName: 'approve', args: [A.ASCEND_FACTORY, plan.devBuy] });
+      const ar = await pub.waitForTransactionReceipt({ hash: ah, confirmations: 1 });
+      if (ar.status !== 'success') throw new Error('the KNTQ approval reverted: ' + ah);
+    }
+  }
+
+  setStatus('simulating the launch...');
+  try {
+    const r = await pub.call({ account: account.address, ...plan.request });
+    const got = '0x' + r.data.slice(26, 66);
+    if (got.toLowerCase() !== plan.token.toLowerCase()) throw new Error(`the factory would create ${got}, not ${plan.token}`);
+  } catch (e) {
+    throw new Error('Ascend would refuse this launch: ' + elysiumReason(e, A.ASCEND_ERRORS));
+  }
+  const { hash } = await elysiumSend(pad, pub, wallet, plan.request, 'Ascend');
+  const token = getAddress(plan.token);
+
+  rememberLaunch(pad, token, symbol);
+  $('status').innerHTML =
+    `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}<br>` +
+    `Ascend · paired with KNTQ · fees to ${plan.recipients.length === 1 ? 'one wallet' : plan.recipients.length + ' wallets'}` +
+    (plan.devBuy > 0n ? ` · dev buy ${esc(devBuyKntq)} KNTQ → ${fmtTok(plan.expectedOut)} ${esc(symbol)}` : ' · no dev buy') + '<br>' +
+    `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a> · ` +
+    `<a href="${pad.site(token)}" target="_blank" rel="noopener">token</a> · ` +
+    `<a href="https://app.ascendlaunch.xyz/" target="_blank" rel="noopener">Ascend</a>`;
+  return { token, hash };
+}
+
+/// The live preview under each Elysium form: what the inputs come to, or why
+/// they will be refused - worked out locally, nothing sent.
+async function updateElysiumUI(pad) {
+  try {
+    if (pad.family === 'volta') {
+      const V = await import('./volta.js');
+      const on = $('voltaSnipe').checked;
+      $('voltaSnipeStart').disabled = !on; $('voltaSnipeMinutes').disabled = !on;
+      const sched = $('voltaSchedule').value;
+      try {
+        const c = V.voltaCheck({
+          name: 'x', symbol: 'x', pair: $('voltaPair').value, swapFeePct: $('voltaFee').value.trim() || '2',
+          split: { creator: $('voltaSplitCreator').value.trim() || 0, buyback: $('voltaSplitBuyback').value.trim() || 0, holders: $('voltaSplitHolders').value.trim() || 0 },
+          antiSnipe: on ? { startPct: $('voltaSnipeStart').value.trim(), minutes: $('voltaSnipeMinutes').value.trim() } : null,
+          flaunchAt: sched ? new Date(sched).toISOString() : null, creator: $('voltaCreator').value.trim() || null,
+          devBuyHype: $('voltaDevBuy').value.trim() || '0',
+        });
+        $('voltaLine').textContent = `${c.swapFee / 100}% swap fee · ${c.split.creator / 100}% creator / ${c.split.buyback / 100}% buyback / ${c.split.holders / 100}% holders`
+          + (c.antiSnipe.duration ? ` · anti-snipe from ${c.antiSnipe.startFee / 100}% over ${c.antiSnipe.duration / 60} min` : '')
+          + (c.devBuy > 0n ? ` · dev buy ${formatEther(c.devBuy)} HYPE` + (c.pair.route ? ` (swapped to ${c.pair.symbol})` : '') : ' · no dev buy');
+      } catch (e) { $('voltaLine').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    } else if (pad.family === 'montra') {
+      const mode = $('montraFeesTo').value;
+      $('montraWalletWrap').classList.toggle('hidden', mode !== 'wallet');
+      $('montraSplitWrap').classList.toggle('hidden', mode !== 'split');
+      try {
+        const M = await import('./montra.js');
+        M.montraFeeRecipients(await montraFeesFromForm());
+        const whole = BigInt(($('montraSupply').value.trim() || '1000000000').replace(/[,_\s]/g, ''));
+        if (whole < M.MONTRA_MIN_SUPPLY || whole > M.MONTRA_MAX_SUPPLY) throw new Error('Montra supply is 1,000,000,000 to 1,000,000,000,000,000 whole tokens');
+        const snipe = +$('montraSnipe').value;
+        $('montraLine').textContent = `${$('montraFee').value}% trading fee · ` + (snipe ? `${snipe}s anti-snipe` : 'no anti-snipe')
+          + ` · ${whole.toLocaleString('en-US')} supply · fees to ${mode}`;
+      } catch (e) { $('montraLine').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    } else if (pad.family === 'ascend') {
+      try {
+        const A = await import('./ascend.js');
+        const E = await import('./elysium.js');
+        const split = E.parseFeeSplit($('ascendSplit').value);
+        const devBuy = E.parseAmount($('ascendDevBuy').value.trim() || '0', 18);
+        $('ascendLine').textContent = (devBuy > 0n ? `dev buy ${formatUnits(devBuy, 18)} KNTQ → ${fmtTok(A.ascendDevBuyOut(devBuy))} tokens (no fee on the first trade)` : 'no dev buy')
+          + ` · fees to ${split.length ? split.length + ' wallets' : 'you'}`;
+      } catch (e) { $('ascendLine').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    }
+  } catch { /* preview only */ }
+}
+
+
 // --- Mimic ------------------------------------------------------------------
 // The loaded template lives here between LOAD and LAUNCH, with the vanity
 // recipe (if the reference address is a mined one) and the last mined salt.
@@ -6615,6 +6874,12 @@ function applyPadUI(pad) {
   const long = pad.family === 'long';
   const lunch = pad.family === 'lunch';
   const hooke = pad.family === 'hooke';
+  const volta = pad.family === 'volta', montra = pad.family === 'montra', ascend = pad.family === 'ascend';
+  const elysium = volta || montra || ascend;
+  $('voltaRow').classList.toggle('hidden', !volta);
+  $('montraRow').classList.toggle('hidden', !montra);
+  $('ascendRow').classList.toggle('hidden', !ascend);
+  if (elysium) updateElysiumUI(pad);
   const mimic = pad.family === 'mimic';
   const solMimic = pad.family === 'solmimic';
   $('solMimicRow').classList.toggle('hidden', !solMimic);   // Solana Mimic: a curve copied off a coin
@@ -6654,8 +6919,8 @@ function applyPadUI(pad) {
   // B20 has no bonding curve / dev buy — you mint a fixed on-chain allocation. Its
   // "distributions" are the insider allocations (minted at creation, not transfers).
   // flap/pons-v2 have their own dev-buy field (in the pair token), so hide the ETH one.
-  $('devBuyBlock').classList.toggle('hidden', sol || uni || b20 || flap || ponsV2 || lunch || hooke || mimic);
-  $('distroBlock').classList.toggle('hidden', sol || uni || dyor || flap || hooke || mimic);
+  $('devBuyBlock').classList.toggle('hidden', sol || uni || b20 || flap || ponsV2 || lunch || hooke || mimic || elysium);
+  $('distroBlock').classList.toggle('hidden', sol || uni || dyor || flap || hooke || mimic || elysium);
   if (flap) updateFlapUI(pad);
   if (ponsV2) updatePonsUI(pad);
   if (v4curve) updateV4CurveUI(pad);
@@ -8328,6 +8593,12 @@ function init() {
 
   $('pumpQuote').addEventListener('change', () => { paintPumpDevSym(); paintPumpDepth(); });
   $('hookePay').addEventListener('change', () => { if (activePad.family === 'hooke') updateHookeUI(activePad); });
+  // Elysium pads: repaint the preview line as the form changes
+  for (const id of ['voltaPair', 'voltaFee', 'voltaSplitCreator', 'voltaSplitBuyback', 'voltaSplitHolders', 'voltaDevBuy', 'voltaSnipe', 'voltaSnipeStart', 'voltaSnipeMinutes', 'voltaSchedule', 'voltaCreator',
+    'montraFee', 'montraSnipe', 'montraSupply', 'montraBuy', 'montraFeesTo', 'montraFeeWallet', 'montraSplit', 'ascendDevBuy', 'ascendSplit']) {
+    $(id).addEventListener('input', () => { if (['volta', 'montra', 'ascend'].includes(activePad.family)) updateElysiumUI(activePad); });
+    $(id).addEventListener('change', () => { if (['volta', 'montra', 'ascend'].includes(activePad.family)) updateElysiumUI(activePad); });
+  }
   $('mimicLoad').addEventListener('click', async () => {
     const btn = $('mimicLoad');
     btn.disabled = true;

@@ -765,6 +765,85 @@
       The launch fee is read live and sent exactly; the contract rejects any other amount.</div>
     </div>
 
+    <div id="voltaRow" class="hidden">
+      <div class="row">
+        <div><label>PAIRED WITH</label><select id="voltaPair">
+          <option value="HYPE">HYPE (native)</option>
+          <option value="KNTQ">KNTQ (your HYPE is swapped in)</option>
+          <option value="VOLTA">VOLTA (your HYPE is swapped in)</option>
+        </select></div>
+        <div style="flex:0 0 120px"><label>SWAP FEE %</label><input type="text" id="voltaFee" value="2" spellcheck="false" placeholder="1 – 5"></div>
+        <div style="flex:0 0 150px"><label>DEV BUY (HYPE)</label><input type="text" id="voltaDevBuy" value="0" spellcheck="false" placeholder="0 = none"></div>
+      </div>
+      <label style="margin-top:8px">FEE SPLIT % <span class="hint">creator / buyback / holders &mdash; adds up to 100</span></label>
+      <div class="row">
+        <div><input type="text" id="voltaSplitCreator" value="50" spellcheck="false" title="creator %"></div>
+        <div><input type="text" id="voltaSplitBuyback" value="25" spellcheck="false" title="buyback %"></div>
+        <div><input type="text" id="voltaSplitHolders" value="25" spellcheck="false" title="holders %"></div>
+      </div>
+      <label style="margin-top:8px"><input type="checkbox" id="voltaSnipe" style="width:auto;margin-right:6px"> anti-snipe <span class="hint">early buys pay a higher fee that falls to the swap fee</span></label>
+      <div class="row">
+        <div><label>STARTS AT %</label><input type="text" id="voltaSnipeStart" value="30" spellcheck="false" placeholder="swap fee + 0.25 – 30"></div>
+        <div><label>LASTS (MINUTES)</label><input type="text" id="voltaSnipeMinutes" value="5" spellcheck="false" placeholder="1 – 15"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>SCHEDULE (BLANK = NOW)</label><input type="datetime-local" id="voltaSchedule"></div>
+        <div><label>CREATOR (BLANK = YOU)</label><input type="text" id="voltaCreator" spellcheck="false" placeholder="0x... (defaults to your address)"></div>
+      </div>
+      <div class="hint" id="voltaLine" style="font-size:11px;margin-top:6px"></div>
+      <div class="hint" style="font-size:11px;margin-top:6px">Volta is a Flaunch fork on Elysium: the coin opens in a Uniswap v4 pool run by Volta's hook, 1B supply.
+      Paired with HYPE it is one call; paired with KNTQ or VOLTA it goes through Volta's launch router, which swaps your HYPE into the pair token
+      first &mdash; that needs a dev buy of at least 0.001 HYPE. The dev buy is worked out exactly as Volta's site does it, with 1% slippage on the swap.
+      The launch fee is read live. Scheduling holds the pool closed until then (at most 30 days out).</div>
+    </div>
+
+    <div id="montraRow" class="hidden">
+      <div class="row">
+        <div><label>TRADING FEE</label><select id="montraFee">
+          <option value="1">1%</option><option value="2" selected>2%</option><option value="3">3%</option><option value="5">5%</option><option value="10">10%</option>
+        </select></div>
+        <div><label>ANTI-SNIPE</label><select id="montraSnipe">
+          <option value="0">none</option><option value="5" selected>5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option>
+          <option value="60">1 minute</option><option value="300">5 minutes</option><option value="900">15 minutes</option><option value="1800">30 minutes</option>
+        </select></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>SUPPLY (WHOLE TOKENS)</label><input type="text" id="montraSupply" value="1,000,000,000" spellcheck="false" placeholder="1B – 1Q"></div>
+        <div style="flex:0 0 150px"><label>FIRST BUY (HYPE)</label><input type="text" id="montraBuy" value="0" spellcheck="false" placeholder="0 = none"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>FEES GO TO</label><select id="montraFeesTo">
+          <option value="creator">you (the creator)</option>
+          <option value="holders">holders (streamed out over an hour)</option>
+          <option value="wallet">another wallet</option>
+          <option value="split">a split</option>
+        </select></div>
+        <div id="montraWalletWrap" class="hidden"><label>FEE WALLET</label><input type="text" id="montraFeeWallet" spellcheck="false" placeholder="0x..."></div>
+      </div>
+      <div id="montraSplitWrap" class="hidden">
+        <label style="margin-top:8px">SPLIT <span class="hint">one per line: address percent &mdash; "holders" works as an address; adds up to 100</span></label>
+        <textarea id="montraSplit" rows="3" spellcheck="false" placeholder="0xabc... 60&#10;holders 40"></textarea>
+      </div>
+      <div class="hint" id="montraLine" style="font-size:11px;margin-top:6px"></div>
+      <div class="hint" style="font-size:11px;margin-top:6px">Montra opens the coin in a Uniswap v4 pool against HYPE through its own hook. The fee and anti-snipe pair is one of
+      Montra's live configs, read off the chain (the fee decays to a floor; during the anti-snipe window early buys pay up to 99%).
+      A first buy rides in the launch transaction, its minimum out worked out exactly from the pool's opening range, 1% below.</div>
+    </div>
+
+    <div id="ascendRow" class="hidden">
+      <div class="row">
+        <div><label>PAIRED WITH</label><input type="text" value="KNTQ (Kinetiq) — fixed by the factory" readonly></div>
+        <div style="flex:0 0 160px"><label>DEV BUY (KNTQ)</label><input type="text" id="ascendDevBuy" value="0" spellcheck="false" placeholder="0 = none"></div>
+      </div>
+      <label style="margin-top:8px">FEE RECIPIENTS <span class="hint">blank = all to you; or one per line: address percent, adding up to 100</span></label>
+      <textarea id="ascendSplit" rows="2" spellcheck="false" placeholder="0xabc... 70&#10;0xdef... 30"></textarea>
+      <div class="hint" id="ascendLine" style="font-size:11px;margin-top:6px"></div>
+      <div class="hint" style="font-size:11px;margin-top:6px">Ascend opens the coin straight into a Uniswap v4 hook pool paired with KNTQ &mdash; no bonding curve, 1B supply, one fixed opening price.
+      Ascend publishes no ABI, so the launch call was rebuilt from its real launches on-chain and is sent exactly as its site sends it.
+      A dev buy is paid in KNTQ (approved to the factory first) and pays no fee; what it gets is exact, with a 1% floor.
+      The launch costs only gas.</div>
+    </div>
+
     <div id="mimicRow" class="hidden">
       <label>TOKEN TO MIMIC <span class="hint">any Robinhood token launched from the factory you want to use</span></label>
       <div class="row">
