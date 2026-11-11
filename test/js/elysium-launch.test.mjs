@@ -12,7 +12,7 @@ import fs from 'node:fs'; import path from 'node:path';
 import { createPublicClient, http, fallback, decodeFunctionData, encodeFunctionData, pad, numberToHex, getAddress, formatUnits } from 'viem';
 import { ELYSIUM_CHAIN_ID, ELYSIUM_RPCS, KNTQ, parseFeeSplit, elysiumChain } from '../../src/elysium.js';
 import { voltaPlan, voltaCheck, voltaPremine, VOLTA_LIMITS, VOLTA_PAIRS, VOLTA_TOKEN } from '../../src/volta.js';
-import { montraPlan, montraConfigs, montraPickConfig, MONTRA_ABI, MONTRA_HOLDERS } from '../../src/montra.js';
+import { montraPlan, montraConfigs, montraPickConfig, montraPairs, montraChainOut, montraFirstBuyNeeds, MONTRA_ABI, MONTRA_HOLDERS, MONTRA_FACTORY } from '../../src/montra.js';
 import { ascendDevBuyOut, ascendPlan, ascendQuote, ascendSeat, ascendDevBuyNeeds, ASCEND_QUOTES, ASCEND_SEAT_ABI, ASCEND_ERC20_ABI, WHYPE } from '../../src/ascend.js';
 const fmt = (raw) => Number(formatUnits(raw, 18)).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
@@ -29,6 +29,22 @@ const pub = createPublicClient({ chain: elysiumChain, transport: fallback(ELYSIU
 const FROM = '0x1111111111111111111111111111111111111111';
 const rich = [{ address: FROM, balance: 10n ** 22n }];
 
+// the storage slots behind a token's balanceOf / allowance, found by trying each slot the call touches
+const slotFor = async (token, call) => {
+  const data = encodeFunctionData(call);
+  const al = await pub.request({ method: 'eth_createAccessList', params: [{ from: WHYPE, to: token, data }, 'latest'] });
+  for (const { address, storageKeys } of al.accessList) for (const k of storageKeys) {
+    const r = await pub.call({ to: token, data, stateOverride: [{ address, stateDiff: [{ slot: k, value: pad(numberToHex(10n ** 30n)) }] }] }).catch(() => null);
+    if (r?.data && BigInt(r.data) === 10n ** 30n) return { address: getAddress(address), slot: k };
+  }
+  throw new Error('no slot for ' + call.functionName);
+};
+const funded = async (token, spender) => {
+  const xs = [await slotFor(token, { abi: ASCEND_ERC20_ABI, functionName: 'balanceOf', args: [FROM] }), await slotFor(token, { abi: ASCEND_ERC20_ABI, functionName: 'allowance', args: [FROM, spender] })];
+  const by = {}; for (const x of xs) (by[x.address] ||= []).push({ slot: x.slot, value: pad(numberToHex(10n ** 30n)) });
+  return [...rich, ...Object.entries(by).map(([address, stateDiff]) => ({ address, stateDiff }))];
+};
+
 // --- the chain -----------------------------------------------------------------------
 {
   const id = await pub.getChainId().catch(() => null);
@@ -42,21 +58,6 @@ const rich = [{ address: FROM, balance: 10n ** 22n }];
 
 // --- Ascend ----------------------------------------------------------------------------
 {
-  // the storage slots behind a token's balanceOf / allowance, found by trying each slot the call touches
-  const slotFor = async (token, call) => {
-    const data = encodeFunctionData(call);
-    const al = await pub.request({ method: 'eth_createAccessList', params: [{ from: WHYPE, to: token, data }, 'latest'] });
-    for (const { address, storageKeys } of al.accessList) for (const k of storageKeys) {
-      const r = await pub.call({ to: token, data, stateOverride: [{ address, stateDiff: [{ slot: k, value: pad(numberToHex(10n ** 30n)) }] }] }).catch(() => null);
-      if (r?.data && BigInt(r.data) === 10n ** 30n) return { address: getAddress(address), slot: k };
-    }
-    throw new Error('no slot for ' + call.functionName);
-  };
-  const funded = async (token, spender) => {
-    const xs = [await slotFor(token, { abi: ASCEND_ERC20_ABI, functionName: 'balanceOf', args: [FROM] }), await slotFor(token, { abi: ASCEND_ERC20_ABI, functionName: 'allowance', args: [FROM, spender] })];
-    const by = {}; for (const x of xs) (by[x.address] ||= []).push({ slot: x.slot, value: pad(numberToHex(10n ** 30n)) });
-    return [...rich, ...Object.entries(by).map(([address, stateDiff]) => ({ address, stateDiff }))];
-  };
   const run = (req, ov = rich) => pub.call({ account: FROM, ...req, gas: 30_000_000n, stateOverride: ov }).then((r) => '0x' + r.data.slice(26, 66), (e) => 'ERR ' + why(e));
 
   const eacc = await pub.getTransaction({ hash: '0xb89c3ee665ffb373a1a8ddc1cf0cf5d0d676f190ae615bb0383fac08b21bff24' });
@@ -139,6 +140,37 @@ const rich = [{ address: FROM, balance: 10n ** 22n }];
   check(configs.length >= 40 && fees.join(',') === '1,2,3,5,10' && windows.includes(0) && windows.includes(1800),
     'Montra: the live configs read as 5 fee tiers by 8 anti-snipe windows', `fees ${fees.join('/')}% · windows ${windows.join('/')}s`);
   check(montraPickConfig(configs, { feePct: 2, antiSnipeSeconds: 5 }).id === 6, 'Montra: 2% with a 5s anti-snipe is config 6, the one HYPEY used');
+  const pairs = await montraPairs(pub, configs);
+  const syms = pairs.map((p) => p.symbol);
+  check(['HYPE', 'KNTQ', 'wNVDAx', 'wSPYx', 'wQQQx', 'EQSPCX', 'EQTSLA', 'xyz:NVDA3L'].every((x) => syms.includes(x)) && pairs[0].native,
+    'Montra: the live configs offer every pair on its launch page, HYPE first', syms.join(' / '));
+  const htmlPairs = [...(HTML.match(/<select id="montraPair">([\s\S]*?)<\/select>/)?.[1] || '').matchAll(/value="(0x[0-9a-fA-F]{40})"/g)].map((x) => getAddress(x[1]));
+  check(pairs.every((p) => htmlPairs.includes(p.quote)), 'UI: Montra lists every live pair even before the chain is read', `${htmlPairs.length} in the form`);
+  // every pair: a first buy launches, its minimum out from the chain's own figure
+  for (const pr of pairs) {
+    const one = pr.native ? '0.01' : '1';
+    const plan = await montraPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', metadataURI: 'ipfs://x', quote: pr.quote, feePct: 2, antiSnipeSeconds: 0, firstBuy: one });
+    const ov = pr.native ? rich : await funded(pr.quote, MONTRA_FACTORY);
+    const viaOv = { ...pub, simulateContract: (args) => pub.simulateContract({ ...args, stateOverride: ov, gas: 30_000_000n }) };
+    const exact = await montraChainOut(viaOv, plan.request, FROM);
+    const rel = exact ? Math.abs(Number(exact - plan.expectedOut)) / Number(exact) : 1;
+    const go = exact ? await viaOv.simulateContract({ ...plan.withMinOut(exact * 99n / 100n), account: FROM }).then((x) => 'OK ' + x.result[0], (e) => 'ERR ' + why(e)) : 'no figure';
+    const tooMuch = exact ? await viaOv.simulateContract({ ...plan.withMinOut(exact + 1n), account: FROM }).then(() => 'taken', (e) => why(e)) : '';
+    check(go.startsWith('OK') && rel < 1e-9 && /FirstBuySlippage/.test(tooMuch) && (pr.native || plan.request.value === plan.launchFee),
+      `Montra: ${pr.symbol} · a ${one} ${pr.symbol} first buy launches at the chain's exact figure${pr.native ? '' : ', no HYPE sent'}`,
+      go.startsWith('OK') ? `${fmt(exact)} coins, maths within ${rel.toExponential(1)}` : go);
+  }
+  // Montra adds configs as it goes (146 to 180 in one afternoon), so the pair
+  // missing a window is whichever one is missing it today
+  const lacking = pairs.find((p) => !p.windows.includes(5));
+  if (lacking) {
+    const stockSnipe = await montraPlan(pub, { account: FROM, name: 'x', symbol: 'x', metadataURI: 'ipfs://x', quote: lacking.quote, feePct: 2, antiSnipeSeconds: 5 }).then(() => 'taken', (e) => e.message);
+    check(/no config for this pair/.test(stockSnipe), `Montra: an anti-snipe window a pair does not have (${lacking.symbol}) is refused, naming what it offers`, stockSnipe.slice(0, 90));
+  }
+  const rpc = createPublicClient({ chain: elysiumChain, transport: http('https://rpc.volta.family') });
+  const kntq = await montraPlan(rpc, { account: FROM, name: 'x', symbol: 'x', metadataURI: 'ipfs://x', quote: KNTQ, feePct: 2, antiSnipeSeconds: 5, firstBuy: '5' });
+  const kneeds = await montraFirstBuyNeeds(rpc, FROM, kntq);
+  check(kneeds.steps.map((x) => x.kind).join() === 'approve' && kneeds.steps[0].request.args[0] === MONTRA_FACTORY, 'Montra: a KNTQ first buy approves KNTQ to the factory first');
   const sim = async (label, o) => {
     const plan = await montraPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', metadataURI: 'ipfs://bafkreitest', logo: 'ipfs://bafkreilogo', feePct: 2, antiSnipeSeconds: 5, ...o });
     const r = await pub.simulateContract({ ...plan.request, account: FROM, stateOverride: rich, gas: 30_000_000n }).then((x) => ({ ok: true, token: x.result[0] })).catch((e) => ({ ok: false, why: why(e) }));
@@ -153,9 +185,8 @@ const rich = [{ address: FROM, balance: 10n ** 22n }];
   check(b.r.ok && b.plan.firstBuyMinOut === b.plan.expectedOut * 99n / 100n && rel < 1e-9,
     "Montra: a 0.002 HYPE first buy simulates, its minimum out HYPEY's real one to float precision", `off by ${rel.toExponential(1)}`);
   const p = await montraPlan(pub, { account: FROM, name: 'Wire Test', symbol: 'WIRE', metadataURI: 'ipfs://x', feePct: 2, antiSnipeSeconds: 5, firstBuyHype: '0.002' });
-  p.request.args[0].firstBuyMinOut = p.expectedOut + 1n;
-  const tight = await pub.simulateContract({ ...p.request, account: FROM, stateOverride: rich, gas: 30_000_000n }).then(() => 'OK').catch(why);
-  check(tight.startsWith(`FirstBuySlippage["${p.expectedOut}"`), 'Montra: and the chain reports the exact output the maths predicts', tight.slice(0, 60));
+  const chainFig = await montraChainOut({ ...pub, simulateContract: (x) => pub.simulateContract({ ...x, stateOverride: rich, gas: 30_000_000n }) }, p.request, FROM);
+  check(chainFig !== null && chainFig - p.expectedOut <= 2n && p.expectedOut - chainFig <= 2n, 'Montra: and the maths lands within 2 wei of the chain\'s own figure', `chain ${chainFig}, maths ${p.expectedOut}`);
   const h = await sim('holders', { fees: { mode: 'holders' } });
   check(h.r.ok && h.plan.request.args[0].feeRecipients[0] === MONTRA_HOLDERS, 'Montra: fees can go to holders');
   const s = await sim('split', { fees: { mode: 'split', split: parseFeeSplit(`${FROM} 60\n0x000000000000000000000000000000000000dEaD 40`) } });
@@ -197,7 +228,7 @@ for (const [id, fam] of [['volta-elysium', 'volta'], ['montra-elysium', 'montra'
   check(MAIN.includes(`id: '${id}'`) && MAIN.includes(`family: '${fam}'`), `main.js has the ${fam} pad`);
 }
 for (const id of ['voltaRow', 'voltaPair', 'voltaFee', 'voltaSplitCreator', 'voltaSplitBuyback', 'voltaSplitHolders', 'voltaDevBuy', 'voltaSnipe', 'voltaSnipeStart', 'voltaSnipeMinutes', 'voltaSchedule', 'voltaCreator',
-  'montraRow', 'montraFee', 'montraSnipe', 'montraSupply', 'montraBuy', 'montraFeesTo', 'montraSplit',
+  'montraRow', 'montraPair', 'montraBuySym', 'montraFee', 'montraSnipe', 'montraSupply', 'montraBuy', 'montraFeesTo', 'montraSplit',
   'ascendRow', 'ascendQuote', 'ascendQuoteCustom', 'ascendFee', 'ascendDevBuy', 'ascendType', 'ascendCreator', 'ascendHoldersQuote', 'ascendHoldersToken',
   'ascendMixHolders', 'ascendMixBuyback', 'ascendMixCreator', 'ascendBurn', 'ascendSplit', 'ascendDevBuyTo', 'ascendPlan']) {
   check(HTML.includes(`id="${id}"`), `UI has #${id}`);

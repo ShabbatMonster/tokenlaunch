@@ -5366,15 +5366,46 @@ async function montraFeesFromForm() {
   return { mode };
 }
 
+// Montra's live configs and pairs, read once per page and refreshed on opening
+// the pad, so a pair Montra adds shows up in the form without a code change.
+let montraLive = null;
+async function loadMontraPairs(pad) {
+  const M = await import('./montra.js');
+  const pub = publicClientFor(pad);
+  const configs = await M.montraConfigs(pub);
+  montraLive = { configs, pairs: await M.montraPairs(pub, configs) };
+  const sel = $('montraPair');
+  const keep = sel.value;
+  sel.innerHTML = montraLive.pairs.map((p) => `<option value="${p.quote}">${esc(p.symbol)}${p.native ? ' (native)' : ''}</option>`).join('');
+  if (montraLive.pairs.some((p) => p.quote === keep)) sel.value = keep;
+  paintMontraOptions();
+}
+
+/// The fee and anti-snipe choices the chosen pair actually has.
+function paintMontraOptions() {
+  const pair = montraLive?.pairs.find((p) => p.quote === $('montraPair').value);
+  $('montraBuySym').textContent = pair?.symbol || 'HYPE';
+  if (!pair) return;
+  const fill = (id, values, label) => {
+    const sel = $(id), keep = sel.value;
+    sel.innerHTML = values.map((v) => `<option value="${v}">${label(v)}</option>`).join('');
+    sel.value = values.map(String).includes(keep) ? keep : String(values.includes(2) ? 2 : values[0]);
+  };
+  fill('montraFee', pair.fees, (f) => `${f}%`);
+  const win = (s) => (!s ? 'none' : s < 60 ? `${s} seconds` : s < 3600 ? `${s / 60} minute${s === 60 ? '' : 's'}` : `${s / 3600} h`);
+  fill('montraSnipe', pair.windows, win);
+}
+
 async function launchMontra(pad, { name, symbol, logo, description, twitter, website }) {
   const M = await import('./montra.js');
   const pub = publicClientFor(pad);
   const wallet = createWalletClient({ account, chain: chainFor(pad), transport: http(pad.rpc) });
   const o = {
     account: account.address, name, symbol, description, twitter, website, logo: 'ipfs://' + logo,
+    quote: $('montraPair').value || 'HYPE',
     feePct: +$('montraFee').value, antiSnipeSeconds: +$('montraSnipe').value,
     supply: $('montraSupply').value.trim() || '1000000000',
-    firstBuyHype: $('montraBuy').value.trim() || '0',
+    firstBuy: $('montraBuy').value.trim() || '0',
     fees: await montraFeesFromForm(),
   };
   M.montraFeeRecipients(o.fees);   // refuse a bad recipient before uploading anything
@@ -5383,27 +5414,46 @@ async function launchMontra(pad, { name, symbol, logo, description, twitter, web
   o.metadataURI = await elysiumMetadata({ name, symbol, logo, description, twitter, website });
 
   setStatus('reading Montra’s configs and fee...');
-  const plan = await M.montraPlan(pub, o);
+  let plan = await M.montraPlan(pub, o);
+  const sym = plan.pair.symbol;
   const bal = await pub.getBalance({ address: account.address });
-  if (bal < plan.request.value) throw new Error(`the launch needs ${formatEther(plan.request.value)} HYPE (fee ${formatEther(plan.launchFee)} + first buy), the wallet has ${formatEther(bal)}`);
+  if (bal < plan.request.value) throw new Error(`the launch needs ${formatEther(plan.request.value)} HYPE (fee ${formatEther(plan.launchFee)}${plan.pair.native ? ' + first buy' : ''}), the wallet has ${formatEther(bal)}`);
+
+  // a token pair: the first buy comes out of the wallet, approved to the factory
+  const needs = await M.montraFirstBuyNeeds(pub, account.address, plan);
+  if (needs.short > 0n) throw new Error(`the first buy is ${formatUnits(plan.firstBuyAmount, plan.pair.decimals)} ${sym}, the wallet holds ${formatUnits(needs.balance, plan.pair.decimals)}`);
+  for (const step of needs.steps) {
+    setStatus(`approving ${formatUnits(step.amount, plan.pair.decimals)} ${sym} to the Montra factory...`);
+    const h = await wallet.writeContract(step.request);
+    const r = await pub.waitForTransactionReceipt({ hash: h, confirmations: 1 });
+    if (r.status !== 'success') throw new Error(`the approval reverted: ${pad.explorer}/tx/${h}`);
+  }
+
+  // the first buy's minimum from the chain's own figure, 1% under it
+  let request = plan.request, expectedOut = plan.expectedOut;
+  if (plan.firstBuyAmount > 0n) {
+    setStatus('asking Montra for the first buy’s exact output...');
+    const exact = await M.montraChainOut(pub, plan.request, account);
+    if (exact !== null) { expectedOut = exact; request = plan.withMinOut((exact * 99n) / 100n); }
+  }
 
   setStatus('simulating the launch...');
   let token;
   try {
-    const { result } = await pub.simulateContract({ ...plan.request, account });
+    const { result } = await pub.simulateContract({ ...request, account });
     token = result[0];
   } catch (e) {
     throw new Error('Montra would refuse this launch: ' + elysiumReason(e));
   }
-  const { hash } = await elysiumSend(pad, pub, wallet, plan.request, 'Montra');
+  const { hash } = await elysiumSend(pad, pub, wallet, request, 'Montra');
 
   rememberLaunch(pad, token, symbol);
   const c = plan.config;
   $('status').innerHTML =
     `<span style="color:var(--accent)">LAUNCHED ✓</span> ${token}<br>` +
-    `Montra · config ${c.id}: ${c.feePct}% fee (floor ${c.feeFloorPct}%), ` + (c.antiSnipeSeconds ? `${c.antiSnipeSeconds}s anti-snipe` : 'no anti-snipe') +
+    `Montra · paired with ${esc(sym)} · config ${c.id}: ${c.feePct}% fee (floor ${c.feeFloorPct}%), ` + (c.antiSnipeSeconds ? `${c.antiSnipeSeconds}s anti-snipe` : 'no anti-snipe') +
     ` · fees to ${esc(o.fees.mode)}` +
-    (plan.expectedOut > 0n ? ` · first buy ${esc(o.firstBuyHype)} HYPE → ${fmtTok(plan.expectedOut)} ${esc(symbol)}` : ' · no first buy') + '<br>' +
+    (expectedOut > 0n ? ` · first buy ${esc(o.firstBuy)} ${esc(sym)} → ${fmtTok(expectedOut)} ${esc(symbol)}` : ' · no first buy') + '<br>' +
     `<a href="${pad.explorer}/tx/${hash}" target="_blank" rel="noopener">tx on explorer</a> · ` +
     `<a href="${pad.site(token)}" target="_blank" rel="noopener">coin on Montra</a>`;
   return { token, hash };
@@ -5498,14 +5548,18 @@ async function updateElysiumUI(pad) {
       const mode = $('montraFeesTo').value;
       $('montraWalletWrap').classList.toggle('hidden', mode !== 'wallet');
       $('montraSplitWrap').classList.toggle('hidden', mode !== 'split');
+      if (!montraLive) loadMontraPairs(pad).then(() => updateElysiumUI(pad)).catch((e) => { $('montraLine').innerHTML = `<span class="err">could not read Montra's pairs: ${esc(e.message)}</span>`; });
       try {
         const M = await import('./montra.js');
         M.montraFeeRecipients(await montraFeesFromForm());
         const whole = BigInt(($('montraSupply').value.trim() || '1000000000').replace(/[,_\s]/g, ''));
         if (whole < M.MONTRA_MIN_SUPPLY || whole > M.MONTRA_MAX_SUPPLY) throw new Error('Montra supply is 1,000,000,000 to 1,000,000,000,000,000 whole tokens');
         const snipe = +$('montraSnipe').value;
-        $('montraLine').textContent = `${$('montraFee').value}% trading fee · ` + (snipe ? `${snipe}s anti-snipe` : 'no anti-snipe')
-          + ` · ${whole.toLocaleString('en-US')} supply · fees to ${mode}`;
+        const pair = montraLive?.pairs.find((p) => p.quote === $('montraPair').value);
+        if (montraLive) M.montraPickConfig(montraLive.configs, { quote: $('montraPair').value, feePct: $('montraFee').value, antiSnipeSeconds: snipe });
+        $('montraLine').textContent = `paired with ${pair?.symbol || 'HYPE'} · ${$('montraFee').value}% trading fee · ` + (snipe ? `${snipe}s anti-snipe` : 'no anti-snipe')
+          + ` · ${whole.toLocaleString('en-US')} supply · fees to ${mode}`
+          + (pair && !pair.native ? ` · a first buy is paid in ${pair.symbol} from the wallet (approved to Montra first)` : '');
       } catch (e) { $('montraLine').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     } else if (pad.family === 'ascend') {
       const qSel = $('ascendQuote').value, type = $('ascendType').value;
@@ -6921,6 +6975,7 @@ function applyPadUI(pad) {
   $('montraRow').classList.toggle('hidden', !montra);
   $('ascendRow').classList.toggle('hidden', !ascend);
   if (elysium) updateElysiumUI(pad);
+  if (montra) loadMontraPairs(pad).then(() => updateElysiumUI(pad)).catch(() => {});   // pick up pairs Montra adds
   const mimic = pad.family === 'mimic';
   const solMimic = pad.family === 'solmimic';
   $('solMimicRow').classList.toggle('hidden', !solMimic);   // Solana Mimic: a curve copied off a coin
@@ -8634,9 +8689,11 @@ function init() {
 
   $('pumpQuote').addEventListener('change', () => { paintPumpDevSym(); paintPumpDepth(); });
   $('hookePay').addEventListener('change', () => { if (activePad.family === 'hooke') updateHookeUI(activePad); });
-  // Elysium pads: repaint the preview line as the form changes
+  // Elysium pads: repaint the preview line as the form changes (Montra's pair
+  // first narrows its fee and anti-snipe choices to the ones that pair has)
+  $('montraPair').addEventListener('change', paintMontraOptions);
   for (const id of ['voltaPair', 'voltaFee', 'voltaSplitCreator', 'voltaSplitBuyback', 'voltaSplitHolders', 'voltaDevBuy', 'voltaSnipe', 'voltaSnipeStart', 'voltaSnipeMinutes', 'voltaSchedule', 'voltaCreator',
-    'montraFee', 'montraSnipe', 'montraSupply', 'montraBuy', 'montraFeesTo', 'montraFeeWallet', 'montraSplit', 'ascendDevBuy', 'ascendSplit',
+    'montraPair', 'montraFee', 'montraSnipe', 'montraSupply', 'montraBuy', 'montraFeesTo', 'montraFeeWallet', 'montraSplit', 'ascendDevBuy', 'ascendSplit',
     'ascendQuote', 'ascendQuoteCustom', 'ascendFee', 'ascendType', 'ascendCreator', 'ascendHoldersQuote', 'ascendHoldersToken', 'ascendMixHolders', 'ascendMixBuyback', 'ascendMixCreator', 'ascendBurn', 'ascendDevBuyTo', 'ascendPlan']) {
     $(id).addEventListener('input', () => { if (['volta', 'montra', 'ascend'].includes(activePad.family)) updateElysiumUI(activePad); });
     $(id).addEventListener('change', () => { if (['volta', 'montra', 'ascend'].includes(activePad.family)) updateElysiumUI(activePad); });

@@ -799,6 +799,18 @@
 
     <div id="montraRow" class="hidden">
       <div class="row">
+        <div><label>PAIRED WITH</label><select id="montraPair">
+          <option value="0x0000000000000000000000000000000000000000">HYPE (native)</option>
+          <option value="0xe45a355d9e9cAd2aD85F2d03E3eE3102A036acF0">KNTQ</option>
+          <option value="0x11265018bF2d5a99fb71EFaE73aD670203C1dF44">wNVDAx</option>
+          <option value="0x437c847644ff22Cbcf0eA56896aA25504Aad93b4">wSPYx</option>
+          <option value="0x9039Ebd84eE2a0e198EB265E692390762995872C">wQQQx</option>
+          <option value="0x8264c91CedFE6CC078116083d5a3e198c16B1898">EQSPCX</option>
+          <option value="0x7559191F12413d122493Fe43dE6d0B4544C6579F">EQTSLA</option>
+          <option value="0xC4be5f25DFaA81ed188dB01fEE37e2ED4163C8D5">xyz:NVDA3L</option>
+        </select></div>
+      </div>
+      <div class="row" style="margin-top:8px">
         <div><label>TRADING FEE</label><select id="montraFee">
           <option value="1">1%</option><option value="2" selected>2%</option><option value="3">3%</option><option value="5">5%</option><option value="10">10%</option>
         </select></div>
@@ -809,7 +821,7 @@
       </div>
       <div class="row" style="margin-top:8px">
         <div><label>SUPPLY (WHOLE TOKENS)</label><input type="text" id="montraSupply" value="1,000,000,000" spellcheck="false" placeholder="1B – 1Q"></div>
-        <div style="flex:0 0 150px"><label>FIRST BUY (HYPE)</label><input type="text" id="montraBuy" value="0" spellcheck="false" placeholder="0 = none"></div>
+        <div style="flex:0 0 150px"><label>FIRST BUY (<span id="montraBuySym">HYPE</span>)</label><input type="text" id="montraBuy" value="0" spellcheck="false" placeholder="0 = none"></div>
       </div>
       <div class="row" style="margin-top:8px">
         <div><label>FEES GO TO</label><select id="montraFeesTo">
@@ -825,9 +837,11 @@
         <textarea id="montraSplit" rows="3" spellcheck="false" placeholder="0xabc... 60&#10;holders 40"></textarea>
       </div>
       <div class="hint" id="montraLine" style="font-size:11px;margin-top:6px"></div>
-      <div class="hint" style="font-size:11px;margin-top:6px">Montra opens the coin in a Uniswap v4 pool against HYPE through its own hook. The fee and anti-snipe pair is one of
-      Montra's live configs, read off the chain (the fee decays to a floor; during the anti-snipe window early buys pay up to 99%).
-      A first buy rides in the launch transaction, its minimum out worked out exactly from the pool's opening range, 1% below.</div>
+      <div class="hint" style="font-size:11px;margin-top:6px">Montra opens the coin in a Uniswap v4 pool through its own hook, paired with HYPE, KNTQ or one of its
+      stock tokens (wNVDAx, wSPYx, wQQQx, EQSPCX, EQTSLA, xyz:NVDA3L). Pairs, fees and anti-snipe windows are Montra's live configs, read off the chain when the pad
+      opens, so a pair or config Montra adds appears here by itself, and each pair offers only the fees and anti-snipe windows it has. The fee decays to a floor; during an anti-snipe
+      window early buys pay up to 99%. A first buy rides in the launch: in HYPE it is sent with it, in a token it is approved to Montra first and the launch
+      carries no HYPE. Its minimum out is the chain's own exact figure, 1% below.</div>
     </div>
 
     <div id="ascendRow" class="hidden">
