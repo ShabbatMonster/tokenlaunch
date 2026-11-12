@@ -3192,6 +3192,8 @@ function solParamsFromUI(pad) {
     // the mint and has no cap, so anything longer switches to it rather than
     // being refused — see solNeedsToken2022.
     baseToken2022: $('solToken2022').checked || solNeedsToken2022(),
+    // Chameleon: the launch wallet keeps the metadata's update authority
+    chameleon: $('solChameleon').checked,
   };
 }
 
@@ -3225,6 +3227,96 @@ function paintSolTokenStd() {
       + ' ticker or URI (only what fits in one transaction: about 240 bytes of name beside a normal IPFS URI)';
   } else {
     el.innerHTML = 'classic SPL, so Metaplex\'s caps apply: name 32 bytes, ticker 10, URI 200 (a longer one switches to Token-2022 on its own)';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Chameleon (Meteora DBC): launched with CreatorUpdateAuthority, so the launch
+// wallet can rewrite the coin's name, ticker and picture later. The rename is
+// one transaction; the new metadata JSON keeps everything else the old one had.
+// See renameSolToken in solana.js.
+// ---------------------------------------------------------------------------
+function paintSolChamHint() {
+  const el = $('solChamHint');
+  if (!el) return;
+  el.innerHTML = $('solChameleon').checked
+    ? 'your launch wallet stays the coin\'s <b>metadata update authority</b>, so you can rename it any time from the panel below.'
+      + ' Mint and freeze authority are still disabled &mdash; supply cannot change. Buyers can see the metadata is mutable.'
+    : 'off: the metadata is made immutable at launch, and nobody can ever change the name, ticker or picture';
+}
+
+// ipfs://, a gateway link, or anything else fetchable
+const chamFetchable = (uri) => (/^ipfs:\/\//.test(uri) ? IPFS_GW(uri.slice(7).replace(/^ipfs\//, '')) : uri);
+
+async function chamLoad() {
+  const out = $('chamNow');
+  const mint = $('chamMint').value.trim();
+  if (!isSolAddress(mint)) { out.innerHTML = '<span class="err">paste the coin\'s mint address</span>'; return null; }
+  out.textContent = 'reading the coin…';
+  try {
+    const S = await import('./solana.js');
+    const m = await S.readSolTokenMetadata(activePad.rpc || SOL_RPC, mint);
+    const me = solKeyB58 ? solPubkeyFromSecret(solKeyB58) : null;
+    const who = !m.mutable ? '<span class="err">immutable &mdash; nobody can rename it</span>'
+      : m.updateAuthority === me ? '<span style="color:var(--accent)">your wallet can rename it</span>'
+        : `<span class="err">only ${esc(m.updateAuthority)} can rename it${me ? ' &mdash; not the wallet signed in' : ''}</span>`;
+    out.innerHTML = `now <b>${esc(m.name)}</b> (${esc(m.symbol)}) · ${m.standard === 'token-2022' ? 'Token-2022' : 'SPL'} · ${who}`;
+    if (!$('chamName').value.trim()) $('chamName').placeholder = m.name;
+    if (!$('chamSymbol').value.trim()) $('chamSymbol').placeholder = m.symbol;
+    return m;
+  } catch (e) {
+    out.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    return null;
+  }
+}
+
+async function chamRename(btn) {
+  const st = $('chamStatus');
+  const say = (m, err = false) => { st.innerHTML = err ? '<span class="err">' + esc(m) + '</span>' : esc(m); };
+  if (!solKeyB58) { say('sign in with your Solana key first - the wallet that launched the coin', true); return; }
+  btn.disabled = true;
+  try {
+    const mint = $('chamMint').value.trim();
+    if (!isSolAddress(mint)) throw new Error('paste the coin\'s mint address');
+    const S = await import('./solana.js');
+    say('reading the coin…');
+    const cur = await S.readSolTokenMetadata(activePad.rpc || SOL_RPC, mint);
+    if (!cur.mutable) throw new Error('this coin\'s metadata is immutable - it was not launched as a chameleon, and nobody can rename it');
+    const me = solPubkeyFromSecret(solKeyB58);
+    if (cur.updateAuthority !== me) throw new Error(`only ${cur.updateAuthority} can rename this coin, and the wallet signed in is ${me}`);
+    const name = $('chamName').value.trim() || cur.name;
+    const symbol = $('chamSymbol').value.trim() || cur.symbol;
+    const file = $('chamImage').files?.[0] || null;
+    if (name === cur.name && symbol === cur.symbol && !file) throw new Error('nothing to change - type a new name or ticker, or pick a picture');
+    // the old JSON's description, links and anything else ride along
+    say('reading the current metadata…');
+    let old = null;
+    try {
+      const r = await fetch(chamFetchable(cur.uri), { signal: AbortSignal.timeout(12000) });
+      if (r.ok) old = await r.json();
+    } catch { /* unreadable: handled below */ }
+    if (!old && !file) throw new Error('the current metadata JSON could not be read, so its picture cannot be carried over - pick a picture to rename with');
+    let image = old?.image;
+    if (file) {
+      say('uploading the picture to IPFS…');
+      const blob = file.type === 'image/gif' ? file : await squareResize(file, 512);
+      image = IPFS_GW((await uploadToIpfs(blob)).replace('ipfs://', ''));
+    }
+    say('uploading the new metadata to IPFS…');
+    const uri = IPFS_GW(await uploadJsonToIpfs({ ...(old || {}), name, symbol, image }));
+    const res = await S.renameSolToken({
+      rpcUrl: activePad.rpc || SOL_RPC, secretKey: solKeyB58, mint, name, symbol, uri,
+      onStatus: (m) => say(m),
+    });
+    st.innerHTML = `<span style="color:var(--accent)">RENAMED ✓</span> ${esc(res.before.name)} (${esc(res.before.symbol)}) → <b>${esc(name)}</b> (${esc(symbol)})<br>`
+      + `<a href="https://solscan.io/tx/${res.sig}" target="_blank" rel="noopener">rename tx</a> · `
+      + `<a href="https://solscan.io/token/${mint}" target="_blank" rel="noopener">token on solscan</a>`;
+    $('chamName').value = ''; $('chamSymbol').value = ''; $('chamImage').value = '';
+    chamLoad();
+  } catch (e) {
+    say(e?.message || String(e), true);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -4258,7 +4350,9 @@ async function launchSol(pad, inp) {
     `<a href="${pad.explorer}/tx/${res.poolSig}" target="_blank" rel="noopener">pool tx</a>` +
     (res.devBuy ? ` · dev buy ✓ ~${res.devBuy.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
       + ` ${esc(inp.symbol)} (${res.devBuy.pctOfSupply.toFixed(2)}% of supply)` : '')
-    + (params.baseToken2022 ? '<br>minted as Token-2022, with its metadata on the mint' : '');
+    + (params.baseToken2022 ? '<br>minted as Token-2022, with its metadata on the mint' : '')
+    + (params.chameleon ? '<br>chameleon: your wallet can rename it from "rename a chameleon coin" below' : '');
+  if (params.chameleon) $('chamMint').value = res.mint;
   refreshBalance();
   renderTokenList();
 }
@@ -6988,6 +7082,7 @@ function applyPadUI(pad) {
   if (meteora) paintSolSupplyHint();
   if (meteora) paintSolFeeHint();
   if (meteora) paintSolTokenStd();
+  if (meteora) paintSolChamHint();
   $('raydiumRow').classList.toggle('hidden', !raydium); // LaunchLab quote + dev buy
   $('floatRow').classList.toggle('hidden', pad.family !== 'float');  // Float: stock pair, fee tier, ticker
   $('bagsRow').classList.toggle('hidden', pad.family !== 'bags');    // Bags: key, fee mode, fee sharing
@@ -8521,6 +8616,9 @@ function init() {
     $(id).addEventListener('input', () => { if (activePad.family === 'v4curve') paintV4CurveShape(activePad); });
   }
   $('solQuoteSelect').addEventListener('change', () => updateSolQuoteUI(activePad));
+  $('solChameleon').addEventListener('change', paintSolChamHint);
+  $('chamLoadBtn').addEventListener('click', () => chamLoad());
+  $('chamRenameBtn').addEventListener('click', (e) => chamRename(e.currentTarget));
   $('solFundBtn').addEventListener('click', (e) => { if (activePad.family === 'meteora') doSolFund(activePad, e.currentTarget); });
   {
     // a different custom quote is a different token to hold and to price

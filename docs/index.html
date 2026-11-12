@@ -236,6 +236,35 @@
         <div><label>&nbsp;</label><div class="hint" id="solStdHint" style="line-height:1.5"></div></div>
       </div>
 
+      <!-- Chameleon: the launch wallet stays the metadata's update authority, so
+           the coin can be renamed later (the idea from the chamelequote repo). -->
+      <div style="margin-top:10px">
+        <label style="margin-top:0;font-weight:normal"><input type="checkbox" id="solChameleon" style="width:auto;margin-right:6px"><b>CHAMELEON</b>
+          <span class="hint">name, ticker &amp; picture stay editable after launch</span></label>
+        <div class="hint" id="solChamHint" style="font-size:11px;margin-top:4px"></div>
+      </div>
+      <details class="adv" id="chamPanel" style="margin-top:8px" open>
+        <summary>rename a chameleon coin</summary>
+        <div class="row">
+          <div><label>COIN (MINT)</label><input type="text" id="chamMint" spellcheck="false" placeholder="mint address of a coin your wallet can rename"></div>
+          <div style="flex:0 0 auto"><label>&nbsp;</label><button class="btn secondary" id="chamLoadBtn" style="margin-top:0">LOAD</button></div>
+        </div>
+        <div class="hint" id="chamNow" style="font-size:11px;margin-top:4px"></div>
+        <div class="row">
+          <div><label>NEW NAME</label><input type="text" id="chamName" spellcheck="false" placeholder="blank = keep"></div>
+          <div style="flex:0 0 140px"><label>NEW TICKER</label><input type="text" id="chamSymbol" spellcheck="false" placeholder="blank = keep"></div>
+        </div>
+        <label>NEW PICTURE <span class="hint">optional &mdash; blank keeps the current one</span></label>
+        <input type="file" id="chamImage" accept="image/*">
+        <div class="row" style="margin-top:8px">
+          <div><button class="btn" id="chamRenameBtn" style="margin-top:0;width:100%">RENAME</button></div>
+        </div>
+        <div class="status" id="chamStatus" style="font-size:11px"></div>
+        <div class="hint" style="font-size:11px;margin-top:4px">One transaction signed by the wallet signed in here, which has to be the coin's update
+        authority (a Chameleon launch from this wallet is). The new metadata JSON keeps the old one's description, website and X link.
+        Wallets and screeners cache names, so the new one can take a while to show everywhere.</div>
+      </details>
+
       <div class="row hidden" id="solFundRow" style="margin-top:10px">
         <div style="flex:0 0 130px"><label>SWAP IN (SOL)</label>
           <input type="text" id="solFundAmount" value="0" spellcheck="false"></div>

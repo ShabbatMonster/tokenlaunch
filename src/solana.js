@@ -25,6 +25,9 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
   createMintToInstruction, createSetAuthorityInstruction, AuthorityType,
 } from '@solana/spl-token';
+import {
+  createUpdateFieldInstruction as createTokenMetadataUpdateFieldIx, Field as TokenMetadataField, unpack as unpackTokenMetadata,
+} from '@solana/spl-token-metadata';
 import BN from 'bn.js';
 import bs58 from 'bs58';
 import Decimal from 'decimal.js';
@@ -155,7 +158,10 @@ function buildLaunchConfig(quoteDecimals, p) {
       tokenType: p.baseToken2022 ? TokenType.Token2022 : TokenType.SPLToken,
       tokenBaseDecimal: baseEnum,
       tokenQuoteDecimal: quoteEnum,
-      tokenAuthorityOption: TokenAuthorityOption.Immutable, // minting + freeze disabled
+      // minting + freeze disabled either way. Chameleon keeps the metadata's
+      // update authority with the pool creator (the launch wallet), so the name,
+      // ticker and picture can be rewritten later - see renameSolToken.
+      tokenAuthorityOption: p.chameleon ? TokenAuthorityOption.CreatorUpdateAuthority : TokenAuthorityOption.Immutable,
       totalTokenSupply: p.totalSupply,
       leftover: 0,
     },
@@ -623,10 +629,19 @@ export async function launchMeteora(opts) {
     poolTx.feePayer = actor;
     poolTx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
     if (dryRun) {
-      const sim = await connection.simulateTransaction(new VersionedTransaction(poolTx.compileMessage()), { sigVerify: false, replaceRecentBlockhash: true });
+      // the metadata as the program would write it - the Metaplex account for an
+      // SPL base, the mint itself for Token-2022 - so who may rename it is known
+      const metaKey = baseIsT22 ? baseMint.publicKey : deriveMintMetadata(baseMint.publicKey);
+      const sim = await connection.simulateTransaction(new VersionedTransaction(poolTx.compileMessage()), {
+        sigVerify: false, replaceRecentBlockhash: true, accounts: { addresses: [metaKey.toBase58()], encoding: 'base64' },
+      });
+      const written = sim.value.accounts?.[0]?.data;
+      const raw = written ? Buffer.from(Array.isArray(written) ? written[0] : written, 'base64') : null;
+      let metadata = null;
+      try { metadata = raw ? (baseIsT22 ? t22MetadataFromMintData(raw) : parseMetaplexMetadata(raw)) : null; } catch { /* left null */ }
       return {
         dryRun: true, reused: true, config: cfgKey.toBase58(), mint: baseMint.publicKey.toBase58(), pool: pool.toBase58(),
-        simulationError: sim.value.err ? JSON.stringify(sim.value.err) : null, logs: sim.value.logs || [],
+        simulationError: sim.value.err ? JSON.stringify(sim.value.err) : null, logs: sim.value.logs || [], metadata,
       };
     }
     const pre = await connection.simulateTransaction(poolTx, [payer, baseMint]);
@@ -2573,6 +2588,192 @@ export async function launchClmmCurve(opts) {
     say('note: position NFT stays with the launcher; transfer it to redirect fees');
   }
   return { mint: mint.toBase58(), poolId, mintSig, poolSig, posSig, buySig, startPrice, upperPrice };
+}
+
+// ---------------------------------------------------------------------------
+// Chameleon: a coin whose name, ticker and picture can be changed after launch.
+//
+// The idea is Totality's (the chamelequote repo), where the program's PDA is the
+// only update authority and anyone may rename by burning 1,000,000 tokens. That
+// program is bound to its one coin, so a DBC launch gets the plain form of it:
+// the config's token_update_authority is CreatorUpdateAuthority, which makes
+// the launch wallet the metadata's update authority (and leaves it mutable).
+// Mint and freeze authority stay disabled - only the metadata can change.
+//
+// A classic SPL base keeps its metadata in a Metaplex account, rewritten with
+// UpdateMetadataAccountV2 (still capped at 32/10/200 bytes). A Token-2022 base
+// keeps it on the mint, rewritten field by field with the token-metadata
+// interface's UpdateField, topping the mint's rent up when it grows.
+// ---------------------------------------------------------------------------
+
+const METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+const metaplexPda = (mint) => PublicKey.findProgramAddressSync(
+  [Buffer.from('metadata'), METADATA_PROGRAM_ID.toBuffer(), new PublicKey(mint).toBuffer()], METADATA_PROGRAM_ID)[0];
+
+/// The whole Metaplex metadata account, as far as a rename needs it: the
+/// DataV2 fields (kept as they are apart from name/symbol/uri), who may update
+/// it and whether it can be updated at all.
+export function parseMetaplexMetadata(data) {
+  let o = 1;
+  const pk = () => { const k = new PublicKey(data.subarray(o, o + 32)); o += 32; return k; };
+  const str = () => { const n = data.readUInt32LE(o); o += 4; const v = data.subarray(o, o + n).toString('utf8').replace(/\0/g, ''); o += n; return v; };
+  const u8 = () => data[o++];
+  const updateAuthority = pk(); const mint = pk();
+  const name = str(), symbol = str(), uri = str();
+  const sellerFeeBasisPoints = data.readUInt16LE(o); o += 2;
+  let creators = null;
+  if (u8()) {
+    const n = data.readUInt32LE(o); o += 4;
+    creators = [];
+    for (let i = 0; i < n; i++) creators.push({ address: pk(), verified: !!u8(), share: u8() });
+  }
+  const primarySaleHappened = !!u8();
+  const isMutable = !!u8();
+  if (u8()) u8();                     // edition nonce
+  if (u8()) u8();                     // token standard
+  let collection = null;
+  if (o < data.length && u8()) { const verified = !!u8(); collection = { verified, key: pk() }; }
+  let uses = null;
+  if (o < data.length && u8()) {
+    const useMethod = u8(); const remaining = data.readBigUInt64LE(o); o += 8; const total = data.readBigUInt64LE(o); o += 8;
+    uses = { useMethod, remaining, total };
+  }
+  return {
+    standard: 'spl', updateAuthority: updateAuthority.toBase58(), mint: mint.toBase58(), name, symbol, uri,
+    sellerFeeBasisPoints, creators, collection, uses, primarySaleHappened, mutable: isMutable,
+  };
+}
+
+/// A Token-2022 mint's own metadata (the TokenMetadata TLV entry), or null.
+export function t22MetadataFromMintData(data) {
+  // base mint 82 bytes, padded to 165, then the account type byte, then TLV
+  let o = 166;
+  while (o + 4 <= data.length) {
+    const type = data.readUInt16LE(o), len = data.readUInt16LE(o + 2);
+    if (type === 19) {                // ExtensionType.TokenMetadata
+      const m = unpackTokenMetadata(data.subarray(o + 4, o + 4 + len));
+      const ua = m.updateAuthority?.toBase58?.() ?? null;
+      const none = !ua || ua === PublicKey.default.toBase58();
+      return {
+        standard: 'token-2022', updateAuthority: none ? null : ua, mint: m.mint.toBase58(),
+        name: m.name, symbol: m.symbol, uri: m.uri, additionalMetadata: m.additionalMetadata, mutable: !none,
+      };
+    }
+    if (type === 0 && len === 0) break;
+    o += 4 + len;
+  }
+  return null;
+}
+
+async function currentSolMetadata(connection, mintPk) {
+  const info = await connection.getAccountInfo(mintPk);
+  if (!info) throw new Error('no such mint on Solana');
+  if (info.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+    const m = t22MetadataFromMintData(Buffer.from(info.data));
+    if (m) return { info, meta: m };
+    // a Token-2022 mint can still point at a Metaplex account instead
+  } else if (!info.owner.equals(TOKEN_PROGRAM_ID)) {
+    throw new Error('that address is not a token mint');
+  }
+  const acc = await connection.getAccountInfo(metaplexPda(mintPk));
+  if (!acc) throw new Error('that token has no metadata to rename');
+  return { info, meta: parseMetaplexMetadata(Buffer.from(acc.data)) };
+}
+
+/// Who can rename a Solana coin, and what it is called now. Works for both
+/// standards; `mutable: false` means nobody can, ever.
+export async function readSolTokenMetadata(rpcUrl, mint) {
+  return (await currentSolMetadata(new Connection(rpcUrl, 'confirmed'), new PublicKey(mint))).meta;
+}
+
+/// The instructions that rewrite name / symbol / uri, checked against the
+/// signer first so a coin that cannot be renamed fails in words, not 0x...
+export async function renameSolTokenIxs(connection, { mint, authority, name, symbol, uri }) {
+  const mintPk = new PublicKey(mint);
+  const auth = new PublicKey(authority);
+  const { info, meta: cur } = await currentSolMetadata(connection, mintPk);
+  if (!cur.mutable) throw new Error("this coin's metadata is immutable - it was not launched as a chameleon, and nobody can rename it");
+  if (cur.updateAuthority !== auth.toBase58()) {
+    throw new Error(`only ${cur.updateAuthority} can rename this coin, and the wallet signed in is ${auth.toBase58()}`);
+  }
+  const next = { name: name || cur.name, symbol: symbol || cur.symbol, uri: uri || cur.uri };
+  if (next.name === cur.name && next.symbol === cur.symbol && next.uri === cur.uri) {
+    throw new Error('nothing to change - that is already its name, ticker and metadata');
+  }
+  const ixs = [];
+  if (cur.standard === 'token-2022') {
+    const fields = [['name', TokenMetadataField.Name], ['symbol', TokenMetadataField.Symbol], ['uri', TokenMetadataField.Uri]]
+      .filter(([k]) => next[k] !== cur[k]);
+    // the TLV entry grows with the strings; the mint must stay rent-exempt
+    const enc = (v) => Buffer.byteLength(v, 'utf8');
+    const grow = ['name', 'symbol', 'uri'].reduce((a, k) => a + enc(next[k]) - enc(cur[k]), 0);
+    if (grow > 0) {
+      const need = await connection.getMinimumBalanceForRentExemption(info.data.length + grow);
+      if (need > info.lamports) ixs.push(SystemProgram.transfer({ fromPubkey: auth, toPubkey: mintPk, lamports: need - info.lamports }));
+    }
+    for (const [k, field] of fields) {
+      ixs.push(createTokenMetadataUpdateFieldIx({ programId: TOKEN_2022_PROGRAM_ID, metadata: mintPk, updateAuthority: auth, field, value: next[k] }));
+    }
+    return { ixs, before: cur, after: next };
+  }
+  const over = metaplexMetadataOverflow(next);
+  if (over.length) throw new Error(over.map((x) => `the ${x.field} is ${x.bytes} bytes and a Metaplex metadata account holds ${x.max}`).join('; '));
+  // UpdateMetadataAccountV2 (15): Some(DataV2) with everything but the three
+  // strings carried over; authority, primary sale and mutability left alone
+  const str = (v) => { const b = Buffer.from(v, 'utf8'); const n = Buffer.alloc(4); n.writeUInt32LE(b.length); return Buffer.concat([n, b]); };
+  const parts = [Buffer.from([15, 1]), str(next.name), str(next.symbol), str(next.uri)];
+  const fee = Buffer.alloc(2); fee.writeUInt16LE(cur.sellerFeeBasisPoints); parts.push(fee);
+  if (cur.creators) {
+    const n = Buffer.alloc(4); n.writeUInt32LE(cur.creators.length); parts.push(Buffer.from([1]), n);
+    for (const c of cur.creators) parts.push(c.address.toBuffer(), Buffer.from([c.verified ? 1 : 0, c.share]));
+  } else parts.push(Buffer.from([0]));
+  parts.push(cur.collection ? Buffer.concat([Buffer.from([1, cur.collection.verified ? 1 : 0]), cur.collection.key.toBuffer()]) : Buffer.from([0]));
+  if (cur.uses) {
+    const u = Buffer.alloc(17); u[0] = cur.uses.useMethod; u.writeBigUInt64LE(cur.uses.remaining, 1); u.writeBigUInt64LE(cur.uses.total, 9);
+    parts.push(Buffer.from([1]), u);
+  } else parts.push(Buffer.from([0]));
+  parts.push(Buffer.from([0, 0, 0]));   // new_update_authority, primary_sale_happened, is_mutable: None
+  ixs.push(new TransactionInstruction({
+    programId: METADATA_PROGRAM_ID,
+    keys: [{ pubkey: metaplexPda(mintPk), isSigner: false, isWritable: true }, { pubkey: auth, isSigner: true, isWritable: false }],
+    data: Buffer.concat(parts),
+  }));
+  return { ixs, before: cur, after: next };
+}
+
+/// Rename a chameleon coin: one transaction, signed by its update authority,
+/// simulated before it is sent. dryRun + simulateAs runs it as that wallet
+/// without a signature (tests).
+export async function renameSolToken({ rpcUrl, secretKey, mint, name, symbol, uri, dryRun = false, simulateAs = null, onStatus }) {
+  const say = (m) => onStatus && onStatus(m);
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const payer = secretKey ? keypairFromSecret(secretKey) : null;
+  const actor = dryRun && simulateAs ? new PublicKey(simulateAs) : payer?.publicKey;
+  if (!actor) throw new Error('sign in with the wallet that launched the coin');
+  const { ixs, before, after } = await renameSolTokenIxs(connection, { mint, authority: actor, name, symbol, uri });
+  const tx = new Transaction().add(...ixs);
+  addPriority(tx);
+  tx.feePayer = actor;
+  tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+  if (dryRun) {
+    const mintPk = new PublicKey(mint);
+    const key = before.standard === 'token-2022' ? mintPk : metaplexPda(mintPk);
+    const sim = await connection.simulateTransaction(new VersionedTransaction(tx.compileMessage()), {
+      sigVerify: false, replaceRecentBlockhash: true, accounts: { addresses: [key.toBase58()], encoding: 'base64' },
+    });
+    const w = sim.value.accounts?.[0]?.data;
+    const raw = w ? Buffer.from(Array.isArray(w) ? w[0] : w, 'base64') : null;
+    let written = null;
+    try { written = raw ? (before.standard === 'token-2022' ? t22MetadataFromMintData(raw) : parseMetaplexMetadata(raw)) : null; } catch { /* null */ }
+    return { dryRun: true, before, after, written, simulationError: sim.value.err ? JSON.stringify(sim.value.err) : null, logs: sim.value.logs || [] };
+  }
+  const pre = await connection.simulateTransaction(tx, [payer]);
+  if (pre.value.err) {
+    throw new Error(`the rename would fail: ${(pre.value.logs || []).find((l) => /error/i.test(l)) || JSON.stringify(pre.value.err)}`);
+  }
+  say('renaming…');
+  const sig = await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' });
+  return { sig, before, after };
 }
 
 // Read a token's on-chain Metaplex metadata (name/symbol/uri) by fetching the
