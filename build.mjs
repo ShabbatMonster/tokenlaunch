@@ -158,4 +158,12 @@ await esbuild.build({
   plugins: [bordrShims, singleBufferProcess, NodeModulesPolyfillPlugin()],
 });
 
+// perps page: Hyperliquid (every main + HIP-3 market), browser-native
+await esbuild.build({
+  ...base,
+  entryPoints: ['src/perps.js'],
+  outfile: 'docs/perps.js',
+});
+
 console.log('build complete');
+

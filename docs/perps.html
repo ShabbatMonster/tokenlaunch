@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>perps</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14171c; --panel2: #1a1e24; --border: #262b33; --border2: #323844;
+    --text: #e6e9ee; --dim: #8a93a1; --faint: #5b6370;
+    --long: #4ade80; --short: #f87171; --longbg: rgba(74,222,128,.12); --shortbg: rgba(248,113,113,.12);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { background: var(--bg); color: var(--text); }
+  body { font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; min-height: 100vh; }
+  a { color: var(--dim); text-decoration: none; }
+  a:hover { color: var(--text); }
+  button { font: inherit; cursor: pointer; }
+  input, select { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; outline: none; width: 100%; }
+  input:focus, select:focus { border-color: var(--border2); }
+  .up { color: var(--long); } .down { color: var(--short); } .dim { color: var(--dim); } .err { color: var(--short); }
+
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  header h1 { font-size: 14px; letter-spacing: 3px; font-weight: 600; }
+  header .acct { margin-left: auto; display: flex; gap: 18px; align-items: center; font-size: 12px; flex-wrap: wrap; }
+  header .acct b { color: var(--text); font-weight: 600; }
+  .chip { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; color: var(--dim); background: var(--panel); }
+
+  .grid { display: grid; grid-template-columns: 290px minmax(0, 1fr) 320px; gap: 10px; padding: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  .card h2 { font-size: 10px; letter-spacing: 2px; color: var(--dim); font-weight: 600; padding: 10px 12px 0; }
+
+  /* markets */
+  .markets { display: flex; flex-direction: column; height: calc(100vh - 74px); min-height: 520px; position: sticky; top: 10px; }
+  .markets .tools { padding: 10px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
+  .dexes { display: flex; gap: 5px; flex-wrap: wrap; }
+  .dexes button { border: 1px solid var(--border); background: var(--panel2); color: var(--dim); border-radius: 6px; padding: 3px 8px; font-size: 11px; }
+  .dexes button.on { border-color: var(--text); color: var(--text); }
+  .mlist { overflow-y: auto; flex: 1; }
+  .mrow { display: grid; grid-template-columns: 1fr auto 62px; gap: 6px; padding: 7px 12px; cursor: pointer; border-bottom: 1px solid #191c22; align-items: center; }
+  .mrow:hover { background: var(--panel2); }
+  .mrow.on { background: var(--panel2); box-shadow: inset 2px 0 0 var(--text); }
+  .mrow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mrow .nm small { color: var(--faint); font-size: 10px; margin-left: 4px; }
+  .mrow .px { text-align: right; font-variant-numeric: tabular-nums; }
+  .mrow .ch { text-align: right; font-size: 12px; }
+  .lev { font-size: 9px; border: 1px solid var(--border2); border-radius: 4px; padding: 0 3px; color: var(--dim); margin-left: 4px; }
+
+  /* center */
+  .center { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .ticker { display: flex; gap: 22px; align-items: baseline; padding: 12px 14px; flex-wrap: wrap; }
+  .ticker .big { font-size: 20px; font-weight: 700; }
+  .ticker .stat { font-size: 11px; color: var(--dim); }
+  .ticker .stat b { display: block; color: var(--text); font-size: 13px; font-weight: 500; }
+  .chartwrap { padding: 8px 10px 10px; }
+  .ivals { display: flex; gap: 4px; margin-bottom: 6px; }
+  .ivals button { border: none; background: none; color: var(--faint); padding: 2px 7px; border-radius: 5px; font-size: 11px; }
+  .ivals button.on { color: var(--text); background: var(--panel2); }
+  canvas#chart { width: 100%; height: 360px; display: block; }
+  .lower { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 10px; }
+  .book { padding-bottom: 8px; font-variant-numeric: tabular-nums; font-size: 12px; }
+  .book .row { display: grid; grid-template-columns: 1fr 1fr; padding: 1px 12px; position: relative; }
+  .book .row span:last-child { text-align: right; }
+  .book .row i { position: absolute; top: 0; bottom: 0; right: 0; opacity: .14; }
+  .book .spread { text-align: center; color: var(--dim); font-size: 11px; padding: 4px 0; }
+
+  .tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); }
+  .tabs button { border: none; background: none; color: var(--dim); padding: 6px 10px; border-bottom: 2px solid transparent; font-size: 12px; }
+  .tabs button.on { color: var(--text); border-bottom-color: var(--text); }
+  .table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .table th { text-align: left; color: var(--faint); font-weight: 500; font-size: 10px; letter-spacing: 1px; padding: 8px 10px; }
+  .table td { padding: 7px 10px; border-top: 1px solid #191c22; white-space: nowrap; }
+  .table td.x { text-align: right; }
+  .tbtn { border: 1px solid var(--border2); background: var(--panel2); color: var(--text); border-radius: 6px; padding: 3px 9px; font-size: 11px; }
+  .tbtn:hover { border-color: var(--text); }
+  .empty { color: var(--faint); padding: 18px 12px; font-size: 12px; }
+  .tablewrap { overflow-x: auto; max-height: 340px; overflow-y: auto; }
+
+  /* ticket */
+  .ticket { padding: 12px; display: flex; flex-direction: column; gap: 10px; position: sticky; top: 10px; }
+  .side { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .side button { padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel2); color: var(--dim); font-weight: 700; letter-spacing: 1px; }
+  .side button.long.on { background: var(--longbg); border-color: var(--long); color: var(--long); }
+  .side button.short.on { background: var(--shortbg); border-color: var(--short); color: var(--short); }
+  .seg { display: flex; gap: 4px; }
+  .seg button { flex: 1; border: 1px solid var(--border); background: none; color: var(--dim); border-radius: 6px; padding: 5px; font-size: 12px; }
+  .seg button.on { color: var(--text); border-color: var(--border2); background: var(--panel2); }
+  .lbl { font-size: 10px; letter-spacing: 2px; color: var(--dim); display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .lbl span { letter-spacing: 0; }
+  .inrow { display: flex; gap: 6px; }
+  .inrow select { width: 86px; flex: none; }
+  input[type=range] { padding: 0; accent-color: var(--text); background: none; border: none; }
+  .pcts { display: flex; gap: 4px; }
+  .pcts button { flex: 1; border: 1px solid var(--border); background: var(--panel2); color: var(--dim); border-radius: 5px; font-size: 11px; padding: 3px; }
+  .check { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); cursor: pointer; }
+  .check input { width: auto; }
+  .go { padding: 12px; border: none; border-radius: 9px; font-weight: 700; letter-spacing: 2px; font-size: 14px; color: #08130c; background: var(--long); }
+  .go.short { background: var(--short); color: #1a0606; }
+  .go:disabled { opacity: .5; cursor: default; }
+  .summary { font-size: 11px; color: var(--dim); line-height: 1.7; }
+  .summary b { color: var(--text); font-weight: 500; float: right; }
+  .msg { font-size: 12px; min-height: 16px; word-break: break-word; }
+  .note { font-size: 11px; color: var(--dim); line-height: 1.5; border: 1px dashed var(--border2); border-radius: 8px; padding: 8px 10px; }
+  .note button { margin-top: 6px; }
+
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
+  .overlay.hidden { display: none; }
+  .modal { width: 100%; max-width: 420px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+  .modal h3 { font-size: 13px; letter-spacing: 2px; }
+  .modal p { font-size: 12px; color: var(--dim); }
+
+  @media (max-width: 1100px) {
+    .grid { grid-template-columns: 250px minmax(0, 1fr); }
+    .ticketcol { grid-column: 1 / -1; }
+    .ticket { position: static; }
+  }
+  @media (max-width: 760px) {
+    .grid { grid-template-columns: minmax(0, 1fr); padding: 8px; }
+    .markets { position: static; height: 340px; min-height: 0; }
+    .lower { grid-template-columns: minmax(0, 1fr); }
+    canvas#chart { height: 260px; }
+    header .acct { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>PERPS</h1>
+  <span class="chip">Hyperliquid</span>
+  <a href="index.html">← launcher</a>
+  <a href="trade.html">trade</a>
+  <div class="acct">
+    <span>equity <b id="aEquity">—</b></span>
+    <span>available <b id="aFree">—</b></span>
+    <span>uPnL <b id="aPnl">—</b></span>
+    <span class="chip" id="aWallet">no wallet</span>
+  </div>
+</header>
+
+<div class="grid">
+  <!-- markets -->
+  <div class="card markets">
+    <div class="tools">
+      <input id="mSearch" placeholder="search 350+ markets (BTC, NVDA, xyz:…)" spellcheck="false" autocomplete="off">
+      <div class="dexes" id="dexTabs"></div>
+      <label class="check"><input type="checkbox" id="mFav">favourites only</label>
+    </div>
+    <div class="mlist" id="mList"><div class="empty">loading markets…</div></div>
+  </div>
+
+  <!-- center -->
+  <div class="center">
+    <div class="card">
+      <div class="ticker">
+        <div><div class="dim" id="tDex" style="font-size:11px">—</div><div class="big" id="tCoin">—</div></div>
+        <div class="big" id="tPx">—</div>
+        <div class="stat">24h<b id="tCh">—</b></div>
+        <div class="stat">oracle<b id="tOracle">—</b></div>
+        <div class="stat">funding / 1h<b id="tFund">—</b></div>
+        <div class="stat">open interest<b id="tOi">—</b></div>
+        <div class="stat">24h volume<b id="tVol">—</b></div>
+        <div class="stat">max leverage<b id="tLev">—</b></div>
+      </div>
+      <div class="chartwrap">
+        <div class="ivals" id="ivals"></div>
+        <canvas id="chart"></canvas>
+      </div>
+    </div>
+    <div class="lower">
+      <div class="card book">
+        <h2>ORDER BOOK</h2>
+        <div id="bookAsks" style="margin-top:6px"></div>
+        <div class="spread" id="bookSpread">—</div>
+        <div id="bookBids"></div>
+      </div>
+      <div class="card">
+        <div class="tabs" id="bTabs">
+          <button data-t="pos" class="on">POSITIONS <span id="nPos"></span></button>
+          <button data-t="ord">OPEN ORDERS <span id="nOrd"></span></button>
+          <button data-t="bal">BALANCES</button>
+        </div>
+        <div class="tablewrap" id="bBody"><div class="empty">sign in to see positions</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ticket -->
+  <div class="ticketcol">
+    <div class="card ticket">
+      <div class="side">
+        <button class="long on" id="sLong">LONG</button>
+        <button class="short" id="sShort">SHORT</button>
+      </div>
+      <div class="seg" id="oType">
+        <button data-v="market" class="on">Market</button>
+        <button data-v="limit">Limit</button>
+      </div>
+      <div id="limitWrap" style="display:none">
+        <div class="lbl">LIMIT PRICE <span><a href="#" id="useMid">mid</a></span></div>
+        <input id="limitPx" inputmode="decimal" spellcheck="false">
+      </div>
+      <div>
+        <div class="lbl">SIZE <span id="sizeHint"></span></div>
+        <div class="inrow">
+          <input id="size" inputmode="decimal" placeholder="0" spellcheck="false">
+          <select id="sizeUnit"><option value="usd">USD</option><option value="coin">coin</option></select>
+        </div>
+        <div class="pcts" style="margin-top:6px">
+          <button data-p="10">10%</button><button data-p="25">25%</button><button data-p="50">50%</button><button data-p="100">MAX</button>
+        </div>
+      </div>
+      <div>
+        <div class="lbl">LEVERAGE <span><b id="levVal">10</b>× · <a href="#" id="marginMode">cross</a></span></div>
+        <input type="range" id="lev" min="1" max="40" value="10">
+      </div>
+      <label class="check"><input type="checkbox" id="tpslOn">take-profit / stop-loss</label>
+      <div id="tpslWrap" class="inrow" style="display:none">
+        <input id="tp" placeholder="TP price" inputmode="decimal" spellcheck="false">
+        <input id="sl" placeholder="SL price" inputmode="decimal" spellcheck="false">
+      </div>
+      <div class="inrow" style="align-items:center">
+        <label class="check" style="flex:1"><input type="checkbox" id="reduce">reduce only</label>
+        <span class="dim" style="font-size:11px">slippage</span>
+        <input id="slip" value="1" style="width:56px" inputmode="decimal"><span class="dim">%</span>
+      </div>
+      <div class="summary" id="summary"></div>
+      <button class="go" id="goBtn">LONG</button>
+      <div class="msg" id="msg"></div>
+      <div class="note" id="unifyNote" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="keyModal">
+  <div class="card modal">
+    <h3>SIGN IN</h3>
+    <p>Paste the private key of the EVM wallet that holds your Hyperliquid account. It stays in this browser (the same local store the launcher uses) and signs orders here; it is never sent anywhere.</p>
+    <input type="password" id="keyIn" placeholder="0x… private key" spellcheck="false" autocomplete="off">
+    <div class="err" id="keyErr"></div>
+    <button class="go" id="keySave">SIGN IN</button>
+    <a href="#" id="keySkip" style="font-size:12px;text-align:center">just look around</a>
+  </div>
+</div>
+
+<script type="module" src="perps.js"></script>
+</body>
+</html>
