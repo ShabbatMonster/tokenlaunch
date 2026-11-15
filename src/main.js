@@ -1322,13 +1322,10 @@ const PADS = [
     // compiled against pump's own address lookup table because the two
     // instructions together are 43 accounts and will not otherwise fit.
     //
-    // Pairing: every deployed create path opens a NATIVE-SOL curve. The program
-    // is already quote-aware everywhere else — buy_v2 / sell_v2 / migrate_v2 all
-    // take a quote_mint, BondingCurve stores one, and admin-only add_quote_mint
-    // whitelists them (USDC is whitelisted today) — but no create instruction
-    // accepts a quote yet. So the quote list here is read live from pump's Global
-    // account rather than hardcoded: the moment they ship a stock quote it shows
-    // up in CHECK PAIRS without a code change. See src/pump.js.
+    // Pairing: create_v2 takes a non-SOL quote as trailing accounts. The list of
+    // pairable quotes is pump's quote registry (232 mints in Nov 2026: USDC,
+    // xStocks and other tokenized stocks, pump coins), read live and loaded into
+    // PAIR AGAINST when this pad opens. See src/pump.js.
     id: 'pump-sol', label: 'pump.fun', vm: 'sol', enabled: true, family: 'pump',
     rpc: SOL_RPC,
     explorer: 'https://solscan.io',
@@ -3641,12 +3638,11 @@ async function pumpFire(index) {
 /// Read pump.fun's Global account and show what can actually be paired against
 /// right now.
 ///
-/// The quote list is deliberately live rather than hardcoded. pump whitelists
-/// non-SOL quotes with an admin-only add_quote_mint instruction, so a stock pair
-/// would land in this account the moment they add it and show up here with no
-/// code change. What is still missing on their side is a create instruction that
-/// accepts a quote — every deployed create path opens a native-SOL curve — so
-/// this also says so plainly instead of offering a pairing that cannot be built.
+/// The quote list is deliberately live rather than hardcoded: pump adds quotes
+/// to its registry account with an admin instruction, so a new one shows up
+/// here with no code change. This runs by itself the first time a pump pad is
+/// opened - the dropdown used to hold only "SOL (native)" until CHECK PAIRS was
+/// pressed, which made pairing look unsupported. Returns true when it loaded.
 async function pumpCheckPairs(pad) {
   const out = $('pumpStatusOut');
   const btn = $('pumpCheckBtn');
@@ -3657,10 +3653,6 @@ async function pumpCheckPairs(pad) {
     const g = await pumpStatus(pad.rpc);
     const sel = $('pumpQuote');
     const prev = sel.value;
-    const buildOpts = (names) => g.whitelistedQuotes
-      .map((q) => '<option value="' + esc(q.mint) + '">'
-        + esc(names[q.mint] || (q.mint.slice(0, 6) + '\u2026')) + ' (' + q.decimals + 'dp)</option>')
-      .join('');
     const names = {
       EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC',
       XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W: 'SPYx',
@@ -3669,21 +3661,46 @@ async function pumpCheckPairs(pad) {
       SKHYhSjuRWHgikq8eRKbtBbpABgJSkd7ytQV14i9EQ3: 'SKHY',
       Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh: 'NVDAx',
     };
-    sel.innerHTML = '<option value="">SOL (native)</option>' + buildOpts(names);
+    // tickers from each mint's own metadata; the table above only fills gaps
+    let meta = [];
+    try {
+      const { mintSymbols } = await loadBags();
+      const { Connection } = await import('@solana/web3.js');
+      meta = await mintSymbols(new Connection(pad.rpc, 'confirmed'), g.whitelistedQuotes.map((q) => q.mint));
+    } catch { /* fall back to the table and short addresses */ }
+    const rows = g.whitelistedQuotes.map((q, i) => {
+      const m = meta[i] || {};
+      const fetched = m.symbol && m.symbol !== q.mint.slice(0, 6) ? m.symbol : '';
+      return { ...q, symbol: names[q.mint] || fetched || q.mint.slice(0, 6) + '\u2026', name: m.name || '' };
+    });
+    // USDC first, then by ticker
+    const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    rows.sort((a, b) => (b.mint === USDC) - (a.mint === USDC) || a.symbol.localeCompare(b.symbol, undefined, { sensitivity: 'base' }));
+    sel.innerHTML = '<option value="">SOL (native)</option>' + rows
+      .map((q) => '<option value="' + esc(q.mint) + '" title="' + esc(q.mint) + '">'
+        + esc(q.symbol) + (q.name && q.name !== q.symbol ? ' \u2014 ' + esc(q.name.slice(0, 28)) : '')
+        + (q.decimals != null ? ' (' + q.decimals + 'dp)' : '') + '</option>')
+      .join('');
     if (prev) sel.value = prev;
-    const listed = g.whitelistedQuotes.map((q) => names[q.mint] || (q.mint.slice(0, 8) + '\u2026')).join(', ') || 'none';
+    const shown = rows.slice(0, 12).map((q) => q.symbol).join(', ');
     out.innerHTML =
       '<span class="ok">create_v2 ' + (g.createV2Enabled ? 'enabled' : 'DISABLED') + '</span> \u00b7 '
       + 'fee ' + (Number(g.feeBasisPoints) / 100) + '% + creator ' + (Number(g.creatorFeeBasisPoints) / 100) + '%<br>'
-      + 'whitelisted quotes: <b>' + esc(listed) + '</b><br>'
-      + 'A quote is passed to create_v2 as three extra accounts, so anything listed here is launchable now. '
-      + 'Re-run when pump ships stock pairs \u2014 a new quote lands in this account first.';
+      + '<b>' + rows.length + '</b> quotes pump will pair against, all in PAIR AGAINST: <b>' + esc(shown || 'none') + '</b>'
+      + (rows.length > 12 ? ' and ' + (rows.length - 12) + ' more' : '') + '<br>'
+      + 'Anything not listed can still be pasted into CUSTOM PAIR CONTRACT (another pump coin, for example).';
+    paintPumpDevSym();
+    return true;
   } catch (e) {
     out.innerHTML = '<span class="err">' + esc(e?.message || String(e)) + '</span>';
+    return false;
   } finally {
     btn.disabled = false;
   }
 }
+
+// the first automatic pair load, so switching pads does not re-read 232 mints
+let pumpPairsLoad = null;
 
 // resolve the Raydium quote mint from its dropdown (preset, scanned or custom)
 function raydiumQuoteMint(pad) {
@@ -7091,6 +7108,7 @@ function applyPadUI(pad) {
   $('pumpRow').classList.toggle('hidden', !pump);       // pump.fun dev buy + live pair check
   if (pump) paintPumpDevSym();
   if (pump) renderArmed();
+  if (pump && !pumpPairsLoad) pumpPairsLoad = pumpCheckPairs(pad).then((ok) => { if (!ok) pumpPairsLoad = null; });
   // the landing-service settings are shared by the StonkFun snipe and the
   // pump.fun slot launch; move the one set of controls to whichever is showing
   {

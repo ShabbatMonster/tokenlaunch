@@ -235,7 +235,7 @@ export async function bagsQuotes(apiKey, { connection, fetchImpl } = {}) {
 
 const METAPLEX = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
 /// Tickers for a list of mints: a Token-2022 mint's own metadata, else Metaplex.
-async function mintSymbols(connection, mints) {
+export async function mintSymbols(connection, mints) {
   const keys = mints.map((m) => new PublicKey(m));
   const meta = keys.map((k) => PublicKey.findProgramAddressSync([Buffer.from('metadata'), METAPLEX.toBuffer(), k.toBuffer()], METAPLEX)[0]);
   const out = [];
