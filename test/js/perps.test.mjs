@@ -23,7 +23,7 @@ const HTML = fs.readFileSync(path.join(ROOT, 'docs', 'perps.html'), 'utf8');
 const BUILD = fs.readFileSync(path.join(ROOT, 'build.mjs'), 'utf8');
 
 // --- the page --------------------------------------------------------------------
-check(['mSearch', 'dexTabs', 'mList', 'chart', 'bookAsks', 'bookBids', 'bBody', 'sLong', 'sShort', 'oType', 'size', 'lev', 'tp', 'sl', 'reduce', 'slip', 'goBtn', 'keyModal', 'bookTabs', 'bookGroup', 'bookLive', 'tradeTape', 'posTool', 'toasts', 'tNext']
+check(['mSearch', 'dexTabs', 'mList', 'chart', 'bookAsks', 'bookBids', 'bBody', 'sLong', 'sShort', 'oType', 'size', 'lev', 'tp', 'sl', 'reduce', 'slip', 'goBtn', 'keyModal', 'bookTabs', 'bookGroup', 'bookLive', 'tradeTape', 'posTool', 'toasts', 'tNext', 'chartType', 'indBtn', 'indPanel', 'chartLog', 'chartDraw', 'chartClear', 'chartFit', 'chartLegend']
   .every((id) => HTML.includes(`id="${id}"`)), 'page: markets, chart, book, positions and the order ticket are all there');
 check(/entryPoints: \['src\/perps\.js'\]/.test(BUILD) && fs.existsSync(path.join(ROOT, 'docs', 'perps.js')), 'page: built into docs/perps.js');
 for (const f of fs.readdirSync(path.join(ROOT, 'docs')).filter((x) => x.endsWith('.html'))) {

@@ -5,12 +5,13 @@
 // src/hyperliquid.js for the market list and the order maths.
 import { privateKeyToAccount } from 'viem/accounts';
 import {
-  hlClients, hlMarkets, applyCtxs, sizeForUsd, buildOrders, orderOutcome, hlError, formatSize,
+  hlClients, hlMarkets, applyCtxs, sizeForUsd, buildOrders, orderOutcome, hlError, formatSize, formatPrice,
   mergeBook, partialCloseOrder, positionTpslOrders,
 } from './hyperliquid.js';
 import {
   CARD_DEFAULTS, CARD_STYLES, drawPnlCard, cardFromPosition, closedTrades, closedRoe,
 } from './pnlCard.js';
+import { createPerpsChart, INDICATORS, CHART_DEFAULTS } from './perpsChart.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -43,7 +44,6 @@ let cross = true;
 let dexFilter = store.get('perps.dex', 'all');
 let favs = new Set(store.get('perps.favs', []));
 let interval = store.get('perps.ival', '15m');
-let candles = [];
 const userStates = new Map();                 // dex -> clearinghouse state
 const userOrders = new Map();                 // dex -> open orders
 let spot = null;                              // spot balances
@@ -147,85 +147,117 @@ async function select(coin) {
 }
 
 // --- chart ---------------------------------------------------------------------
-const IVALS = ['1m', '5m', '15m', '1h', '4h', '1d'];
-const IVAL_MS = { '1m': 6e4, '5m': 3e5, '15m': 9e5, '1h': 36e5, '4h': 144e5, '1d': 864e5 };
-$('ivals').innerHTML = IVALS.map((i) => `<button data-i="${i}" class="${i === interval ? 'on' : ''}">${i}</button>`).join('');
-$('ivals').onclick = (e) => {
-  const b = e.target.closest('button'); if (!b) return;
-  interval = b.dataset.i; store.set('perps.ival', interval);
-  for (const x of $('ivals').children) x.classList.toggle('on', x.dataset.i === interval);
-  loadCandles();
+// lightweight-charts (src/perpsChart.js): drag to pan, wheel to zoom, older
+// candles load as you drag left. Settings, drawn lines (per market) and the
+// interval are remembered in this browser.
+const IVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d', '1w'];
+const QUICK = ['1m', '5m', '15m', '1h', '4h', '1d'];
+const IVAL_MS = { '1m': 6e4, '3m': 18e4, '5m': 3e5, '15m': 9e5, '30m': 18e5, '1h': 36e5, '2h': 72e5, '4h': 144e5, '8h': 288e5, '12h': 432e5, '1d': 864e5, '1w': 6048e5 };
+const toK = (c) => ({ t: c.t, o: +c.o, h: +c.h, l: +c.l, c: +c.c, v: +c.v });
+const savedChart = store.get('perps.chart', {});
+let chartOpts = {
+  ...CHART_DEFAULTS, ...savedChart,
+  on: { ...CHART_DEFAULTS.on, ...(savedChart.on || {}) },
+  params: Object.fromEntries(Object.keys(INDICATORS).map((k) => [k, { ...CHART_DEFAULTS.params[k], ...(savedChart.params?.[k] || {}) }])),
 };
+let drawing = false;
+const pc = createPerpsChart($('chart'), $('chartLegend'), {
+  // Hyperliquid serves the most recent 5000 candles of any interval
+  onNeedOlder: async (oldest) => {
+    const m = sel, iv = interval;
+    const cs = await C.info.candleSnapshot({ coin: m.coin, interval: iv, startTime: oldest - IVAL_MS[iv] * 500, endTime: oldest - 1 }).catch(() => []);
+    return sel === m && iv === interval ? cs.map(toK) : [];
+  },
+  // alt-click the chart: a limit order at that price
+  onClickPrice: (price, ev) => {
+    if (!ev?.altKey || !sel) return;
+    setType('limit');
+    try { $('limitPx').value = formatPrice(price.toPrecision(10), sel.szDecimals); } catch { $('limitPx').value = price; }
+    paintSummary();
+  },
+});
+pc.setOptions(chartOpts);
+pc.onLinesChange = (prices) => {
+  if (!sel) return;
+  const all = store.get('perps.lines', {});
+  if (prices.length) all[sel.coin] = prices; else delete all[sel.coin];
+  store.set('perps.lines', all);
+};
+function saveChart() { store.set('perps.chart', chartOpts); }
+
+function paintChartBar() {
+  $('ivals').innerHTML = QUICK.map((i) => `<button data-i="${i}" class="${i === interval ? 'on' : ''}">${i}</button>`).join('')
+    + `<select id="ivalMore" title="more intervals"><option value="">${QUICK.includes(interval) ? 'more' : interval}</option>${IVALS.filter((i) => !QUICK.includes(i)).map((i) => `<option value="${i}">${i}</option>`).join('')}</select>`;
+  $('ivalMore').onchange = (e) => { if (e.target.value) setInterval_(e.target.value); };
+  $('chartType').value = chartOpts.type;
+  $('chartLog').classList.toggle('on', chartOpts.log);
+  $('chartDraw').classList.toggle('on', drawing);
+  $('indPanel').innerHTML = Object.entries(INDICATORS).map(([k, d]) => `
+    <label class="indrow"><input type="checkbox" data-ind="${k}" ${chartOpts.on[k] ? 'checked' : ''}>
+      <span style="color:${d.color || 'var(--text)'}">${d.label}</span>
+      ${d.params.map(([p]) => `<input class="indp" data-ind="${k}" data-p="${p}" value="${esc(chartOpts.params[k]?.[p])}" title="${p}" inputmode="decimal">`).join('')}
+    </label>`).join('')
+    + `<label class="indrow"><input type="checkbox" id="chOrders" ${chartOpts.showOrders ? 'checked' : ''}><span>position &amp; order lines</span></label>`
+    + `<label class="indrow"><input type="checkbox" id="chFills" ${chartOpts.showFills ? 'checked' : ''}><span>my fills</span></label>`;
+}
+function setInterval_(iv) {
+  interval = iv; store.set('perps.ival', iv);
+  paintChartBar(); loadCandles();
+}
+$('ivals').onclick = (e) => { const b = e.target.closest('button'); if (b) setInterval_(b.dataset.i); };
+$('chartType').onchange = () => { chartOpts.type = $('chartType').value; saveChart(); pc.setOptions(chartOpts); paintChartAccount(true); };
+$('chartLog').onclick = () => { chartOpts.log = !chartOpts.log; saveChart(); pc.setOptions(chartOpts); paintChartBar(); };
+$('chartFit').onclick = () => pc.fit();
+$('chartDraw').onclick = () => { drawing = !drawing; pc.setDrawMode(drawing); paintChartBar(); };
+$('chartClear').onclick = () => { pc.setUserLines([]); pc.onLinesChange([]); };
+$('indBtn').onclick = (e) => { e.stopPropagation(); $('indPanel').classList.toggle('hidden'); };
+document.addEventListener('click', (e) => { if (!e.target.closest('#indPanel') && !e.target.closest('#indBtn')) $('indPanel').classList.add('hidden'); });
+$('indPanel').onchange = (e) => {
+  const t = e.target;
+  if (t.id === 'chOrders') chartOpts.showOrders = t.checked;
+  else if (t.id === 'chFills') chartOpts.showFills = t.checked;
+  else if (t.dataset.p) { const v = +t.value; if (!(v > 0)) return; chartOpts.params[t.dataset.ind] = { ...chartOpts.params[t.dataset.ind], [t.dataset.p]: v }; }
+  else if (t.dataset.ind) chartOpts.on[t.dataset.ind] = t.checked;
+  saveChart(); pc.setOptions(chartOpts); paintChartAccount(true);
+};
+paintChartBar();
+
 async function loadCandles() {
   const m = sel; if (!m) return;
+  const iv = interval;
   const end = Date.now();
-  try {
-    const cs = await C.info.candleSnapshot({ coin: m.coin, interval, startTime: end - IVAL_MS[interval] * 150, endTime: end });
-    if (sel !== m) return;
-    candles = cs.map((c) => ({ t: c.t, o: +c.o, h: +c.h, l: +c.l, c: +c.c, v: +c.v }));
-  } catch { candles = []; }
-  drawChart();
+  let cs = [];
+  try { cs = (await C.info.candleSnapshot({ coin: m.coin, interval: iv, startTime: end - IVAL_MS[iv] * 500, endTime: end })).map(toK); } catch { /* empty chart */ }
+  if (sel !== m || iv !== interval) return;
+  pc.setCandles(cs);
+  pc.setUserLines(store.get('perps.lines', {})[m.coin] || []);
+  paintChartAccount(true);
   try { await candleSub?.unsubscribe(); } catch { /* gone */ }
-  candleSub = await C.subs.candle({ coin: m.coin, interval }, (c) => {
-    if (sel !== m) return;
-    const k = { t: c.t, o: +c.o, h: +c.h, l: +c.l, c: +c.c, v: +c.v };
-    const last = candles[candles.length - 1];
-    if (last && last.t === k.t) candles[candles.length - 1] = k; else if (!last || k.t > last.t) { candles.push(k); if (candles.length > 300) candles.shift(); }
-    drawChart();
+  candleSub = await C.subs.candle({ coin: m.coin, interval: iv }, (c) => {
+    if (sel === m && iv === interval) pc.update(toK(c));
   }).catch(() => null);
 }
-function drawChart() {
-  const cv = $('chart'); const dpr = window.devicePixelRatio || 1;
-  const W = cv.clientWidth, H = cv.clientHeight;
-  cv.width = W * dpr; cv.height = H * dpr;
-  const g = cv.getContext('2d'); g.scale(dpr, dpr); g.clearRect(0, 0, W, H);
-  const css = getComputedStyle(document.documentElement);
-  const up = css.getPropertyValue('--long').trim(), dn = css.getPropertyValue('--short').trim();
-  if (!candles.length) { g.fillStyle = '#5b6370'; g.font = '12px monospace'; g.fillText('no candles', 12, 20); return; }
-  const axis = 64, volH = 46, top = 8, bottom = H - volH - 18;
-  const n = Math.min(candles.length, Math.max(20, Math.floor((W - axis) / 7)));
-  const cs = candles.slice(-n);
-  let hi = Math.max(...cs.map((c) => c.h)), lo = Math.min(...cs.map((c) => c.l));
-  const pad = (hi - lo) * 0.06 || hi * 0.01; hi += pad; lo -= pad;
-  const y = (p) => top + (hi - p) / (hi - lo) * (bottom - top);
-  const cw = (W - axis) / n;
-  // grid + price axis
-  g.strokeStyle = '#1c2027'; g.fillStyle = '#5b6370'; g.font = '10px monospace'; g.lineWidth = 1;
-  for (let i = 0; i <= 5; i++) {
-    const p = lo + (hi - lo) * i / 5, yy = Math.round(y(p)) + 0.5;
-    g.beginPath(); g.moveTo(0, yy); g.lineTo(W - axis, yy); g.stroke();
-    g.fillText(px(p), W - axis + 6, yy + 3);
-  }
-  const vmax = Math.max(...cs.map((c) => c.v)) || 1;
-  cs.forEach((c, i) => {
-    const x = i * cw + cw / 2, col = c.c >= c.o ? up : dn;
-    g.strokeStyle = col; g.fillStyle = col;
-    g.beginPath(); g.moveTo(Math.round(x) + 0.5, y(c.h)); g.lineTo(Math.round(x) + 0.5, y(c.l)); g.stroke();
-    const bh = Math.max(1, Math.abs(y(c.o) - y(c.c)));
-    g.fillRect(x - Math.max(1, cw * 0.35), Math.min(y(c.o), y(c.c)), Math.max(2, cw * 0.7), bh);
-    g.globalAlpha = 0.25; const vh = c.v / vmax * volH;
-    g.fillRect(x - Math.max(1, cw * 0.35), H - 18 - vh, Math.max(2, cw * 0.7), vh); g.globalAlpha = 1;
+
+let chartFillCount = -1;
+// the position's entry and liquidation, open orders and TP/SL, and fills
+function paintChartAccount(force = false) {
+  if (!sel) return;
+  const pos = positionFor(sel.coin);
+  const orders = (userOrders.get(sel.dex) || []).filter((o) => o.coin === sel.coin).map((o) => {
+    const trig = o.isTrigger;
+    const tp = trig && /take profit/i.test(o.orderType), slo = trig && /stop/i.test(o.orderType);
+    return {
+      px: +(trig ? o.triggerPx : o.limitPx),
+      color: tp ? '#4ade80' : slo ? '#f87171' : o.side === 'B' ? 'rgba(74,222,128,.7)' : 'rgba(248,113,113,.7)',
+      label: tp ? 'TP' : slo ? 'SL' : `${o.side === 'B' ? 'buy' : 'sell'} ${o.sz}`,
+    };
   });
-  // last price line
-  const last = cs[cs.length - 1], ly = Math.round(y(last.c)) + 0.5, lc = last.c >= last.o ? up : dn;
-  g.setLineDash([3, 3]); g.strokeStyle = lc; g.beginPath(); g.moveTo(0, ly); g.lineTo(W - axis, ly); g.stroke(); g.setLineDash([]);
-  g.fillStyle = lc; g.fillRect(W - axis, ly - 8, axis, 16); g.fillStyle = '#0b0d10'; g.fillText(px(last.c), W - axis + 6, ly + 3);
-  // entry line of an open position
-  const pos = positionFor(sel?.coin);
-  if (pos && +pos.entryPx >= lo && +pos.entryPx <= hi) {
-    const ey = Math.round(y(+pos.entryPx)) + 0.5;
-    g.strokeStyle = '#a5b4fc'; g.setLineDash([6, 4]); g.beginPath(); g.moveTo(0, ey); g.lineTo(W - axis, ey); g.stroke(); g.setLineDash([]);
-    g.fillStyle = '#a5b4fc'; g.fillText(`entry ${+pos.szi > 0 ? 'long' : 'short'}`, 6, ey - 4);
-  }
-  // time labels
-  g.fillStyle = '#5b6370';
-  for (let i = 0; i < cs.length; i += Math.ceil(cs.length / 6)) {
-    const d = new Date(cs[i].t);
-    const s = interval === '1d' ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-    g.fillText(s, i * cw, H - 4);
+  pc.setAccount({ entry: pos ? +pos.entryPx : null, liq: pos?.liquidationPx ? +pos.liquidationPx : null, long: pos ? +pos.szi > 0 : null, orders });
+  if (force || fills.length !== chartFillCount) {
+    chartFillCount = fills.length;
+    pc.setFills(fills.filter((f) => f.coin === sel.coin).map((f) => ({ time: f.time, buy: f.side === 'B', text: f.side === 'B' ? 'B' : 'S' })));
   }
 }
-window.addEventListener('resize', () => drawChart());
 
 // --- order book ----------------------------------------------------------------
 // Hyperliquid's default book stream is 20 levels every 5 seconds - too slow to
@@ -369,7 +401,7 @@ function paintAccount() {
   $('nPos').textContent = positions.length ? `(${positions.length})` : '';
   $('nOrd').textContent = orders.length ? `(${orders.length})` : '';
   renderBottom(positions, orders);
-  if (sel) drawChart();
+  if (sel) paintChartAccount();
 }
 function renderBottom(positions, orders) {
   const body = $('bBody');
@@ -747,6 +779,9 @@ document.addEventListener('keydown', (e) => {
   else if (k === 's') setSide('short');
   else if (k === 'm') setType('market');
   else if (k === 'l') { setType('limit'); $('limitPx').focus(); }
+  else if (k === 'd') $('chartDraw').click();
+  else if (k === 'f') pc.fit();
+  else if (e.key === 'Escape' && drawing) $('chartDraw').click();
 });
 
 // funding is paid on the hour: count down to it, and show the rate per year

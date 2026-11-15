@@ -57,7 +57,25 @@
   .ivals { display: flex; gap: 4px; margin-bottom: 6px; }
   .ivals button { border: none; background: none; color: var(--faint); padding: 2px 7px; border-radius: 5px; font-size: 11px; }
   .ivals button.on { color: var(--text); background: var(--panel2); }
-  canvas#chart { width: 100%; height: 360px; display: block; }
+  .ctool { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+  .ctool .ivals { margin: 0; }
+  .ctool select { width: auto; padding: 3px 6px; font-size: 11px; }
+  .ivals select { width: auto; padding: 2px 4px; font-size: 11px; background: none; border-color: transparent; color: var(--faint); }
+  .tb { border: 1px solid var(--border); background: none; color: var(--dim); border-radius: 6px; padding: 3px 8px; font-size: 11px; }
+  .tb:hover { color: var(--text); }
+  .tb.on { color: var(--text); border-color: var(--text); background: var(--panel2); }
+  .indpanel { position: absolute; top: 28px; left: 0; z-index: 15; padding: 8px; width: 270px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  .indpanel.hidden { display: none; }
+  .indrow { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+  .indrow input[type=checkbox] { width: auto; }
+  .indrow span { flex: 1; }
+  .indp { width: 46px !important; padding: 2px 5px !important; font-size: 11px; }
+  .chartbox { position: relative; }
+  #chart { width: 100%; height: 510px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 3px 12px; font-size: 11px; color: var(--dim); min-height: 18px; margin-bottom: 4px; }
+  .legend b { font-weight: 500; color: var(--text); }
+  .legend b.up { color: var(--long); } .legend b.down { color: var(--short); }
+  .chint { font-size: 10px; color: var(--faint); margin-top: 6px; }
   .lower { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 10px; }
   .book { padding-bottom: 8px; font-variant-numeric: tabular-nums; font-size: 12px; }
   .book .row { display: grid; grid-template-columns: 1.1fr 1fr 1fr; padding: 1px 12px; position: relative; cursor: pointer; }
@@ -150,7 +168,7 @@
     .grid { grid-template-columns: minmax(0, 1fr); padding: 8px; }
     .markets { position: static; height: 340px; min-height: 0; }
     .lower { grid-template-columns: minmax(0, 1fr); }
-    canvas#chart { height: 260px; }
+    #chart { height: 380px; }
     header .acct { margin-left: 0; }
   }
 </style>
@@ -195,8 +213,25 @@
         <div class="stat">max leverage<b id="tLev">—</b></div>
       </div>
       <div class="chartwrap">
-        <div class="ivals" id="ivals"></div>
-        <canvas id="chart"></canvas>
+        <div class="ctool">
+          <div class="ivals" id="ivals"></div>
+          <select id="chartType" title="chart type">
+            <option value="candles">candles</option><option value="heikin">heikin-ashi</option><option value="line">line</option><option value="area">area</option>
+          </select>
+          <div style="position:relative">
+            <button class="tb" id="indBtn">ƒx indicators</button>
+            <div class="indpanel card hidden" id="indPanel"></div>
+          </div>
+          <button class="tb" id="chartLog" title="logarithmic price scale">log</button>
+          <button class="tb" id="chartDraw" title="draw horizontal lines: click to add, click a line to remove (D)">─ line</button>
+          <button class="tb" id="chartClear" title="remove this market's drawn lines">clear</button>
+          <button class="tb" id="chartFit" title="fit everything loaded (F)">fit</button>
+        </div>
+        <div class="chartbox">
+          <div class="legend" id="chartLegend"></div>
+          <div id="chart"></div>
+        </div>
+        <div class="chint">drag to move · scroll to zoom · drag the price axis to stretch it, double-click it to reset · alt-click sets a limit price · older candles load as you drag left</div>
       </div>
     </div>
     <div class="lower">
@@ -272,7 +307,7 @@
       <button class="go" id="goBtn">LONG</button>
       <div class="msg" id="msg"></div>
       <div class="note" id="unifyNote" style="display:none"></div>
-      <div class="keys"><kbd>/</kbd> search · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>Enter</kbd> in a field places the order · click a book price for a limit, a book size to size up to it</div>
+      <div class="keys"><kbd>/</kbd> search · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw lines · <kbd>F</kbd> fit chart · <kbd>Enter</kbd> in a field places the order · click a book price for a limit, a book size to size up to it</div>
     </div>
   </div>
 </div>
