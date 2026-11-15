@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>perps</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+<link rel="icon" id="favicon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
 <style>
   :root {
     --bg: #0b0d10; --panel: #14171c; --panel2: #1a1e24; --border: #262b33; --border2: #323844;
@@ -66,6 +66,20 @@
   .tb.on { color: var(--text); border-color: var(--text); background: var(--panel2); }
   .indpanel { position: absolute; top: 28px; left: 0; z-index: 15; padding: 8px; width: 270px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
   .indpanel.hidden { display: none; }
+  .alertwrap { position: relative; align-self: center; }
+  .alertpanel { position: absolute; top: 34px; left: 0; z-index: 16; width: 300px; padding: 12px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.5); font-size: 12px; }
+  .alertpanel.hidden { display: none; }
+  .alertpanel .qrow { display: flex; gap: 4px; }
+  .alertpanel .qrow button { flex: 1; }
+  .alertpanel .alist { display: flex; flex-direction: column; gap: 3px; max-height: 150px; overflow: auto; }
+  .alertpanel .arow { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 4px 6px; background: var(--panel2); border-radius: 6px; }
+  .alertpanel .sep { border-top: 1px solid var(--border); margin: 2px 0; }
+  .alertpanel label.ck { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+  .alertpanel label.ck input { width: auto; }
+  #alertBtn.has { color: #facc15; border-color: #facc15; }
+  .lock { color: #facc15; font-size: 11px; }
+  .lock.hidden { display: none; }
+  .toast.alert { border-left-color: #facc15; cursor: pointer; font-size: 13px; }
   .indrow { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
   .indrow input[type=checkbox] { width: auto; }
   .indrow span { flex: 1; }
@@ -204,6 +218,29 @@
       <div class="ticker">
         <div><div class="dim" id="tDex" style="font-size:11px">—</div><div class="big" id="tCoin">—</div></div>
         <div class="big" id="tPx">—</div>
+        <div class="alertwrap">
+          <button class="tb" id="alertBtn" title="price alerts for this market (A)">🔔 alert</button>
+          <div class="alertpanel card hidden" id="alertPanel">
+            <div><b id="alertTitle">PRICE ALERT</b> <span class="dim" id="alertNow"></span></div>
+            <input type="text" id="alertPx" spellcheck="false" placeholder="price, 100k, or a move like +2%">
+            <div class="qrow"><button class="tbtn" data-q="-5%">-5%</button><button class="tbtn" data-q="-1%">-1%</button><button class="tbtn" data-q="+1%">+1%</button><button class="tbtn" data-q="+5%">+5%</button></div>
+            <input type="text" id="alertNote" spellcheck="false" placeholder="note (optional)" maxlength="60">
+            <label class="ck"><input type="checkbox" id="alertRepeat"> repeat: re-arm once the price is back across</label>
+            <button class="go" id="alertAdd" style="padding:8px">ADD ALERT</button>
+            <div class="alist" id="alertList"></div>
+            <div class="sep"></div>
+            <div class="row" style="display:flex;gap:6px;align-items:center">
+              <select id="alertTone" style="flex:1"><option value="chime">chime</option><option value="beep">beep</option><option value="alarm">alarm</option><option value="off">no sound</option></select>
+              <select id="alertTimes" style="flex:0 0 70px" title="how many times the tone plays"><option value="1">1×</option><option value="3">3×</option><option value="6">6×</option></select>
+              <button class="tbtn" id="alertTest">TEST</button>
+            </div>
+            <label class="ck">volume <input type="range" id="alertVol" min="0" max="1" step="0.05" style="flex:1"></label>
+            <label class="ck"><input type="checkbox" id="alertFill"> also a short sound on every fill</label>
+            <label class="ck"><input type="checkbox" id="alertNotify"> desktop notification when this tab is hidden</label>
+            <div class="lock hidden" id="alertLock">🔇 sound starts after you click or type anywhere on this page</div>
+            <div class="dim" style="font-size:11px">shift-click the chart for an alert at that price · alerts live in this browser and only fire while this page is open</div>
+          </div>
+        </div>
         <div class="stat">24h<b id="tCh">—</b></div>
         <div class="stat">oracle<b id="tOracle">—</b></div>
         <div class="stat">funding / 1h<b id="tFund">—</b></div>
@@ -231,7 +268,7 @@
           <div class="legend" id="chartLegend"></div>
           <div id="chart"></div>
         </div>
-        <div class="chint">drag to move · scroll to zoom · drag the price axis to stretch it, double-click it to reset · alt-click sets a limit price · older candles load as you drag left</div>
+        <div class="chint">drag to move · scroll to zoom · drag the price axis to stretch it, double-click it to reset · alt-click sets a limit price · shift-click sets an alert · older candles load as you drag left</div>
       </div>
     </div>
     <div class="lower">
@@ -257,6 +294,7 @@
           <button data-t="ord">OPEN ORDERS <span id="nOrd"></span></button>
           <button data-t="fills">FILLS</button>
           <button data-t="bal">BALANCES</button>
+          <button data-t="alerts">ALERTS <span id="nAl"></span></button>
         </div>
         <div class="postool" id="posTool" style="display:none"></div>
         <div class="tablewrap" id="bBody"><div class="empty">sign in to see positions</div></div>
@@ -307,7 +345,7 @@
       <button class="go" id="goBtn">LONG</button>
       <div class="msg" id="msg"></div>
       <div class="note" id="unifyNote" style="display:none"></div>
-      <div class="keys"><kbd>/</kbd> search · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw lines · <kbd>F</kbd> fit chart · <kbd>Enter</kbd> in a field places the order · click a book price for a limit, a book size to size up to it</div>
+      <div class="keys"><kbd>/</kbd> search · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw lines · <kbd>F</kbd> fit chart · <kbd>A</kbd> price alert · <kbd>Enter</kbd> in a field places the order · click a book price for a limit, a book size to size up to it</div>
     </div>
   </div>
 </div>

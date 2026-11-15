@@ -12,6 +12,7 @@ import {
   CARD_DEFAULTS, CARD_STYLES, drawPnlCard, cardFromPosition, closedTrades, closedRoe,
 } from './pnlCard.js';
 import { createPerpsChart, INDICATORS, CHART_DEFAULTS } from './perpsChart.js';
+import { parseTarget, makeAlert, checkAlerts, titleText, createSound } from './priceAlerts.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -127,7 +128,7 @@ function renderTicker() {
   $('tOi').textContent = '$' + big(m.oi * m.mark);
   $('tVol').textContent = '$' + big(m.volume);
   $('tLev').textContent = m.maxLeverage + '×';
-  document.title = `${px(m.mid)} ${m.label} · perps`;
+  paintTitle();
 }
 
 async function select(coin) {
@@ -135,7 +136,8 @@ async function select(coin) {
   sel = m;
   store.set('perps.sel', coin);
   history.replaceState(null, '', '#' + encodeURIComponent(coin));
-  renderList(); renderTicker();
+  livePx = null; lastTitlePx = null; tickDir = 0;
+  renderList(); renderTicker(); paintAlertPanel();
   const lev = $('lev');
   lev.max = m.maxLeverage;
   if (+lev.value > m.maxLeverage) lev.value = m.maxLeverage;
@@ -170,6 +172,7 @@ const pc = createPerpsChart($('chart'), $('chartLegend'), {
   },
   // alt-click the chart: a limit order at that price
   onClickPrice: (price, ev) => {
+    if (ev?.shiftKey && sel) { addAlert(sel.coin, price); return; }
     if (!ev?.altKey || !sel) return;
     setType('limit');
     try { $('limitPx').value = formatPrice(price.toPrecision(10), sel.szDecimals); } catch { $('limitPx').value = price; }
@@ -252,7 +255,8 @@ function paintChartAccount(force = false) {
       label: tp ? 'TP' : slo ? 'SL' : `${o.side === 'B' ? 'buy' : 'sell'} ${o.sz}`,
     };
   });
-  pc.setAccount({ entry: pos ? +pos.entryPx : null, liq: pos?.liquidationPx ? +pos.liquidationPx : null, long: pos ? +pos.szi > 0 : null, orders });
+  const al = alerts.filter((a) => a.coin === sel.coin).map((a) => ({ px: a.px, label: '🔔 ' + (a.note || (a.dir === 'above' ? 'above' : 'below')) + (a.repeat ? ' ↻' : '') }));
+  pc.setAccount({ entry: pos ? +pos.entryPx : null, liq: pos?.liquidationPx ? +pos.liquidationPx : null, long: pos ? +pos.szi > 0 : null, orders, alerts: al });
   if (force || fills.length !== chartFillCount) {
     chartFillCount = fills.length;
     pc.setFills(fills.filter((f) => f.coin === sel.coin).map((f) => ({ time: f.time, buy: f.side === 'B', text: f.side === 'B' ? 'B' : 'S' })));
@@ -285,9 +289,12 @@ async function subBook() {
   const deep = () => C.info.l2Book({ coin: m.coin, ...nSig }).then(live((b) => { book.deep = b.levels; })).catch(() => {});
   deep(); deepTimer = setInterval(() => { if (sel === m && !document.hidden) deep(); }, 2000);
   const subs = await Promise.all([
-    C.subs.l2Book({ coin: m.coin, ...nSig, fast: true }, live((b) => { book.fast = b.levels; })),
+    C.subs.l2Book({ coin: m.coin, ...nSig, fast: true }, live((b) => {
+      book.fast = b.levels;
+      if (grouping) tickPx(m, +b.levels[0]?.[0]?.px, +b.levels[1]?.[0]?.px);
+    })),
     // the BBO is per price, so only meaningful on an ungrouped book
-    grouping ? null : C.subs.bbo({ coin: m.coin }, live((b) => { book.bbo = b.bbo; })),
+    grouping ? null : C.subs.bbo({ coin: m.coin }, live((b) => { book.bbo = b.bbo; tickPx(m, +b.bbo[0]?.px, +b.bbo[1]?.px); })),
   ].map((p) => p?.catch?.(() => null) ?? p));
   if (sel !== m) { for (const s of subs) s?.unsubscribe().catch(() => {}); return; }
   bookSubs = subs.filter(Boolean);
@@ -368,6 +375,7 @@ async function startUser() {
   await sub(C.subs.userFills({ user }, (ev) => {
     const fresh = ev.isSnapshot ? [] : ev.fills;
     fills = [...ev.fills.slice().reverse(), ...fills].slice(0, 200);
+    if (fresh.length && alertCfg.fillSound) sound.fill(alertCfg.vol);
     for (const f of fresh) toast(`${f.dir || (f.side === 'B' ? 'Buy' : 'Sell')} ${f.sz} ${f.coin} @ ${px(+f.px)}${+f.closedPnl ? ` · PnL ${usd(+f.closedPnl)}` : ''}`, +f.closedPnl < 0 ? 'down' : 'up');
     if (tab === 'fills') paintAccount();
   }));
@@ -405,6 +413,7 @@ function paintAccount() {
 }
 function renderBottom(positions, orders) {
   const body = $('bBody');
+  if (tab === 'alerts') { renderAlertsTab(); return; }
   if (!wallet) { body.innerHTML = '<div class="empty"><a href="#" id="signLink">sign in</a> to see positions</div>'; $('signLink').onclick = (e) => { e.preventDefault(); showKeyModal(); }; return; }
   if (tab === 'pos') {
     body.innerHTML = positions.length ? `<table class="table"><tr><th>MARKET</th><th>SIZE</th><th>VALUE</th><th>ENTRY</th><th>MARK</th><th>PNL (ROE)</th><th>LIQ.</th><th>MARGIN</th><th>TP / SL</th><th></th></tr>${positions.map((p) => {
@@ -443,6 +452,8 @@ $('bTabs').onclick = (e) => {
 };
 $('bBody').onclick = async (e) => {
   const s = e.target.closest('[data-sel]'); if (s) { e.preventDefault(); select(s.dataset.sel); return; }
+  const da = e.target.closest('[data-delalert]'); if (da) { removeAlert(da.dataset.delalert); return; }
+  if (e.target.closest('[data-clearalerts]')) { if (confirm(`Remove all ${alerts.length} price alerts?`)) { alerts = []; saveAlerts(); paintAlertPanel(); paintChartAccount(); renderAlertsTab(); } return; }
   const c = e.target.closest('[data-close]');
   if (c) {
     const [coin, frac] = c.dataset.close.split('|');
@@ -506,13 +517,187 @@ function openTpsl(coin) {
 }
 
 // fills pop up in the corner, wherever they came from (this page, the HL app, a TP/SL)
-function toast(text, kind = '') {
+function toast(text, kind = '', ms = 5000, onClick = null) {
   const t = document.createElement('div');
   t.className = 'toast ' + kind; t.textContent = text;
+  t.onclick = () => { onClick?.(); t.remove(); };
   $('toasts').prepend(t);
-  setTimeout(() => t.classList.add('gone'), 5000);
-  setTimeout(() => t.remove(), 5600);
+  setTimeout(() => t.classList.add('gone'), ms);
+  setTimeout(() => t.remove(), ms + 600);
 }
+
+// --- price alerts + the tab title ------------------------------------------------
+// Alerts are checked on every price the page receives: all markets from the
+// asset-context stream, and the open market from the best bid/offer stream as
+// well (several times a second). Both arrive over the WebSocket, which keeps
+// running in a background tab, and so does the sound once the audio context
+// has been started by a click. See src/priceAlerts.js.
+let alerts = store.get('perps.alerts', []);
+const alertCfg = { tone: 'chime', vol: 0.6, times: 3, fillSound: false, notify: false, ...store.get('perps.alertCfg', {}) };
+const sound = createSound();
+let livePx = null, lastTitlePx = null, tickDir = 0, titleAt = 0, titleTimer = 0, flash = null, alertsDrawn = 0;
+const saveAlerts = () => store.set('perps.alerts', alerts);
+const saveAlertCfg = () => store.set('perps.alertCfg', alertCfg);
+
+// browsers only allow sound after a gesture on the page
+for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, () => { sound.unlock(); setTimeout(paintLock, 50); }, true);
+function paintLock() { $('alertLock').classList.toggle('hidden', sound.ready || alertCfg.tone === 'off'); }
+
+function tickPx(m, bid, ask) {
+  if (sel !== m || !(bid > 0) || !(ask > 0)) return;
+  livePx = (bid + ask) / 2;
+  runAlerts(m.coin, livePx);
+  paintTitle();
+}
+
+function runAlerts(coin, price) {
+  if (!alerts.length) return;
+  const { fired, keep, changed } = checkAlerts(alerts, coin, price);
+  if (!changed) return;
+  alerts = keep; saveAlerts();
+  for (const a of fired) fireAlert(a);
+  paintAlertPanel(); if (sel?.coin === coin) paintChartAccount();
+  if (tab === 'alerts') renderAlertsTab();
+}
+
+function fireAlert(a) {
+  const label = byCoin.get(a.coin)?.label || a.coin;
+  const up = a.dir === 'above';
+  const text = `🔔 ${label} ${up ? 'reached' : 'fell to'} ${px(a.px)} · now ${px(a.at)}${a.note ? ' · ' + a.note : ''}`;
+  toast(text, 'alert', 20000, () => { if (sel?.coin !== a.coin) select(a.coin); });
+  if (alertCfg.tone !== 'off' && !sound.alert(up, alertCfg)) paintLock();
+  flash = { text: `🔔 ${label} ${up ? '≥' : '≤'} ${px(a.px)}`, until: Date.now() + (document.hidden ? 60000 : 8000) };
+  paintTitle(true);
+  if (alertCfg.notify && document.hidden && globalThis.Notification?.permission === 'granted') {
+    try { new Notification(`${label} ${up ? 'reached' : 'fell to'} ${px(a.px)}`, { body: `now ${px(a.at)}${a.note ? ' · ' + a.note : ''}`, tag: 'perps-' + a.id }); } catch { /* blocked */ }
+  }
+}
+
+function addAlert(coin, target, { repeat = $('alertRepeat').checked, note = $('alertNote').value } = {}) {
+  const m = byCoin.get(coin);
+  const cur = coin === sel?.coin && livePx ? livePx : m?.mid;
+  // a level the exchange can actually print (5 significant figures, the market's decimals)
+  try { if (m) target = +formatPrice(String(+target.toPrecision(12)), m.szDecimals); } catch { /* keep as typed */ }
+  try {
+    const a = makeAlert(coin, target, cur, { repeat, note });
+    alerts = [...alerts, a]; saveAlerts();
+    sound.unlock(); paintLock();
+    toast(`🔔 alert set: ${m?.label || coin} ${a.dir} ${px(a.px)}${a.repeat ? ' (repeats)' : ''}`, 'alert', 3000);
+    $('alertPx').value = ''; $('alertNote').value = '';
+    paintAlertPanel(); paintChartAccount(); if (tab === 'alerts') renderAlertsTab();
+    return true;
+  } catch (e) { toast(e.message, 'down'); return false; }
+}
+function removeAlert(id) {
+  alerts = alerts.filter((a) => a.id !== id); saveAlerts();
+  paintAlertPanel(); paintChartAccount(); if (tab === 'alerts') renderAlertsTab();
+}
+function addFromPanel() {
+  if (!sel) return;
+  const cur = livePx || sel.mid;
+  try { addAlert(sel.coin, parseTarget($('alertPx').value, cur)); } catch (e) { toast(e.message, 'down'); }
+}
+
+const alertLine = (a) => {
+  const m = byCoin.get(a.coin);
+  const now = a.coin === sel?.coin && livePx ? livePx : m?.mid;
+  const dist = now ? ((a.px - now) / now) * 100 : null;
+  return { label: m?.label || a.coin, now, dist };
+};
+function paintAlertPanel() {
+  const n = alerts.length;
+  $('nAl').textContent = n ? `(${n})` : '';
+  if (!sel) return;
+  const mine = alerts.filter((a) => a.coin === sel.coin);
+  $('alertBtn').classList.toggle('has', mine.length > 0);
+  $('alertBtn').textContent = mine.length ? `🔔 ${mine.length}` : '🔔 alert';
+  $('alertTitle').textContent = `PRICE ALERT · ${sel.label}`;
+  $('alertNow').textContent = px(livePx || sel.mid);
+  $('alertList').innerHTML = mine.length ? mine.sort((a, b) => b.px - a.px).map((a) => {
+    const { dist } = alertLine(a);
+    return `<div class="arow"><span><span class="${a.dir === 'above' ? 'up' : 'down'}">${a.dir === 'above' ? '▲' : '▼'}</span> ${px(a.px)}
+      <span class="dim">${dist == null ? '' : pct(dist, Math.abs(dist) < 0.1 ? 3 : 2)}${a.repeat ? ' · ↻' + (a.armed ? '' : ' waiting') : ''}${a.note ? ' · ' + esc(a.note) : ''}</span></span>
+      <button class="tbtn" data-delalert="${esc(a.id)}">✕</button></div>`;
+  }).join('') : '<div class="dim">no alerts on this market</div>';
+}
+function renderAlertsTab() {
+  alertsDrawn = Date.now();
+  const body = $('bBody');
+  if (!alerts.length) { body.innerHTML = '<div class="empty">no price alerts. Press <b>🔔 alert</b> next to the price, <kbd>A</kbd>, or shift-click the chart.</div>'; return; }
+  const rows = alerts.slice().sort((a, b) => Math.abs(alertLine(a).dist ?? 1e9) - Math.abs(alertLine(b).dist ?? 1e9));
+  body.innerHTML = `<div style="padding:8px 10px 0;text-align:right"><button class="tbtn" data-clearalerts="1">REMOVE ALL (${alerts.length})</button></div><table class="table"><tr><th>MARKET</th><th>WHEN</th><th>PRICE</th><th>NOW</th><th>DISTANCE</th><th>TYPE</th><th>NOTE</th><th>SET</th><th></th></tr>${rows.map((a) => {
+    const { label, now, dist } = alertLine(a);
+    return `<tr><td><a href="#" data-sel="${esc(a.coin)}" style="color:var(--text)">${esc(label)}</a></td>
+      <td class="${a.dir === 'above' ? 'up' : 'down'}">${a.dir === 'above' ? '▲ rises to' : '▼ falls to'}</td><td>${px(a.px)}</td><td>${px(now)}</td>
+      <td class="dim">${dist == null ? '—' : pct(dist, Math.abs(dist) < 0.1 ? 3 : 2)}</td><td>${a.repeat ? (a.armed ? 'repeat' : 'repeat · re-arms when back') : 'once'}</td>
+      <td class="dim">${esc(a.note || '')}</td>
+      <td class="dim">${new Date(a.created).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}</td>
+      <td class="x"><button class="tbtn" data-delalert="${esc(a.id)}">✕</button></td></tr>`;
+  }).join('')}</table>`;
+}
+
+// The tab text, e.g. "▲ 97,123.5 BTC +1.23% · +$12.30". At most 5 a second;
+// a background tab still gets it, because this runs off the socket, not a frame.
+function paintTitle(now = false) {
+  if (!sel) return;
+  const t = Date.now();
+  if (!now && t - titleAt < 200) { if (!titleTimer) titleTimer = setTimeout(() => { titleTimer = 0; paintTitle(); }, 200); return; }
+  titleAt = t;
+  if (flash && t < flash.until) {
+    // alternate the alert and the price each second so both stay visible
+    document.title = Math.floor(t / 1000) % 2 ? flash.text : flash.text + ' · ' + px(livePx || sel.mid);
+    if (!titleTimer) titleTimer = setTimeout(() => { titleTimer = 0; paintTitle(); }, 1000);
+    return;
+  }
+  flash = null;
+  const price = livePx || sel.mid;
+  if (lastTitlePx != null && price !== lastTitlePx) {
+    const d = price > lastTitlePx ? 1 : -1;
+    if (d !== tickDir) { tickDir = d; paintFavicon(); }
+  }
+  lastTitlePx = price;
+  const pos = positionFor(sel.coin);
+  const pnl = pos ? +pos.szi * (price - +pos.entryPx) : null;
+  document.title = titleText({ price, label: sel.label, change: sel.change, tick: tickDir, pnl, fmt: px });
+}
+function paintFavicon() {
+  const color = tickDir > 0 ? '%234ade80' : tickDir < 0 ? '%23f87171' : '%238a93a1';
+  const shape = tickDir < 0 ? '10,25 90,25 50,85' : '10,75 90,75 50,15';
+  $('favicon').href = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='${shape}' fill='${color}'/></svg>`;
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && flash) flash.until = Math.min(flash.until, Date.now() + 3000);
+});
+
+// the panel
+$('alertBtn').onclick = (e) => { e.stopPropagation(); toggleAlertPanel(); };
+function toggleAlertPanel(open) {
+  const p = $('alertPanel');
+  const show = open ?? p.classList.contains('hidden');
+  p.classList.toggle('hidden', !show);
+  if (show) { paintAlertPanel(); paintLock(); $('alertPx').focus(); }
+}
+document.addEventListener('click', (e) => { if (!e.target.closest('#alertPanel') && !e.target.closest('#alertBtn')) $('alertPanel').classList.add('hidden'); });
+$('alertPanel').onclick = (e) => {
+  const q = e.target.closest('[data-q]'); if (q) { $('alertPx').value = q.dataset.q; $('alertPx').focus(); return; }
+  const d = e.target.closest('[data-delalert]'); if (d) removeAlert(d.dataset.delalert);
+};
+$('alertAdd').onclick = addFromPanel;
+$('alertTone').value = alertCfg.tone; $('alertTimes').value = String(alertCfg.times); $('alertVol').value = alertCfg.vol;
+$('alertFill').checked = alertCfg.fillSound; $('alertNotify').checked = alertCfg.notify && globalThis.Notification?.permission === 'granted';
+$('alertTone').onchange = () => { alertCfg.tone = $('alertTone').value; saveAlertCfg(); paintLock(); if (alertCfg.tone !== 'off') sound.alert(true, { ...alertCfg, times: 1 }); };
+$('alertTimes').onchange = () => { alertCfg.times = +$('alertTimes').value; saveAlertCfg(); };
+$('alertVol').onchange = () => { alertCfg.vol = +$('alertVol').value; saveAlertCfg(); sound.alert(true, { ...alertCfg, times: 1 }); };
+$('alertTest').onclick = () => { sound.unlock(); setTimeout(() => { if (!sound.alert(true, alertCfg)) paintLock(); }, 60); };
+$('alertFill').onchange = () => { alertCfg.fillSound = $('alertFill').checked; saveAlertCfg(); if (alertCfg.fillSound) sound.fill(alertCfg.vol); };
+$('alertNotify').onchange = async () => {
+  const box = $('alertNotify');
+  if (box.checked && globalThis.Notification && Notification.permission !== 'granted') {
+    const p = await Notification.requestPermission().catch(() => 'denied');
+    if (p !== 'granted') { box.checked = false; toast('the browser blocked notifications for this page', 'down'); }
+  }
+  alertCfg.notify = box.checked; saveAlertCfg();
+};
 
 // unified account: every exchange margins from one balance
 function paintUnify() {
@@ -765,9 +950,11 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
   if (e.key === 'Escape' && !$('cardModal').classList.contains('hidden')) { closeCard(); return; }
+  if (e.key === 'Escape' && !$('alertPanel').classList.contains('hidden')) { toggleAlertPanel(false); document.activeElement?.blur(); return; }
   if (typing) {
     if (e.key === 'Escape') document.activeElement.blur();
     if (e.key === 'Enter' && ['size', 'limitPx', 'tp', 'sl'].includes(document.activeElement.id)) { e.preventDefault(); $('goBtn').click(); }
+    if (e.key === 'Enter' && ['alertPx', 'alertNote'].includes(document.activeElement.id)) { e.preventDefault(); addFromPanel(); }
     if (e.key === 'Enter' && document.activeElement.id === 'mSearch') {
       const first = $('mList').querySelector('.mrow'); if (first) { select(first.dataset.c); $('size').focus(); }
     }
@@ -781,6 +968,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'l') { setType('limit'); $('limitPx').focus(); }
   else if (k === 'd') $('chartDraw').click();
   else if (k === 'f') pc.fit();
+  else if (k === 'a') { e.preventDefault(); toggleAlertPanel(true); }
   else if (e.key === 'Escape' && drawing) $('chartDraw').click();
 });
 
@@ -801,13 +989,17 @@ setInterval(() => {
     return;
   }
   byCoin = new Map(markets.map((m) => [m.coin, m]));
-  dexTabs(); renderList();
+  dexTabs(); renderList(); paintAlertPanel();
   const want = decodeURIComponent(location.hash.slice(1)) || store.get('perps.sel', 'BTC');
   await select(byCoin.has(want) ? want : 'BTC');
   let pending = false, listDrawn = 0;
   C.subs.allDexsAssetCtxs((ev) => {
     applyCtxs(markets, ev);
     for (const [dex, ctxs] of ev.ctxs) for (const m of markets) if (m.dex === dex) { const c = ctxs[m.asset - (m.dexIndex ? 100000 + m.dexIndex * 10000 : 0)]; if (c) m.oracle = +c.oraclePx; }
+    // the open market is checked off its own faster stream (tickPx) once that is live
+    for (const coin of new Set(alerts.map((a) => a.coin))) if (!(coin === sel?.coin && livePx)) runAlerts(coin, byCoin.get(coin)?.mid);
+    paintTitle();
+    if (tab === 'alerts' && Date.now() - alertsDrawn > 1000) renderAlertsTab();
     if (pending) return;
     pending = true;
     requestAnimationFrame(() => {

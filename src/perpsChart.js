@@ -230,9 +230,9 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
   });
 
   // --- account overlays --------------------------------------------------------------
-  function setAccount({ entry, liq, long, orders = [] } = {}) {
+  function setAccount({ entry, liq, long, orders = [], alerts = [] } = {}) {
     if (!main) return;
-    const key = JSON.stringify([entry, liq, long, opts.showOrders && orders.map((o) => [o.px, o.label])]);
+    const key = JSON.stringify([entry, liq, long, opts.showOrders && orders.map((o) => [o.px, o.label]), alerts.map((a) => [a.px, a.label])]);
     if (key === accountKey) return;
     accountKey = key;
     for (const l of priceLines) main.removePriceLine(l);
@@ -241,6 +241,8 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
     if (entry) add(entry, '#a5b4fc', `entry ${long ? 'long' : 'short'}`, LineStyle.Solid);
     if (liq) add(liq, '#f97316', 'liquidation');
     if (opts.showOrders) for (const o of orders) add(o.px, o.color, o.label, LineStyle.Dotted);
+    // price alerts always show: they are this browser's, not the exchange's
+    for (const a of alerts) add(a.px, '#facc15', a.label, LineStyle.LargeDashed);
   }
   function setFills(list) { fillMarks = list; applyFillMarkers(); }
   function applyFillMarkers() {
