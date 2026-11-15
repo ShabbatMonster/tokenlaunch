@@ -82,6 +82,19 @@
   .toast { background: var(--panel2); border: 1px solid var(--border2); border-left: 3px solid var(--text); border-radius: 8px; padding: 9px 12px; font-size: 12px; transition: opacity .5s; }
   .toast.up { border-left-color: var(--long); } .toast.down { border-left-color: var(--short); }
   .toast.gone { opacity: 0; }
+  .cardbox { width: 100%; max-width: 1180px; max-height: calc(100vh - 32px); overflow: auto; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; padding: 16px; }
+  .cardprev { align-self: start; }
+  .cardprev canvas { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--border); }
+  .cardctl { display: flex; flex-direction: column; gap: 12px; }
+  .wrapseg { flex-wrap: wrap; } .wrapseg button { flex: 1 0 30%; }
+  .swatches { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .swatches button { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; padding: 0; }
+  .swatches button.on { border-color: var(--text); }
+  .swatches .auto { width: auto; border-radius: 6px; padding: 0 8px; background: var(--panel2); color: var(--dim); border-color: var(--border); font-size: 11px; height: 26px; }
+  .swatches .auto.on { color: var(--text); border-color: var(--text); }
+  .swatches input[type=color] { width: 30px; height: 28px; padding: 0; border: none; background: none; }
+  .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  @media (max-width: 860px) { .cardbox { grid-template-columns: minmax(0, 1fr); } }
 
   .tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); }
   .tabs button { border: none; background: none; color: var(--dim); padding: 6px 10px; border-bottom: 2px solid transparent; font-size: 12px; }
@@ -272,6 +285,46 @@
     <div class="err" id="keyErr"></div>
     <button class="go" id="keySave">SIGN IN</button>
     <a href="#" id="keySkip" style="font-size:12px;text-align:center">just look around</a>
+  </div>
+</div>
+
+<div class="overlay hidden" id="cardModal">
+  <div class="card cardbox">
+    <div class="cardprev"><canvas id="cardCanvas" width="1200" height="675"></canvas></div>
+    <div class="cardctl">
+      <div class="lbl">PNL CARD <span><a href="#" id="cardClose">close ✕</a></span></div>
+      <div>
+        <div class="lbl">BACKGROUND</div>
+        <div class="seg wrapseg" id="cardStyle"></div>
+        <div id="cardImgWrap" style="display:none;margin-top:6px">
+          <input type="file" id="cardImg" accept="image/*">
+          <div class="lbl" style="margin-top:6px">DARKEN <span id="cardDimVal"></span></div>
+          <input type="range" id="cardDim" min="0" max="90">
+        </div>
+      </div>
+      <div>
+        <div class="lbl">ACCENT</div>
+        <div class="swatches" id="cardAccent"></div>
+      </div>
+      <div class="checks">
+        <label class="check"><input type="checkbox" id="cardUsd">$ PnL</label>
+        <label class="check"><input type="checkbox" id="cardPrices">entry / exit</label>
+        <label class="check"><input type="checkbox" id="cardSize">size</label>
+        <label class="check"><input type="checkbox" id="cardLevOn">leverage</label>
+      </div>
+      <div id="cardLevWrap">
+        <div class="lbl">LEVERAGE ON THIS TRADE <span>Hyperliquid doesn't keep it for closed trades</span></div>
+        <input id="cardLev" inputmode="decimal">
+      </div>
+      <div><div class="lbl">BRAND</div><input id="cardBrand" maxlength="24" spellcheck="false"></div>
+      <div><div class="lbl">HANDLE</div><input id="cardHandle" maxlength="32" placeholder="@you" spellcheck="false"></div>
+      <div><div class="lbl">CAPTION</div><input id="cardCaption" maxlength="90" placeholder="optional"></div>
+      <div class="inrow">
+        <button class="go" id="cardSave" style="flex:1">DOWNLOAD PNG</button>
+        <button class="go" id="cardCopy" style="flex:1;background:var(--text);color:#0b0d10">COPY</button>
+      </div>
+      <div class="msg" id="cardMsg"></div>
+    </div>
   </div>
 </div>
 

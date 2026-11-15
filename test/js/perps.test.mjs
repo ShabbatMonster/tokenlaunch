@@ -14,6 +14,7 @@ import {
   hlClients, hlMarkets, buildOrders, closeOrder, sizeForUsd, marketPrice, orderOutcome, hlError,
   mergeBook, partialCloseOrder, positionTpslOrders,
 } from '../../src/hyperliquid.js';
+import { cardFromPosition, closedTrades, closedRoe } from '../../src/pnlCard.js';
 
 const fails = [];
 const check = (ok, label, detail = '') => { console.log((ok ? 'PASS' : 'FAIL') + '  ' + label + (detail ? '  — ' + detail : '')); if (!ok) fails.push(label); };
@@ -108,6 +109,32 @@ for (const m of [btc, nvda, live.find((x) => x.mid < 0.01) || btc]) {
     'TP/SL on an open long: two reduce-only sells grouped to follow the position');
   const wrong = (() => { try { positionTpslOrders(btc, '-0.01', { tp: btc.mark * 1.2 }); return 'taken'; } catch (e) { return e.message; } })();
   check(/take-profit must be below the mark/.test(wrong), 'a TP above the mark on a short is refused', wrong);
+}
+
+// --- PnL cards -------------------------------------------------------------------------
+{
+  const PAGE = fs.readFileSync(path.join(ROOT, 'src', 'perps.js'), 'utf8');
+  check(['cardModal', 'cardCanvas', 'cardStyle', 'cardImg', 'cardAccent', 'cardUsd', 'cardPrices', 'cardSize', 'cardLev', 'cardBrand', 'cardHandle', 'cardCaption', 'cardSave', 'cardCopy']
+    .every((id) => HTML.includes(`id="${id}"`)) && /data-card="pos\|/.test(PAGE) && /data-card="fill\|/.test(PAGE),
+  'cards: the editor is on the page, with a CARD button on positions and on closing fills');
+  const pos = cardFromPosition({ coin: 'ETH', szi: '-2', entryPx: '1900', unrealizedPnl: '160', returnOnEquity: '0.842', leverage: { value: 10 } }, 1820);
+  check(!pos.long && pos.size === 2 && pos.roe === 84.2 && pos.lev === 10 && pos.exit === 1820, 'cards: an open short carries its side, size, ROE, leverage and mark');
+  // two fills of one closing order, one flip, one opening fill (no PnL)
+  const fl = [
+    { coin: 'BTC', oid: 7, side: 'B', dir: 'Close Short', sz: '0.2', px: '66100', closedPnl: '-412.4', fee: '5.9', time: 2, startPosition: '-0.3' },
+    { coin: 'BTC', oid: 7, side: 'B', dir: 'Close Short', sz: '0.1', px: '66140', closedPnl: '-210.2', fee: '3', time: 3, startPosition: '-0.1' },
+    { coin: 'SOL', oid: 9, side: 'A', dir: 'Long > Short', sz: '15', px: '80', closedPnl: '50', fee: '0.5', time: 4, startPosition: '10' },
+    { coin: 'SOL', oid: 8, side: 'B', dir: 'Open Long', sz: '10', px: '75', closedPnl: '0', fee: '0.3', time: 1, startPosition: '0' },
+  ];
+  const ts = closedTrades(fl);
+  const btcT = ts.find((x) => x.coin === 'BTC'), solT = ts.find((x) => x.coin === 'SOL');
+  const exitV = (0.2 * 66100 + 0.1 * 66140) / 0.3;
+  check(ts.length === 2 && !btcT.long && Math.abs(btcT.size - 0.3) < 1e-12 && Math.abs(btcT.exit - exitV) < 1e-6 && Math.abs(btcT.pnl + 622.6) < 1e-9
+    && Math.abs((btcT.entry - btcT.exit) * btcT.size - btcT.pnl) < 1e-6,
+  'cards: an order\'s fills make one closed trade, its entry the one its realised PnL implies', `entry ${btcT.entry.toFixed(2)} exit ${btcT.exit.toFixed(2)}`);
+  check(solT.long && solT.size === 10 && solT.entry === 75 && ts[0].coin === 'SOL',
+    'cards: a flip counts only the size it closed, and the newest trade comes first');
+  check(Math.abs(closedRoe(solT, 5) - 50 / (75 * 10 / 5) * 100) < 1e-9, 'cards: a closed trade\'s ROE is its PnL over the margin at the leverage given');
 }
 
 // --- signing, live -----------------------------------------------------------------

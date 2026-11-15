@@ -8,6 +8,9 @@ import {
   hlClients, hlMarkets, applyCtxs, sizeForUsd, buildOrders, orderOutcome, hlError, formatSize,
   mergeBook, partialCloseOrder, positionTpslOrders,
 } from './hyperliquid.js';
+import {
+  CARD_DEFAULTS, CARD_STYLES, drawPnlCard, cardFromPosition, closedTrades, closedRoe,
+} from './pnlCard.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -379,14 +382,15 @@ function renderBottom(positions, orders) {
         <td class="${cls(+p.unrealizedPnl)}">${usd(+p.unrealizedPnl)} (${pct(+p.returnOnEquity * 100, 1)})</td>
         <td>${p.liquidationPx ? px(+p.liquidationPx) : '—'}</td><td>${usd(+p.marginUsed)} ${p.leverage.type === 'cross' ? 'cross' : 'iso'}</td>
         <td>${esc(tpslFor(p.coin))}</td>
-        <td class="x"><button class="tbtn" data-tpsl="${esc(p.coin)}">TP/SL</button> <button class="tbtn" data-close="${esc(p.coin)}|0.25">25%</button> <button class="tbtn" data-close="${esc(p.coin)}|0.5">50%</button> <button class="tbtn" data-close="${esc(p.coin)}|1">CLOSE</button></td></tr>`;
+        <td class="x"><button class="tbtn" data-card="pos|${esc(p.coin)}">CARD</button> <button class="tbtn" data-tpsl="${esc(p.coin)}">TP/SL</button> <button class="tbtn" data-close="${esc(p.coin)}|0.25">25%</button> <button class="tbtn" data-close="${esc(p.coin)}|0.5">50%</button> <button class="tbtn" data-close="${esc(p.coin)}|1">CLOSE</button></td></tr>`;
     }).join('')}</table>` : '<div class="empty">no open positions</div>';
   } else if (tab === 'fills') {
-    body.innerHTML = fills.length ? `<table class="table"><tr><th>TIME</th><th>MARKET</th><th>DIRECTION</th><th>SIZE</th><th>PRICE</th><th>FEE</th><th>CLOSED PNL</th></tr>${fills.slice(0, 100).map((f) => `<tr>
+    body.innerHTML = fills.length ? `<table class="table"><tr><th>TIME</th><th>MARKET</th><th>DIRECTION</th><th>SIZE</th><th>PRICE</th><th>FEE</th><th>CLOSED PNL</th><th></th></tr>${fills.slice(0, 100).map((f) => `<tr>
         <td class="dim">${new Date(f.time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</td>
         <td>${esc(f.coin)}</td><td class="${f.side === 'B' ? 'up' : 'down'}">${esc(f.dir || (f.side === 'B' ? 'Buy' : 'Sell'))}${f.liquidation ? ' · LIQUIDATED' : ''}</td>
         <td>${esc(f.sz)}</td><td>${px(+f.px)}</td><td class="dim">${(+f.fee).toFixed(4)} ${esc(f.feeToken || '')}</td>
-        <td class="${cls(+f.closedPnl)}">${+f.closedPnl ? usd(+f.closedPnl) : '—'}</td></tr>`).join('')}</table>` : '<div class="empty">no fills yet</div>';
+        <td class="${cls(+f.closedPnl)}">${+f.closedPnl ? usd(+f.closedPnl) : '—'}</td>
+        <td class="x">${+f.closedPnl ? `<button class="tbtn" data-card="fill|${esc(f.coin)}|${f.oid}">CARD</button>` : ''}</td></tr>`).join('')}</table>` : '<div class="empty">no fills yet</div>';
   } else if (tab === 'ord') {
     body.innerHTML = orders.length ? `<div style="padding:8px 10px 0;text-align:right"><button class="tbtn" data-cancelall="1">CANCEL ALL (${orders.length})</button></div><table class="table"><tr><th>MARKET</th><th>TYPE</th><th>SIDE</th><th>SIZE</th><th>PRICE</th><th>TRIGGER</th><th></th></tr>${orders.map((o) => `<tr>
         <td>${esc(o.coin)}</td><td>${esc(o.orderType || 'Limit')}${o.reduceOnly ? ' · reduce' : ''}</td>
@@ -416,6 +420,8 @@ $('bBody').onclick = async (e) => {
     await send(() => C.exchange.order(partialCloseOrder(m, pos.szi, +frac, slip())), `closing ${+frac >= 1 ? '' : `${+frac * 100}% of `}${m.coin}`);
     c.disabled = false; return;
   }
+  const cd = e.target.closest('[data-card]');
+  if (cd) { const [kind, coin, oid] = cd.dataset.card.split('|'); openCard(kind, coin, oid); return; }
   const t = e.target.closest('[data-tpsl]');
   if (t) { openTpsl(t.dataset.tpsl); return; }
   if (e.target.closest('[data-cancelall]')) {
@@ -607,12 +613,126 @@ $('goBtn').onclick = async () => {
   } finally { go.disabled = false; }
 };
 
+// --- PnL cards -----------------------------------------------------------------
+// The editor keeps its settings (and an uploaded background) in this browser.
+// An open position's card follows the live mark while the editor is open.
+const card = { kind: null, coin: null, oid: null, data: null, img: null, timer: 0 };
+let cardOpts = { ...CARD_DEFAULTS, ...store.get('perps.card', {}) };
+const ACCENTS = ['#4ade80', '#f87171', '#facc15', '#60a5fa', '#c084fc', '#f472b6', '#ffffff'];
+try { cardOpts.image = localStorage.getItem('perps.cardImg') || null; } catch { cardOpts.image = null; }
+function saveCardOpts() {
+  const { image, ...rest } = cardOpts;
+  store.set('perps.card', rest);
+  try { image ? localStorage.setItem('perps.cardImg', image) : localStorage.removeItem('perps.cardImg'); } catch { /* too big or private mode: kept for this visit */ }
+}
+function cardData() {
+  if (card.kind === 'pos') {
+    const p = positionFor(card.coin);
+    return p ? cardFromPosition(p, byCoin.get(card.coin)?.mark ?? +p.entryPx) : card.data;
+  }
+  const t = closedTrades(fills).find((x) => x.coin === card.coin && String(x.oid) === String(card.oid));
+  if (!t) return null;
+  const lev = +$('cardLev').value || 1;
+  return { ...t, lev, roe: closedRoe(t, lev) };
+}
+function paintCard() {
+  const d = cardData();
+  if (!d) { $('cardMsg').innerHTML = '<span class="err">that position or trade is gone</span>'; return; }
+  card.data = d;
+  drawPnlCard($('cardCanvas').getContext('2d'), d, cardOpts, cardOpts.style === 'image' ? card.img : null);
+}
+function cardControls() {
+  $('cardStyle').innerHTML = Object.entries(CARD_STYLES).map(([k, l]) => `<button data-v="${k}" class="${cardOpts.style === k ? 'on' : ''}">${l}</button>`).join('');
+  $('cardImgWrap').style.display = cardOpts.style === 'image' ? '' : 'none';
+  $('cardDim').value = cardOpts.dim; $('cardDimVal').textContent = cardOpts.dim + '%';
+  $('cardAccent').innerHTML = `<button class="auto ${cardOpts.accent === 'auto' ? 'on' : ''}" data-c="auto">auto</button>`
+    + ACCENTS.map((c) => `<button data-c="${c}" class="${cardOpts.accent === c ? 'on' : ''}" style="background:${c}"></button>`).join('')
+    + `<input type="color" id="cardPick" value="${/^#/.test(cardOpts.accent) ? cardOpts.accent : '#4ade80'}" title="any colour">`;
+  $('cardPick').oninput = (e) => { cardOpts.accent = e.target.value; saveCardOpts(); cardControls(); paintCard(); };
+  $('cardUsd').checked = cardOpts.showUsd; $('cardPrices').checked = cardOpts.showPrices;
+  $('cardSize').checked = cardOpts.showSize; $('cardLevOn').checked = cardOpts.showLev;
+  $('cardBrand').value = cardOpts.brand; $('cardHandle').value = cardOpts.handle; $('cardCaption').value = cardOpts.caption;
+  $('cardLevWrap').style.display = card.kind === 'fill' ? '' : 'none';
+}
+async function loadCardImg() {
+  card.img = null;
+  if (!cardOpts.image) return;
+  const im = new Image();
+  im.src = cardOpts.image;
+  try { await im.decode(); card.img = im; } catch { card.img = null; }
+}
+async function openCard(kind, coin, oid) {
+  Object.assign(card, { kind, coin, oid, data: null });
+  if (kind === 'fill') {
+    // the leverage a closed trade had is not kept by Hyperliquid: start from
+    // what this market is set to now, and let it be changed
+    const p = positionFor(coin);
+    $('cardLev').value = p?.leverage?.value ?? (sel?.coin === coin && assetData ? assetData.leverage.value : 1);
+  }
+  $('cardMsg').textContent = '';
+  cardControls();
+  await loadCardImg();
+  $('cardModal').classList.remove('hidden');
+  paintCard();
+  clearInterval(card.timer);
+  if (kind === 'pos') card.timer = setInterval(paintCard, 1000);
+}
+function closeCard() { $('cardModal').classList.add('hidden'); clearInterval(card.timer); }
+$('cardClose').onclick = (e) => { e.preventDefault(); closeCard(); };
+$('cardModal').onclick = (e) => { if (e.target === $('cardModal')) closeCard(); };
+$('cardStyle').onclick = async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  cardOpts.style = b.dataset.v; saveCardOpts(); cardControls();
+  if (cardOpts.style === 'image' && !cardOpts.image) $('cardImg').click();
+  paintCard();
+};
+$('cardAccent').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  cardOpts.accent = b.dataset.c; saveCardOpts(); cardControls(); paintCard();
+};
+$('cardImg').onchange = async () => {
+  const file = $('cardImg').files?.[0]; if (!file) return;
+  // scaled to the card's size and stored as JPEG, so it fits in local storage
+  const bmp = await createImageBitmap(file);
+  const s = Math.min(1, 1600 / bmp.width);
+  const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * s); cv.height = Math.round(bmp.height * s);
+  cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+  cardOpts.image = cv.toDataURL('image/jpeg', 0.85);
+  cardOpts.style = 'image';
+  saveCardOpts(); cardControls(); await loadCardImg(); paintCard();
+};
+$('cardDim').oninput = () => { cardOpts.dim = +$('cardDim').value; $('cardDimVal').textContent = cardOpts.dim + '%'; saveCardOpts(); paintCard(); };
+for (const [id, key] of [['cardUsd', 'showUsd'], ['cardPrices', 'showPrices'], ['cardSize', 'showSize'], ['cardLevOn', 'showLev']]) {
+  $(id).onchange = () => { cardOpts[key] = $(id).checked; saveCardOpts(); paintCard(); };
+}
+for (const [id, key] of [['cardBrand', 'brand'], ['cardHandle', 'handle'], ['cardCaption', 'caption']]) {
+  $(id).oninput = () => { cardOpts[key] = $(id).value; saveCardOpts(); paintCard(); };
+}
+$('cardLev').oninput = paintCard;
+const cardName = () => `${(card.data?.coin || 'pnl').replace(':', '-')}-${card.data?.long ? 'long' : 'short'}-pnl.png`;
+$('cardSave').onclick = () => {
+  paintCard();
+  const a = document.createElement('a');
+  a.href = $('cardCanvas').toDataURL('image/png'); a.download = cardName(); a.click();
+};
+$('cardCopy').onclick = async () => {
+  paintCard();
+  try {
+    const blob = await new Promise((r) => $('cardCanvas').toBlob(r, 'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    $('cardMsg').innerHTML = '<span class="up">copied - paste it into X, Discord or Telegram</span>';
+  } catch (err) {
+    $('cardMsg').innerHTML = `<span class="err">this browser would not copy an image (${esc(err.message || err)}) - use DOWNLOAD</span>`;
+  }
+};
+
 // --- keyboard ------------------------------------------------------------------
 //   /  search markets      B  long      S  short      M  market      L  limit
 //   Enter (in size / price / TP / SL)  place the order      Esc  leave a field
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
+  if (e.key === 'Escape' && !$('cardModal').classList.contains('hidden')) { closeCard(); return; }
   if (typing) {
     if (e.key === 'Escape') document.activeElement.blur();
     if (e.key === 'Enter' && ['size', 'limitPx', 'tp', 'sl'].includes(document.activeElement.id)) { e.preventDefault(); $('goBtn').click(); }
