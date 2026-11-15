@@ -58,12 +58,30 @@
   .ivals button { border: none; background: none; color: var(--faint); padding: 2px 7px; border-radius: 5px; font-size: 11px; }
   .ivals button.on { color: var(--text); background: var(--panel2); }
   canvas#chart { width: 100%; height: 360px; display: block; }
-  .lower { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 10px; }
+  .lower { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 10px; }
   .book { padding-bottom: 8px; font-variant-numeric: tabular-nums; font-size: 12px; }
-  .book .row { display: grid; grid-template-columns: 1fr 1fr; padding: 1px 12px; position: relative; }
-  .book .row span:last-child { text-align: right; }
-  .book .row i { position: absolute; top: 0; bottom: 0; right: 0; opacity: .14; }
+  .book .row { display: grid; grid-template-columns: 1.1fr 1fr 1fr; padding: 1px 12px; position: relative; cursor: pointer; }
+  .book .row:hover { background: rgba(255,255,255,.04); }
+  .book .row span:not(:first-child) { text-align: right; }
+  .book .row.hd { color: var(--faint); font-size: 10px; letter-spacing: 1px; cursor: default; padding-top: 6px; }
+  .book .row.hd:hover { background: none; }
+  .book .row i { position: absolute; top: 0; bottom: 0; right: 0; opacity: .14; pointer-events: none; }
   .book .spread { text-align: center; color: var(--dim); font-size: 11px; padding: 4px 0; }
+  .bookhead { display: flex; align-items: center; gap: 2px; padding: 8px 8px 0 6px; }
+  .bookhead button { border: none; background: none; color: var(--dim); font-size: 11px; letter-spacing: 1px; padding: 3px 6px; border-bottom: 2px solid transparent; }
+  .bookhead button.on { color: var(--text); border-bottom-color: var(--text); }
+  .bookhead select { width: auto; margin-left: auto; padding: 2px 4px; font-size: 10px; }
+  .live { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); margin-left: 6px; }
+  .live.on { background: var(--long); box-shadow: 0 0 6px var(--long); }
+  #tradeTape .row { cursor: default; }
+  .postool { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .postool input { width: 150px; padding: 5px 8px; }
+  .keys { font-size: 10px; color: var(--faint); line-height: 1.7; }
+  kbd { border: 1px solid var(--border2); border-radius: 3px; padding: 0 4px; font: inherit; color: var(--dim); }
+  #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 6px; z-index: 30; max-width: calc(100vw - 32px); }
+  .toast { background: var(--panel2); border: 1px solid var(--border2); border-left: 3px solid var(--text); border-radius: 8px; padding: 9px 12px; font-size: 12px; transition: opacity .5s; }
+  .toast.up { border-left-color: var(--long); } .toast.down { border-left-color: var(--short); }
+  .toast.gone { opacity: 0; }
 
   .tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); }
   .tabs button { border: none; background: none; color: var(--dim); padding: 6px 10px; border-bottom: 2px solid transparent; font-size: 12px; }
@@ -158,6 +176,7 @@
         <div class="stat">24h<b id="tCh">—</b></div>
         <div class="stat">oracle<b id="tOracle">—</b></div>
         <div class="stat">funding / 1h<b id="tFund">—</b></div>
+        <div class="stat">next funding<b id="tNext">—</b></div>
         <div class="stat">open interest<b id="tOi">—</b></div>
         <div class="stat">24h volume<b id="tVol">—</b></div>
         <div class="stat">max leverage<b id="tLev">—</b></div>
@@ -169,17 +188,29 @@
     </div>
     <div class="lower">
       <div class="card book">
-        <h2>ORDER BOOK</h2>
-        <div id="bookAsks" style="margin-top:6px"></div>
-        <div class="spread" id="bookSpread">—</div>
-        <div id="bookBids"></div>
+        <div class="bookhead" id="bookTabs">
+          <button data-v="book" class="on">BOOK</button><button data-v="trades">TRADES</button>
+          <span id="bookLive" class="live" title="green: updated in the last 3 seconds"></span>
+          <select id="bookGroup" title="group prices">
+            <option value="">all prices</option><option value="5">5 sig. figs</option><option value="4">4 sig. figs</option><option value="3">3 sig. figs</option><option value="2">2 sig. figs</option>
+          </select>
+        </div>
+        <div id="bookView">
+          <div class="row hd"><span>PRICE</span><span>SIZE</span><span>TOTAL</span></div>
+          <div id="bookAsks"></div>
+          <div class="spread" id="bookSpread">—</div>
+          <div id="bookBids"></div>
+        </div>
+        <div id="tradeTape" style="display:none"></div>
       </div>
       <div class="card">
         <div class="tabs" id="bTabs">
           <button data-t="pos" class="on">POSITIONS <span id="nPos"></span></button>
           <button data-t="ord">OPEN ORDERS <span id="nOrd"></span></button>
+          <button data-t="fills">FILLS</button>
           <button data-t="bal">BALANCES</button>
         </div>
+        <div class="postool" id="posTool" style="display:none"></div>
         <div class="tablewrap" id="bBody"><div class="empty">sign in to see positions</div></div>
       </div>
     </div>
@@ -228,6 +259,7 @@
       <button class="go" id="goBtn">LONG</button>
       <div class="msg" id="msg"></div>
       <div class="note" id="unifyNote" style="display:none"></div>
+      <div class="keys"><kbd>/</kbd> search · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>Enter</kbd> in a field places the order · click a book price for a limit, a book size to size up to it</div>
     </div>
   </div>
 </div>
@@ -243,6 +275,7 @@
   </div>
 </div>
 
+<div id="toasts"></div>
 <script type="module" src="perps.js"></script>
 </body>
 </html>

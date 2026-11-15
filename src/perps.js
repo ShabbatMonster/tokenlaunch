@@ -5,7 +5,8 @@
 // src/hyperliquid.js for the market list and the order maths.
 import { privateKeyToAccount } from 'viem/accounts';
 import {
-  hlClients, hlMarkets, applyCtxs, sizeForUsd, buildOrders, closeOrder, orderOutcome, hlError, formatSize,
+  hlClients, hlMarkets, applyCtxs, sizeForUsd, buildOrders, orderOutcome, hlError, formatSize,
+  mergeBook, partialCloseOrder, positionTpslOrders,
 } from './hyperliquid.js';
 
 const $ = (id) => document.getElementById(id);
@@ -47,6 +48,8 @@ let abstraction = null;
 let assetData = null;                         // activeAssetData for sel
 let bookSub = null, candleSub = null, userSubs = [];
 let tab = 'pos';
+let fills = [];                               // newest first
+let fees = null;                              // userFees: the wallet's own rates
 
 // --- sign in -------------------------------------------------------------------
 function loadWallet() {
@@ -222,28 +225,91 @@ function drawChart() {
 window.addEventListener('resize', () => drawChart());
 
 // --- order book ----------------------------------------------------------------
+// Hyperliquid's default book stream is 20 levels every 5 seconds - too slow to
+// trade off. The book here merges three sources (see mergeBook): fast 5-level
+// pushes every 0.5 s, the best bid/ask pushed the moment it changes, and 20
+// levels of depth fetched every 2 s. Redraws are batched to one per frame.
+const book = { deep: null, fast: null, bbo: null, coin: null, t: 0 };
+let bookSubs = [], tradeSub = null, bookFrame = 0, bookView = 'book', deepTimer = 0;
+let grouping = store.get('perps.group', '');          // '' = every price, else nSigFigs
+const trades = [];
 async function subBook() {
   const m = sel;
-  try { await bookSub?.unsubscribe(); } catch { /* gone */ }
-  $('bookAsks').innerHTML = $('bookBids').innerHTML = '';
-  bookSub = await C.subs.l2Book({ coin: m.coin }, (b) => { if (sel === m) drawBook(b.levels); }).catch(() => null);
+  for (const s of [...bookSubs, tradeSub]) { try { await s?.unsubscribe(); } catch { /* gone */ } }
+  bookSubs = []; tradeSub = null;
+  Object.assign(book, { deep: null, fast: null, bbo: null, coin: m.coin });
+  trades.length = 0;
+  $('bookAsks').innerHTML = $('bookBids').innerHTML = ''; $('tradeTape').innerHTML = '';
+  const nSig = grouping ? { nSigFigs: +grouping } : {};
+  const live = (f) => (ev) => { if (sel === m) { f(ev); book.t = Date.now(); queueBook(); } };
+  // Depth comes from a request every 2 s, not a second l2Book stream: the
+  // socket's book messages do not say which stream they belong to, so a deep
+  // and a fast subscription on one coin both just get the fast 5 levels.
+  // The first request also paints the book before any push arrives.
+  clearInterval(deepTimer);
+  const deep = () => C.info.l2Book({ coin: m.coin, ...nSig }).then(live((b) => { book.deep = b.levels; })).catch(() => {});
+  deep(); deepTimer = setInterval(() => { if (sel === m && !document.hidden) deep(); }, 2000);
+  const subs = await Promise.all([
+    C.subs.l2Book({ coin: m.coin, ...nSig, fast: true }, live((b) => { book.fast = b.levels; })),
+    // the BBO is per price, so only meaningful on an ungrouped book
+    grouping ? null : C.subs.bbo({ coin: m.coin }, live((b) => { book.bbo = b.bbo; })),
+  ].map((p) => p?.catch?.(() => null) ?? p));
+  if (sel !== m) { for (const s of subs) s?.unsubscribe().catch(() => {}); return; }
+  bookSubs = subs.filter(Boolean);
+  tradeSub = await C.subs.trades({ coin: m.coin }, (ts) => {
+    if (sel !== m) return;
+    for (const t of ts) trades.unshift(t);
+    trades.length = Math.min(trades.length, 60);
+    queueBook();
+  }).catch(() => null);
 }
-function drawBook([bids, asks]) {
-  const N = 9;
-  const a = asks.slice(0, N).reverse(), b = bids.slice(0, N);
-  const max = Math.max(...[...a, ...b].map((l) => +l.sz * +l.px), 1);
-  const row = (l, col) => `<div class="row"><i style="width:${(+l.sz * +l.px / max * 100).toFixed(1)}%;background:${col}"></i><span style="color:${col}">${px(+l.px)}</span><span>${(+l.sz).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span></div>`;
-  $('bookAsks').innerHTML = a.map((l) => row(l, 'var(--short)')).join('');
-  $('bookBids').innerHTML = b.map((l) => row(l, 'var(--long)')).join('');
-  if (bids[0] && asks[0]) {
-    const sp = +asks[0].px - +bids[0].px;
-    $('bookSpread').textContent = `spread ${px(sp)} (${(sp / +asks[0].px * 100).toFixed(3)}%)`;
+function queueBook() {
+  if (bookFrame) return;
+  bookFrame = requestAnimationFrame(() => { bookFrame = 0; bookView === 'book' ? drawBook() : drawTrades(); });
+}
+function drawBook() {
+  if (!book.deep && !book.fast) return;
+  const [bids, asks] = mergeBook(grouping ? { deep: book.deep, fast: book.fast } : book);
+  const N = 11;
+  const a = asks.slice(0, N), b = bids.slice(0, N);
+  // cumulative size, outward from the spread
+  let ca = 0, cb = 0;
+  const aRows = a.map((l) => ({ ...l, cum: (ca += l.sz) })).reverse();
+  const bRows = b.map((l) => ({ ...l, cum: (cb += l.sz) }));
+  const max = Math.max(ca, cb, 1e-12);
+  const szf = (n) => n.toLocaleString('en-US', { maximumFractionDigits: n >= 100 ? 1 : 4 });
+  const row = (l, col) => `<div class="row" data-px="${l.px}" data-cum="${l.cum}"><i style="width:${(l.cum / max * 100).toFixed(1)}%;background:${col}"></i><span style="color:${col}">${px(l.px)}</span><span>${szf(l.sz)}</span><span>${szf(l.cum)}</span></div>`;
+  $('bookAsks').innerHTML = aRows.map((l) => row(l, 'var(--short)')).join('');
+  $('bookBids').innerHTML = bRows.map((l) => row(l, 'var(--long)')).join('');
+  if (b[0] && a[0]) {
+    const sp = a[0].px - b[0].px;
+    // how lopsided the visible book is: >50% means more resting bids than asks
+    const imb = cb / (ca + cb) * 100;
+    $('bookSpread').innerHTML = `spread ${px(sp)} (${(sp / a[0].px * 100).toFixed(3)}%) · <span class="${imb >= 50 ? 'up' : 'down'}">${imb.toFixed(0)}% bids</span>`;
   }
 }
+function drawTrades() {
+  $('tradeTape').innerHTML = trades.slice(0, 26).map((t) => `<div class="row"><span class="${t.side === 'B' ? 'up' : 'down'}">${px(+t.px)}</span><span>${(+t.sz).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span><span class="dim">${new Date(t.time).toLocaleTimeString(undefined, { hour12: false })}</span></div>`).join('');
+}
+// click a price: limit order there. Click the size column: size up to that depth.
 $('bookAsks').onclick = $('bookBids').onclick = (e) => {
   const r = e.target.closest('.row'); if (!r) return;
-  setType('limit'); $('limitPx').value = r.children[1].textContent.replace(/,/g, ''); paintSummary();
+  setType('limit'); $('limitPx').value = r.dataset.px;
+  if (e.target === r.children[2] || e.target === r.children[3]) { $('sizeUnit').value = 'coin'; $('size').value = formatSize(r.dataset.cum, sel.szDecimals); }
+  paintSummary();
 };
+$('bookTabs').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  bookView = b.dataset.v;
+  for (const x of $('bookTabs').querySelectorAll('button')) x.classList.toggle('on', x === b);
+  $('bookView').style.display = bookView === 'book' ? '' : 'none';
+  $('tradeTape').style.display = bookView === 'book' ? 'none' : '';
+  queueBook();
+};
+$('bookGroup').value = grouping;
+$('bookGroup').onchange = () => { grouping = $('bookGroup').value; store.set('perps.group', grouping); subBook(); };
+// a stale book is worse than none: say so if nothing has arrived for 3 s
+setInterval(() => { $('bookLive').className = book.t && Date.now() - book.t < 3000 ? 'live on' : 'live'; }, 500);
 
 // --- account -------------------------------------------------------------------
 function positionFor(coin) {
@@ -263,6 +329,14 @@ async function startUser() {
     await sub(C.subs.openOrders({ user, ...(dex ? { dex } : {}) }, (ev) => { userOrders.set(ev.dex ?? dex, ev.orders); paintAccount(); }));
   }
   await sub(C.subs.spotState({ user }, (ev) => { spot = ev.spotState ?? ev; paintAccount(); }));
+  // fills: the first message is the recent history, later ones are new fills
+  await sub(C.subs.userFills({ user }, (ev) => {
+    const fresh = ev.isSnapshot ? [] : ev.fills;
+    fills = [...ev.fills.slice().reverse(), ...fills].slice(0, 200);
+    for (const f of fresh) toast(`${f.dir || (f.side === 'B' ? 'Buy' : 'Sell')} ${f.sz} ${f.coin} @ ${px(+f.px)}${+f.closedPnl ? ` · PnL ${usd(+f.closedPnl)}` : ''}`, +f.closedPnl < 0 ? 'down' : 'up');
+    if (tab === 'fills') paintAccount();
+  }));
+  fees = await C.info.userFees({ user }).catch(() => null);
   abstraction = await C.info.userAbstraction({ user }).catch(() => null);
   loadAssetData();
   paintUnify();
@@ -284,9 +358,9 @@ function paintAccount() {
     for (const p of st.assetPositions || []) pnl += +p.position.unrealizedPnl;
   }
   const stable = (spot?.balances || []).filter((b) => /^USD/.test(b.coin)).reduce((a, b) => a + (+b.total - +b.hold), 0);
-  $('aEquity').textContent = usd(eq);
-  $('aFree').textContent = usd(free) + (stable > 0.01 ? ` · spot ${usd(stable)}` : '');
-  $('aPnl').innerHTML = `<span class="${cls(pnl)}">${usd(pnl)}</span>`;
+  $('aEquity').textContent = wallet ? usd(eq) : '—';
+  $('aFree').textContent = wallet ? usd(free) + (stable > 0.01 ? ` · spot ${usd(stable)}` : '') : '—';
+  $('aPnl').innerHTML = wallet ? `<span class="${cls(pnl)}">${usd(pnl)}</span>` : '—';
   const positions = [...userStates.entries()].flatMap(([dex, st]) => (st.assetPositions || []).filter((p) => +p.position.szi).map((p) => ({ dex, ...p.position })));
   const orders = [...userOrders.values()].flat();
   $('nPos').textContent = positions.length ? `(${positions.length})` : '';
@@ -298,16 +372,23 @@ function renderBottom(positions, orders) {
   const body = $('bBody');
   if (!wallet) { body.innerHTML = '<div class="empty"><a href="#" id="signLink">sign in</a> to see positions</div>'; $('signLink').onclick = (e) => { e.preventDefault(); showKeyModal(); }; return; }
   if (tab === 'pos') {
-    body.innerHTML = positions.length ? `<table class="table"><tr><th>MARKET</th><th>SIZE</th><th>VALUE</th><th>ENTRY</th><th>MARK</th><th>PNL (ROE)</th><th>LIQ.</th><th>MARGIN</th><th></th></tr>${positions.map((p) => {
+    body.innerHTML = positions.length ? `<table class="table"><tr><th>MARKET</th><th>SIZE</th><th>VALUE</th><th>ENTRY</th><th>MARK</th><th>PNL (ROE)</th><th>LIQ.</th><th>MARGIN</th><th>TP / SL</th><th></th></tr>${positions.map((p) => {
       const m = byCoin.get(p.coin); const long = +p.szi > 0;
       return `<tr><td><a href="#" data-sel="${esc(p.coin)}" style="color:var(--text)">${esc(p.coin)}</a> <span class="${long ? 'up' : 'down'}">${long ? 'LONG' : 'SHORT'} ${p.leverage.value}×</span></td>
         <td>${Math.abs(+p.szi)}</td><td>${usd(+p.positionValue)}</td><td>${px(+p.entryPx)}</td><td>${px(m?.mark)}</td>
         <td class="${cls(+p.unrealizedPnl)}">${usd(+p.unrealizedPnl)} (${pct(+p.returnOnEquity * 100, 1)})</td>
         <td>${p.liquidationPx ? px(+p.liquidationPx) : '—'}</td><td>${usd(+p.marginUsed)} ${p.leverage.type === 'cross' ? 'cross' : 'iso'}</td>
-        <td class="x"><button class="tbtn" data-close="${esc(p.coin)}">CLOSE</button></td></tr>`;
+        <td>${esc(tpslFor(p.coin))}</td>
+        <td class="x"><button class="tbtn" data-tpsl="${esc(p.coin)}">TP/SL</button> <button class="tbtn" data-close="${esc(p.coin)}|0.25">25%</button> <button class="tbtn" data-close="${esc(p.coin)}|0.5">50%</button> <button class="tbtn" data-close="${esc(p.coin)}|1">CLOSE</button></td></tr>`;
     }).join('')}</table>` : '<div class="empty">no open positions</div>';
+  } else if (tab === 'fills') {
+    body.innerHTML = fills.length ? `<table class="table"><tr><th>TIME</th><th>MARKET</th><th>DIRECTION</th><th>SIZE</th><th>PRICE</th><th>FEE</th><th>CLOSED PNL</th></tr>${fills.slice(0, 100).map((f) => `<tr>
+        <td class="dim">${new Date(f.time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</td>
+        <td>${esc(f.coin)}</td><td class="${f.side === 'B' ? 'up' : 'down'}">${esc(f.dir || (f.side === 'B' ? 'Buy' : 'Sell'))}${f.liquidation ? ' · LIQUIDATED' : ''}</td>
+        <td>${esc(f.sz)}</td><td>${px(+f.px)}</td><td class="dim">${(+f.fee).toFixed(4)} ${esc(f.feeToken || '')}</td>
+        <td class="${cls(+f.closedPnl)}">${+f.closedPnl ? usd(+f.closedPnl) : '—'}</td></tr>`).join('')}</table>` : '<div class="empty">no fills yet</div>';
   } else if (tab === 'ord') {
-    body.innerHTML = orders.length ? `<table class="table"><tr><th>MARKET</th><th>TYPE</th><th>SIDE</th><th>SIZE</th><th>PRICE</th><th>TRIGGER</th><th></th></tr>${orders.map((o) => `<tr>
+    body.innerHTML = orders.length ? `<div style="padding:8px 10px 0;text-align:right"><button class="tbtn" data-cancelall="1">CANCEL ALL (${orders.length})</button></div><table class="table"><tr><th>MARKET</th><th>TYPE</th><th>SIDE</th><th>SIZE</th><th>PRICE</th><th>TRIGGER</th><th></th></tr>${orders.map((o) => `<tr>
         <td>${esc(o.coin)}</td><td>${esc(o.orderType || 'Limit')}${o.reduceOnly ? ' · reduce' : ''}</td>
         <td class="${o.side === 'B' ? 'up' : 'down'}">${o.side === 'B' ? 'BUY' : 'SELL'}</td><td>${esc(o.sz)}</td><td>${px(+o.limitPx)}</td>
         <td>${o.isTrigger ? esc(o.triggerCondition || px(+o.triggerPx)) : '—'}</td>
@@ -328,11 +409,19 @@ $('bBody').onclick = async (e) => {
   const s = e.target.closest('[data-sel]'); if (s) { e.preventDefault(); select(s.dataset.sel); return; }
   const c = e.target.closest('[data-close]');
   if (c) {
-    const pos = positionFor(c.dataset.close); const m = byCoin.get(c.dataset.close);
+    const [coin, frac] = c.dataset.close.split('|');
+    const pos = positionFor(coin); const m = byCoin.get(coin);
     if (!pos || !m) return;
     c.disabled = true;
-    await send(() => C.exchange.order(closeOrder(m, pos.szi, slip())), `closing ${m.coin}`);
+    await send(() => C.exchange.order(partialCloseOrder(m, pos.szi, +frac, slip())), `closing ${+frac >= 1 ? '' : `${+frac * 100}% of `}${m.coin}`);
     c.disabled = false; return;
+  }
+  const t = e.target.closest('[data-tpsl]');
+  if (t) { openTpsl(t.dataset.tpsl); return; }
+  if (e.target.closest('[data-cancelall]')) {
+    const all = [...userOrders.values()].flat().map((o) => ({ a: byCoin.get(o.coin)?.asset, o: o.oid })).filter((x) => x.a != null);
+    if (all.length) await send(() => C.exchange.cancel({ cancels: all }), `cancelling ${all.length} orders`);
+    return;
   }
   const x = e.target.closest('[data-cancel]');
   if (x) {
@@ -342,6 +431,50 @@ $('bBody').onclick = async (e) => {
     await send(() => C.exchange.cancel({ cancels: [{ a: m.asset, o: +oid }] }), 'cancelling');
   }
 };
+
+// TP/SL already resting on a position, read off its open trigger orders
+function tpslFor(coin) {
+  const os = (userOrders.get(byCoin.get(coin)?.dex ?? '') || []).filter((o) => o.coin === coin && o.isTrigger && o.reduceOnly);
+  const tp = os.find((o) => /take profit/i.test(o.orderType)), sl = os.find((o) => /stop/i.test(o.orderType));
+  return [tp && `TP ${px(+tp.triggerPx)}`, sl && `SL ${px(+sl.triggerPx)}`].filter(Boolean).join(' · ') || '—';
+}
+// the TP/SL editor sits outside the table, which redraws every second
+function openTpsl(coin) {
+  const pos = positionFor(coin); const m = byCoin.get(coin);
+  if (!pos || !m) return;
+  const long = +pos.szi > 0;
+  const tool = $('posTool');
+  tool.style.display = '';
+  tool.innerHTML = `<b>${esc(coin)}</b> <span class="${long ? 'up' : 'down'}">${long ? 'LONG' : 'SHORT'} ${Math.abs(+pos.szi)}</span>
+    <span class="dim">entry ${px(+pos.entryPx)} · mark ${px(m.mark)}</span>
+    <input id="ptTp" placeholder="take-profit ${long ? '>' : '<'} ${px(m.mark)}" inputmode="decimal">
+    <input id="ptSl" placeholder="stop-loss ${long ? '<' : '>'} ${px(m.mark)}" inputmode="decimal">
+    <button class="tbtn" id="ptSet">SET</button> <button class="tbtn" id="ptX">✕</button>
+    <span class="dim" id="ptHint"></span>`;
+  const hint = () => {
+    const e = +pos.entryPx, sz = Math.abs(+pos.szi), dir = long ? 1 : -1;
+    const at = (p) => (p > 0 ? usd((p - e) * sz * dir) : null);
+    const a = at(+$('ptTp').value), b = at(+$('ptSl').value);
+    $('ptHint').textContent = [a && `TP pays ${a}`, b && `SL ${b}`].filter(Boolean).join(' · ');
+  };
+  $('ptTp').oninput = $('ptSl').oninput = hint;
+  $('ptX').onclick = () => { tool.style.display = 'none'; };
+  $('ptSet').onclick = async () => {
+    let req;
+    try { req = positionTpslOrders(m, positionFor(coin)?.szi, { tp: $('ptTp').value, sl: $('ptSl').value }); } catch (err) { $('msg').innerHTML = `<span class="err">${esc(err.message)}</span>`; return; }
+    if (await send(() => C.exchange.order(req), `setting TP/SL on ${coin}`)) tool.style.display = 'none';
+  };
+  $('ptTp').focus();
+}
+
+// fills pop up in the corner, wherever they came from (this page, the HL app, a TP/SL)
+function toast(text, kind = '') {
+  const t = document.createElement('div');
+  t.className = 'toast ' + kind; t.textContent = text;
+  $('toasts').prepend(t);
+  setTimeout(() => t.classList.add('gone'), 5000);
+  setTimeout(() => t.remove(), 5600);
+}
 
 // unified account: every exchange margins from one balance
 function paintUnify() {
@@ -405,6 +538,8 @@ function ticketSize() {
   if (!(v > 0)) throw new Error('enter a size');
   return $('sizeUnit').value === 'usd' ? sizeForUsd(v, refPx(), sel.szDecimals) : v;
 }
+// the wallet's own rates once signed in, Hyperliquid's base tier until then
+const feeRate = () => +(otype === 'market' ? fees?.userCrossRate ?? 0.00045 : fees?.userAddRate ?? 0.00015);
 function paintSummary() {
   const go = $('goBtn');
   const label = (side === 'long' ? 'LONG ' : 'SHORT ') + (sel?.label || '');
@@ -422,6 +557,7 @@ function paintSummary() {
     <div>margin required <b>${usd(notional / lev)}</b></div>
     <div>${otype === 'market' ? `fills up to <b>${px(sel.mid * (side === 'long' ? 1 + slip() / 100 : 1 - slip() / 100))}</b>` : `rests at <b>${px(refPx())}</b>`}</div>
     <div>est. liquidation <b>~${px(liq)}</b></div>
+    ${!sel.dex ? `<div>fee (${otype === 'market' ? 'taker' : 'maker'}) <b>~${usd(notional * feeRate(), notional * feeRate() < 1 ? 3 : 2)}</b></div>` : `<div>fee <b>set by ${esc(sel.dexName)}</b></div>`}
     ${assetData ? `<div>max this side <b>${(+assetData.maxTradeSzs[side === 'long' ? 0 : 1]).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${esc(sel.label)}</b></div>` : ''}`;
   paintUnify();
 }
@@ -436,7 +572,12 @@ async function send(fn, what) {
     setTimeout(loadAssetData, 600);
     return out.every((o) => o.ok);
   } catch (e) {
-    msg.innerHTML = `<span class="err">${esc(hlError(e))}</span>`;
+    // a group can half-succeed: the entry fills and its TP is refused. Show each.
+    const per = Array.isArray(e?.response?.response?.data?.statuses) ? orderOutcome(e.response) : null;
+    msg.innerHTML = per && per.some((o) => o.ok)
+      ? per.map((o, i) => `<div class="${o.ok ? 'up' : 'err'}">${per.length > 1 ? ['entry', 'take-profit', 'stop-loss'][i] ?? `order ${i + 1}` : ''} ${esc(o.ok ? o.text : hlError({ response: { status: 'err', response: o.text } }))}</div>`).join('')
+      : `<span class="err">${esc(hlError(e))}</span>`;
+    setTimeout(loadAssetData, 600);
     return false;
   }
 }
@@ -465,6 +606,36 @@ $('goBtn').onclick = async () => {
     await send(() => C.exchange.order(req), `${side === 'long' ? 'buying' : 'selling'} ${sel.label}`);
   } finally { go.disabled = false; }
 };
+
+// --- keyboard ------------------------------------------------------------------
+//   /  search markets      B  long      S  short      M  market      L  limit
+//   Enter (in size / price / TP / SL)  place the order      Esc  leave a field
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
+  if (typing) {
+    if (e.key === 'Escape') document.activeElement.blur();
+    if (e.key === 'Enter' && ['size', 'limitPx', 'tp', 'sl'].includes(document.activeElement.id)) { e.preventDefault(); $('goBtn').click(); }
+    if (e.key === 'Enter' && document.activeElement.id === 'mSearch') {
+      const first = $('mList').querySelector('.mrow'); if (first) { select(first.dataset.c); $('size').focus(); }
+    }
+    return;
+  }
+  const k = e.key.toLowerCase();
+  if (k === '/') { e.preventDefault(); $('mSearch').focus(); $('mSearch').select(); }
+  else if (k === 'b') setSide('long');
+  else if (k === 's') setSide('short');
+  else if (k === 'm') setType('market');
+  else if (k === 'l') { setType('limit'); $('limitPx').focus(); }
+});
+
+// funding is paid on the hour: count down to it, and show the rate per year
+setInterval(() => {
+  if (!sel) return;
+  const ms = 3600e3 - (Date.now() % 3600e3);
+  const mm = String(Math.floor(ms / 60e3)).padStart(2, '0'), ss = String(Math.floor(ms / 1e3) % 60).padStart(2, '0');
+  $('tNext').innerHTML = `${mm}:${ss} <span class="dim" style="font-size:11px">${pct(sel.funding * 24 * 365 * 100, 1)}/yr</span>`;
+}, 1000);
 
 // --- boot ----------------------------------------------------------------------
 (async () => {
