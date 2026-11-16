@@ -258,9 +258,9 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
   });
 
   // --- account overlays --------------------------------------------------------------
-  function setAccount({ entry, liq, long, orders = [], alerts = [] } = {}) {
+  function setAccount({ entry, liq, long, orders = [], alerts = [], extra = [] } = {}) {
     if (!main) return;
-    const key = JSON.stringify([entry, liq, long, opts.showOrders && orders.map((o) => [o.px, o.label]), alerts.map((a) => [a.px, a.label])]);
+    const key = JSON.stringify([entry, liq, long, opts.showOrders && orders.map((o) => [o.px, o.label]), alerts.map((a) => [a.px, a.label]), extra.map((x) => [Math.round(x.px * 1e6), x.label])]);
     if (key === accountKey) return;
     accountKey = key;
     for (const l of priceLines) main.removePriceLine(l);
@@ -271,6 +271,8 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
     if (opts.showOrders) for (const o of orders) add(o.px, o.color, o.label, LineStyle.Dotted);
     // price alerts always show: they are this browser's, not the exchange's
     for (const a of alerts) add(a.px, T.alert, a.label, LineStyle.LargeDashed);
+    // anything else the page wants marked (the top traders' average entries)
+    for (const x of extra) if (x.px > 0) add(x.px, x.color, x.label, LineStyle.SparseDotted);
   }
   // The active PnL line: the entry line, relabelled with the live profit or loss
   // and coloured by its sign. A label change is one applyOptions on one line,

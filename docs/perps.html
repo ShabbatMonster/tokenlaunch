@@ -245,6 +245,33 @@
   .acct h4 { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
   .acct .kv { line-height: 1.6; }
 
+  /* top traders */
+  .ttchip { border: 1px solid var(--border2); background: none; color: var(--dim); border-radius: 6px; padding: 4px 10px; font-size: 12px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .ttchip:hover { color: var(--text); border-color: var(--accent); }
+  .ttchip b { color: var(--text); font-weight: 600; }
+  .bias { display: inline-block; width: 46px; height: 5px; border-radius: 3px; background: var(--short); overflow: hidden; vertical-align: middle; }
+  .bias > i { display: block; height: 100%; background: var(--long); }
+  .tthead { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .seg2 { display: flex; background: var(--panel2); border-radius: 6px; padding: 2px; }
+  .seg2 button { border: none; background: none; color: var(--dim); border-radius: 5px; padding: 4px 10px; font-size: 12px; }
+  .seg2 button.on { background: var(--panel); color: var(--text); }
+  .ttsum { display: grid; grid-template-columns: 1fr minmax(160px, 2fr) 1fr; gap: 6px 16px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .ttsum .side2 b { font-size: 14px; }
+  .ttsum .r { text-align: right; }
+  .biasbar { height: 10px; border-radius: 5px; background: var(--short); overflow: hidden; }
+  .biasbar > i { display: block; height: 100%; background: var(--long); }
+  .ttsum .mid { text-align: center; color: var(--dim); font-size: 11px; grid-column: 2; }
+  .ttsum .dim { font-size: 11px; }
+  .ttwho b { font-weight: 600; }
+  .ttwho .star { color: var(--warn); }
+  .ttrow { cursor: pointer; }
+  .modal.ttmodal { max-width: 720px; max-height: calc(100vh - 32px); overflow: hidden; display: flex; flex-direction: column; }
+  .ttlist { overflow-y: auto; min-height: 120px; max-height: 46vh; border: 1px solid var(--border); border-radius: 6px; }
+  .ttli { display: grid; grid-template-columns: 44px minmax(120px, 1.3fr) 110px 90px 96px 56px; gap: 8px; align-items: center; padding: 5px 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .ttli input { padding: 4px 7px; }
+  .ttli .r { text-align: right; }
+  @media (max-width: 820px) { .ttsum { grid-template-columns: 1fr; } .ttsum .r, .ttsum .mid { text-align: left; grid-column: auto; } .ttli { grid-template-columns: 36px 1fr 70px 56px; } .ttli .hide-sm { display: none; } }
+
   /* toasts + modals */
   #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 6px; z-index: 30; max-width: calc(100vw - 32px); }
   .toast { background: var(--panel2); border: 1px solid var(--border2); border-left: 3px solid var(--accent); border-radius: 6px; padding: 9px 12px; font-size: 12px; transition: opacity .5s; }
@@ -347,6 +374,7 @@
     <div class="stat">24h Volume<b id="tVol">—</b></div>
     <div class="stat">Open Interest<b id="tOi">—</b></div>
     <div class="stat"><span class="u" title="paid every hour; the rate shown is per hour">Funding / Countdown</span><b><span id="tFund">—</span> &nbsp;<span id="tNext">—</span></b></div>
+    <button class="ttchip hidden" id="ttChip" title="what the top Hyperliquid traders hold in this market"></button>
     <div id="tDex">—</div>
     <div class="grow"></div>
     <div class="alertwrap">
@@ -496,6 +524,7 @@
         <button data-t="bal">Balances</button>
         <button data-t="pos" class="on">Positions <span id="nPos"></span></button>
         <button data-t="ord">Open Orders <span id="nOrd"></span></button>
+        <button data-t="tt">Top Traders <span id="nTT"></span></button>
         <button data-t="fills">Trade History</button>
         <button data-t="alerts">Price Alerts <span id="nAl"></span></button>
       </div>
@@ -553,6 +582,29 @@
       </div>
       <div class="msg" id="cardMsg"></div>
     </div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ttModal">
+  <div class="card modal ttmodal">
+    <div class="lbl" style="margin:0">Top traders <span><a href="#" id="ttClose">close ✕</a></span></div>
+    <div class="dim" style="font-size:11px">Ranked from Hyperliquid's public leaderboard. Positions are read for every trader on the list
+      (the main exchange every 2 minutes, a HIP-3 exchange while you look at one of its markets). Labels, stars and hand-added traders stay in this browser.</div>
+    <div class="inrow" style="flex-wrap:wrap">
+      <label class="check" style="flex:1 1 140px">rank by
+        <select id="ttBy"><option value="pnl">PnL</option><option value="roi">ROI</option><option value="accountValue">account value</option><option value="vlm">volume</option></select></label>
+      <label class="check" style="flex:1 1 120px">over
+        <select id="ttWin"><option value="allTime">all time</option><option value="month">30 days</option><option value="week">7 days</option><option value="day">24 hours</option></select></label>
+      <label class="check" style="flex:0 1 110px">top <input id="ttN" inputmode="numeric" style="width:64px"></label>
+      <label class="check" style="flex:0 1 170px">min account $ <input id="ttMin" inputmode="numeric" style="width:80px"></label>
+    </div>
+    <div class="inrow"><button class="go" id="ttReload" style="flex:1;padding:8px">Load ranking</button></div>
+    <div class="dim" id="ttLbInfo" style="font-size:11px"></div>
+    <div class="lbl" style="margin:4px 0 0">Add a trader by address</div>
+    <div class="inrow"><input id="ttAddAddr" placeholder="0x… address" spellcheck="false"><input id="ttAddLabel" placeholder="label (optional)" spellcheck="false" maxlength="40"><button class="tbtn" id="ttAddBtn">Add</button></div>
+    <input id="ttFilter" placeholder="filter: label, address, rank, or ★ for starred" spellcheck="false">
+    <div class="ttlist" id="ttList"></div>
+    <div class="dim" style="font-size:11px"><span id="ttHiddenInfo"></span></div>
   </div>
 </div>
 

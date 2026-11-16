@@ -13,6 +13,7 @@ import { dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { handleAbyssProxy } from './abyssProxy.mjs';
 import { handleBagsProxy } from './bagsProxy.mjs';
+import { handleHlLeaderboard } from './hlLeaderboardProxy.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, 'docs');
@@ -40,6 +41,8 @@ const server = createServer(async (req, res) => {
     if (await handleAbyssProxy(req, res)) return;
     // Bags refuses browser origins, and the key is kept here rather than in the page
     if (await handleBagsProxy(req, res)) return;
+    // Hyperliquid's 39 MB leaderboard, trimmed to the top traders the perps page asks for
+    if (await handleHlLeaderboard(req, res)) return;
     let path = decodeURIComponent((req.url || '/').split('?')[0]);
     if (path === '/') path = '/index.html';
     // prevent path traversal outside docs/

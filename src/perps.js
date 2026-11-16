@@ -14,6 +14,9 @@ import {
 import { createPerpsChart, INDICATORS, CHART_DEFAULTS, CHART_THEMES } from './perpsChart.js';
 import { parseTarget, makeAlert, checkAlerts, titleText, createSound } from './priceAlerts.js';
 import { createMusicPlayer } from './classical.js';
+import {
+  loadLeaderboard, scanPositions, confluence, overview, shortAddr, isAddr, TT_DEFAULTS, WINDOWS, RANK_BY,
+} from './topTraders.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -55,6 +58,14 @@ let bookSub = null, candleSub = null, userSubs = [];
 let tab = 'pos';
 let fills = [];                               // newest first
 let fees = null;                              // userFees: the wallet's own rates
+// top traders (see "top traders" below): ranking settings, the ranked list,
+// labels / stars / hand-added / hidden traders, and positions per exchange
+const TT = {
+  opts: { ...TT_DEFAULTS, ...store.get('perps.ttOpts', {}) }, lb: store.get('perps.lb', null),
+  labels: store.get('perps.ttLabels', {}), added: store.get('perps.ttAdded', []), hidden: new Set(store.get('perps.ttHidden', [])),
+  states: new Map(), busy: new Set(), progress: '', err: '', view: 'market', lines: store.get('perps.ttLines', true),
+};
+let ttIndex = new Map(), ttDrawn = 0;
 
 // --- sign in -------------------------------------------------------------------
 function loadWallet() {
@@ -151,7 +162,7 @@ async function select(coin) {
   store.set('perps.sel', coin);
   history.replaceState(null, '', '#' + encodeURIComponent(coin));
   livePx = null; lastTitlePx = null; tickDir = 0;
-  renderList(); renderTicker(); paintAlertPanel();
+  renderList(); renderTicker(); paintAlertPanel(); paintTT(); ttTick();
   const lev = $('lev');
   lev.max = m.maxLeverage;
   $('levMax').textContent = m.maxLeverage + 'x max';
@@ -286,7 +297,13 @@ function paintChartAccount(force = false) {
     };
   });
   const al = alerts.filter((a) => a.coin === sel.coin).map((a) => ({ px: a.px, label: '🔔 ' + (a.note || (a.dir === 'above' ? 'above' : 'below')) + (a.repeat ? ' ↻' : '') }));
-  pc.setAccount({ entry: pos ? +pos.entryPx : null, liq: pos?.liquidationPx ? +pos.liquidationPx : null, long: pos ? +pos.szi > 0 : null, orders, alerts: al });
+  // where the top traders got in, as a group
+  const tc = TT.lines ? ttConf() : null;
+  const extra = tc ? [
+    tc.long.n && { px: tc.long.avgEntry, color: CT().up, label: `🧠 ${tc.long.n} long avg` },
+    tc.short.n && { px: tc.short.avgEntry, color: CT().down, label: `🧠 ${tc.short.n} short avg` },
+  ].filter(Boolean) : [];
+  pc.setAccount({ entry: pos ? +pos.entryPx : null, liq: pos?.liquidationPx ? +pos.liquidationPx : null, long: pos ? +pos.szi > 0 : null, orders, alerts: al, extra });
   if (force || fills.length !== chartFillCount) {
     chartFillCount = fills.length;
     pc.setFills(fills.filter((f) => f.coin === sel.coin).map((f) => ({ time: f.time, buy: f.side === 'B', text: f.side === 'B' ? 'B' : 'S' })));
@@ -464,6 +481,7 @@ function paintAccount() {
 function renderBottom(positions, orders) {
   const body = $('bBody');
   if (tab === 'alerts') { renderAlertsTab(); return; }
+  if (tab === 'tt') { renderTT(); return; }
   if (!wallet) { body.innerHTML = '<div class="empty"><a href="#" id="signLink">sign in</a> to see positions</div>'; $('signLink').onclick = (e) => { e.preventDefault(); showKeyModal(); }; return; }
   if (tab === 'pos') {
     body.innerHTML = positions.length ? `<table class="table"><tr><th>Coin</th><th>Size</th><th>Position Value</th><th>Entry Price</th><th>Mark Price</th><th>PNL (ROE %)</th><th>Liq. Price</th><th>Margin</th><th>TP / SL</th><th></th></tr>${positions.map((p) => {
@@ -1006,6 +1024,254 @@ $('cardCopy').onclick = async () => {
   }
 };
 
+
+// --- top traders: the confluence view -----------------------------------------------
+// Who the best Hyperliquid traders are (the public leaderboard, ranked by the
+// settings in "Manage traders"), what each of them holds (their clearinghouse
+// state, rescanned every 2 minutes; HIP-3 exchanges while one of their markets
+// is open) and how they sit on the market on screen: the chip in the market bar,
+// the Top Traders tab, and optional average-entry lines on the chart.
+// See src/topTraders.js.
+function ttSave() {
+  store.set('perps.ttLabels', TT.labels); store.set('perps.ttAdded', TT.added);
+  store.set('perps.ttHidden', [...TT.hidden]); store.set('perps.ttOpts', TT.opts); store.set('perps.ttLines', TT.lines);
+}
+function ttRefreshIndex() {
+  const out = new Map();
+  for (const r of TT.lb?.rows || []) if (!TT.hidden.has(r.addr)) out.set(r.addr, r);
+  for (const a of TT.added) if (!out.has(a) && !TT.hidden.has(a)) out.set(a, { addr: a, rank: null, name: null, manual: true });
+  ttIndex = out;
+}
+function ttWho(addr) {
+  const r = ttIndex.get(addr) || { addr };
+  const l = TT.labels[addr];
+  return { rank: r.rank ?? null, label: l?.label || r.name || '', star: !!l?.star, manual: !!r.manual, allTime: r.pnl?.allTime ?? null };
+}
+const ago = (t) => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? s + 's ago' : s < 3600 ? Math.round(s / 60) + 'm ago' : Math.round(s / 3600) + 'h ago'; };
+const usdK = (n) => (n == null || !isFinite(n) ? '—' : (n < 0 ? '-$' : '$') + big(Math.abs(n)));
+const sameOpts = (a, b) => a && b && ['window', 'by', 'n', 'min'].every((k) => String(a[k]) === String(b[k]));
+
+async function ttLoadLeaderboard(force = false) {
+  if (!force && TT.lb && sameOpts(TT.lb.opts, TT.opts) && Date.now() - TT.lb.at < 6 * 3600e3) { ttRefreshIndex(); paintTT(); ttTick(); return; }
+  TT.progress = 'loading the leaderboard…'; TT.err = ''; paintTT();
+  try {
+    const lb = await loadLeaderboard(TT.opts);
+    TT.lb = { at: lb.at || Date.now(), total: lb.total, opts: { ...TT.opts }, rows: lb.rows, via: lb.via };
+    store.set('perps.lb', TT.lb);
+  } catch (e) { TT.err = 'could not load the leaderboard: ' + e.message; }
+  TT.progress = '';
+  ttRefreshIndex();
+  for (const s of TT.states.values()) s.at = 0;      // a new list needs a fresh scan
+  paintTT(); paintTTModal();
+  ttTick();
+}
+
+async function ttScan(dex = '') {
+  if (TT.busy.has(dex) || !ttIndex.size) return;
+  TT.busy.add(dex);
+  try {
+    const prev = TT.states.get(dex)?.map;
+    const map = await scanPositions(C.info, [...ttIndex.keys()], {
+      dex, prev,
+      onProgress: (d, n) => { if (d % 25 === 0 || d === n) { TT.progress = `reading positions${dex ? ' on ' + dex : ''} ${d}/${n}`; paintTTStatus(); } },
+    });
+    TT.states.set(dex, { at: Date.now(), map });
+  } finally { TT.busy.delete(dex); TT.progress = ''; }
+  paintTT();
+  if (sel && (sel.dex || '') === dex) paintChartAccount();
+}
+function ttTick() {
+  if (TT.lb && Date.now() - TT.lb.at > 6 * 3600e3 && !TT.progress) { ttLoadLeaderboard(true); return; }
+  const maxAge = document.hidden ? 300e3 : 120e3;
+  const stale = (dex) => !TT.states.has(dex) || Date.now() - TT.states.get(dex).at > maxAge;
+  if (stale('')) ttScan('');
+  if (sel?.dex && stale(sel.dex)) ttScan(sel.dex);
+}
+setInterval(ttTick, 15000);
+
+// the tracked traders' entries on one exchange (hidden ones dropped)
+const ttEntries = (dex) => [...(TT.states.get(dex)?.map || [])].filter(([a]) => ttIndex.has(a));
+function ttConf() {
+  if (!sel || !TT.states.has(sel.dex || '')) return null;
+  const c = confluence(ttEntries(sel.dex || ''), sel.coin, ttWho);
+  // unrealised PnL at the live price rather than at the last scan
+  const price = livePx || sel.mid;
+  if (price > 0) {
+    for (const p of c.rows) { p.unrealizedPnl = p.szi * (price - p.entryPx); p.returnOnEquity = p.marginUsed ? p.unrealizedPnl / p.marginUsed : p.returnOnEquity; }
+    for (const [k, sgn] of [['long', 1], ['short', -1]]) c[k].upnl = c.rows.filter((p) => Math.sign(p.szi) === sgn).reduce((a, p) => a + p.unrealizedPnl, 0);
+  }
+  return c;
+}
+
+function paintTT() {
+  paintTTChip();
+  if (tab === 'tt') renderTT();
+}
+function paintTTStatus() { const el = $('ttStatus'); if (el) el.textContent = ttStatusText(); }
+function ttStatusText() {
+  if (TT.err) return TT.err;
+  const st = TT.states.get(sel?.dex || '');
+  const o = TT.lb?.opts || TT.opts;
+  return `${ttIndex.size} traders · top ${o.n} by ${RANK_BY[o.by]}${o.by === 'accountValue' ? '' : ' (' + WINDOWS[o.window] + ')'}`
+    + (st ? ` · positions ${ago(st.at)}` : '') + (TT.progress ? ' · ' + TT.progress : '');
+}
+function paintTTChip() {
+  const el = $('ttChip');
+  const c = ttConf();
+  $('nTT').textContent = c?.n ? `(${c.n})` : '';
+  if (!c) { el.classList.toggle('hidden', !TT.progress); el.textContent = '🧠 reading top traders…'; return; }
+  el.classList.remove('hidden');
+  el.innerHTML = c.n
+    ? `🧠 <b>${c.n}</b> top traders · <span class="up">${c.long.n}L</span> <span class="down">${c.short.n}S</span> <span class="bias"><i style="width:${(50 + c.bias / 2).toFixed(0)}%"></i></span>`
+    : '🧠 no top trader here';
+}
+$('ttChip').onclick = () => {
+  tab = 'tt';
+  for (const x of $('bTabs').children) x.classList.toggle('on', x.dataset.t === 'tt');
+  TT.view = 'market'; paintAccount();
+  $('bTabs').scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
+function ttWhoCell(p) {
+  return `<span class="ttwho">${p.star ? '<span class="star">★</span> ' : ''}${p.label ? `<b>${esc(p.label)}</b> ` : ''}<a class="dim" href="https://hypurrscan.io/address/${p.addr}" target="_blank" rel="noopener">${shortAddr(p.addr)}</a></span>`;
+}
+function renderTT() {
+  ttDrawn = Date.now();
+  const body = $('bBody');
+  const head = `<div class="tthead">
+      <div class="seg2"><button data-ttv="market" class="${TT.view === 'market' ? 'on' : ''}">This market</button><button data-ttv="all" class="${TT.view === 'all' ? 'on' : ''}">All markets</button></div>
+      <span class="dim" id="ttStatus">${esc(ttStatusText())}</span>
+      <span style="flex:1"></span>
+      <label class="check"><input type="checkbox" id="ttLines" ${TT.lines ? 'checked' : ''}> average entries on chart</label>
+      <button class="tbtn" data-ttrescan="1">↻ Rescan</button>
+      <button class="tbtn" data-ttmanage="1">Manage traders</button>
+    </div>`;
+  if (!ttIndex.size) { body.innerHTML = head + `<div class="empty">${TT.progress ? 'loading the leaderboard…' : 'no traders tracked. Open <b>Manage traders</b> to load a ranking or add addresses.'}</div>`; return; }
+  if (TT.view === 'all') {
+    const rows = overview([...TT.states.keys()].flatMap((d) => ttEntries(d))).slice(0, 80);
+    const dexes = [...TT.states.keys()].map((d) => d || 'main').join(', ');
+    body.innerHTML = head + (rows.length ? `<table class="table"><tr><th>Market</th><th>Traders</th><th>Long</th><th>Short</th><th>Long Value</th><th>Short Value</th><th>Bias (by value)</th><th>Their uPNL</th></tr>${rows.map((x) => {
+      const m = byCoin.get(x.coin);
+      return `<tr class="ttrow" data-ttsel="${esc(x.coin)}"><td><b>${esc(m?.label || x.coin)}</b>${m?.dex ? ` <span class="dim">${esc(m.dex)}</span>` : ''}</td><td>${x.n}</td>
+        <td class="up">${x.nLong}</td><td class="down">${x.nShort}</td><td>${usdK(x.longNtl)}</td><td>${usdK(x.shortNtl)}</td>
+        <td><span class="bias" style="width:90px"><i style="width:${(50 + x.bias / 2).toFixed(0)}%"></i></span> <span class="${cls(x.bias)}">${x.bias >= 0 ? '+' : ''}${x.bias.toFixed(0)}%</span></td>
+        <td class="${cls(x.upnl)}">${usdK(x.upnl)}</td></tr>`;
+    }).join('')}</table><div class="empty" style="padding:8px 12px">exchanges read: ${esc(dexes)}. HIP-3 exchanges are read while you have one of their markets open.</div>` : '<div class="empty">reading positions…</div>');
+    return;
+  }
+  const c = ttConf();
+  if (!c) { body.innerHTML = head + `<div class="empty">reading ${ttIndex.size} traders' positions${sel?.dex ? ' on ' + esc(sel.dex) : ''}… about 10 seconds.</div>`; return; }
+  if (!c.n) { body.innerHTML = head + `<div class="empty">none of the ${ttIndex.size} tracked traders holds ${esc(sel.label)} right now.</div>`; return; }
+  const L = c.long, S = c.short;
+  const sum = `<div class="ttsum">
+      <div class="side2"><span class="up"><b>${L.n}</b> long</span> · ${usdK(L.notional)}<div class="dim">${L.n ? `avg entry ${px(L.avgEntry)} · ${L.avgLev.toFixed(1)}x · <span class="${cls(L.upnl)}">${usdK(L.upnl)}</span>` : '—'}</div></div>
+      <div><div class="biasbar"><i style="width:${(50 + c.bias / 2).toFixed(1)}%"></i></div></div>
+      <div class="side2 r"><span class="down"><b>${S.n}</b> short</span> · ${usdK(S.notional)}<div class="dim">${S.n ? `avg entry ${px(S.avgEntry)} · ${S.avgLev.toFixed(1)}x · <span class="${cls(S.upnl)}">${usdK(S.upnl)}</span>` : '—'}</div></div>
+      <div class="mid">${Math.abs(c.bias) < 10 ? 'split evenly' : `<span class="${cls(c.bias)}">${Math.abs(c.bias).toFixed(0)}% net ${c.bias > 0 ? 'long' : 'short'}</span> by value`} among the top ${ttIndex.size}</div>
+    </div>`;
+  body.innerHTML = head + sum + `<table class="table"><tr><th>Rank</th><th>Trader</th><th>Side</th><th>Size</th><th>Position Value</th><th>Entry Price</th><th>PNL (ROE %)</th><th>Lev.</th><th>Liq. Price</th><th>Account</th><th>All-time PNL</th><th></th></tr>${c.rows.map((p) => `<tr>
+      <td class="dim">${p.rank ? '#' + p.rank : p.manual ? 'added' : '—'}</td><td>${ttWhoCell(p)}</td>
+      <td class="${p.szi > 0 ? 'up' : 'down'}">${p.szi > 0 ? 'Long' : 'Short'}</td><td>${Math.abs(p.szi).toLocaleString('en-US', { maximumFractionDigits: 4 })}</td>
+      <td>${usdK(p.notional)}</td><td>${px(p.entryPx)}</td>
+      <td class="${cls(p.unrealizedPnl)}">${usdK(p.unrealizedPnl)} (${pct(p.returnOnEquity * 100, 1)})</td>
+      <td>${p.lev ? p.lev + 'x' + (p.levType === 'isolated' ? ' iso' : '') : '—'}</td><td>${p.liquidationPx ? px(p.liquidationPx) : '—'}</td>
+      <td>${usdK(p.accountValue)}</td><td class="${cls(p.allTime)}">${p.allTime == null ? '—' : usdK(p.allTime)}</td>
+      <td class="x"><button class="tbtn" data-ttlabel="${p.addr}" title="label this trader">✎</button><button class="tbtn" data-ttstar="${p.addr}" title="star">${p.star ? '★' : '☆'}</button></td></tr>`).join('')}</table>`;
+}
+
+function ttLabel(addr) {
+  const cur = TT.labels[addr]?.label || ttIndex.get(addr)?.name || '';
+  const v = prompt(`Label for ${addr}`, cur);
+  if (v == null) return;
+  TT.labels[addr] = { ...(TT.labels[addr] || {}), label: v.trim().slice(0, 40) };
+  if (!TT.labels[addr].label && !TT.labels[addr].star) delete TT.labels[addr];
+  ttSave(); paintTT(); paintTTModal();
+}
+function ttStar(addr) {
+  const l = TT.labels[addr] || {};
+  TT.labels[addr] = { ...l, star: !l.star };
+  if (!TT.labels[addr].label && !TT.labels[addr].star) delete TT.labels[addr];
+  ttSave(); paintTT(); paintTTModal();
+}
+$('bBody').addEventListener('click', (e) => {
+  const v = e.target.closest('[data-ttv]'); if (v) { TT.view = v.dataset.ttv; renderTT(); return; }
+  if (e.target.closest('[data-ttrescan]')) { for (const s of TT.states.values()) s.at = 0; ttTick(); paintTTStatus(); return; }
+  if (e.target.closest('[data-ttmanage]')) { openTTModal(); return; }
+  const lb = e.target.closest('[data-ttlabel]'); if (lb) { ttLabel(lb.dataset.ttlabel); return; }
+  const st = e.target.closest('[data-ttstar]'); if (st) { ttStar(st.dataset.ttstar); return; }
+  const row = e.target.closest('[data-ttsel]'); if (row && !e.target.closest('a')) { select(row.dataset.ttsel); TT.view = 'market'; }
+});
+$('bBody').addEventListener('change', (e) => {
+  if (e.target.id === 'ttLines') { TT.lines = e.target.checked; ttSave(); paintChartAccount(); }
+});
+
+// the "Manage traders" panel
+function openTTModal() {
+  $('ttBy').value = TT.opts.by; $('ttWin').value = TT.opts.window; $('ttN').value = TT.opts.n; $('ttMin').value = TT.opts.min;
+  $('ttModal').classList.remove('hidden'); paintTTModal();
+}
+function paintTTModal() {
+  if ($('ttModal').classList.contains('hidden')) return;
+  const lb = TT.lb;
+  $('ttLbInfo').textContent = TT.err || (TT.progress ? TT.progress : lb
+    ? `${lb.rows.length} ranked from ${lb.total?.toLocaleString?.('en-US') || '?'} accounts, ${ago(lb.at)}${lb.via === 'local' ? ' (trimmed by the local server)' : ''}. Reloads by itself every 6 hours.`
+    : 'no ranking loaded yet');
+  const q = $('ttFilter').value.trim().toLowerCase();
+  const rows = [...ttIndex.values()].filter((r) => {
+    if (!q) return true;
+    const w = ttWho(r.addr);
+    if (q === '★') return w.star;
+    return r.addr.includes(q) || (w.label || '').toLowerCase().includes(q) || String(r.rank) === q.replace('#', '');
+  });
+  $('ttList').innerHTML = rows.slice(0, 400).map((r) => {
+    const w = ttWho(r.addr);
+    return `<div class="ttli"><span class="dim">${r.rank ? '#' + r.rank : 'added'}</span>
+      <input data-ttl="${r.addr}" value="${esc(TT.labels[r.addr]?.label || '')}" placeholder="${esc(r.name || 'label…')}" maxlength="40">
+      <a class="dim" href="https://hypurrscan.io/address/${r.addr}" target="_blank" rel="noopener">${shortAddr(r.addr)}</a>
+      <span class="r hide-sm" title="account value">${usdK(r.accountValue)}</span>
+      <span class="r hide-sm ${cls(r.pnl?.allTime)}" title="all-time PnL">${r.pnl ? usdK(r.pnl.allTime) : ''}</span>
+      <span class="r"><button class="tbtn" data-ttstar="${r.addr}">${w.star ? '★' : '☆'}</button><button class="tbtn" data-tthide="${r.addr}" title="${r.manual ? 'remove' : 'stop tracking'}">✕</button></span></div>`;
+  }).join('') || '<div class="empty">nothing matches</div>';
+  $('ttHiddenInfo').innerHTML = TT.hidden.size ? `${TT.hidden.size} hidden · <a href="#" id="ttUnhide">track them again</a>` : '';
+}
+$('ttClose').onclick = (e) => { e.preventDefault(); $('ttModal').classList.add('hidden'); };
+$('ttModal').addEventListener('click', (e) => {
+  if (e.target === $('ttModal')) { $('ttModal').classList.add('hidden'); return; }
+  const st = e.target.closest('[data-ttstar]'); if (st) { ttStar(st.dataset.ttstar); return; }
+  const h = e.target.closest('[data-tthide]');
+  if (h) {
+    const a = h.dataset.tthide;
+    if (TT.added.includes(a) && !TT.lb?.rows.some((r) => r.addr === a)) TT.added = TT.added.filter((x) => x !== a); else TT.hidden.add(a);
+    ttSave(); ttRefreshIndex(); paintTTModal(); paintTT(); return;
+  }
+  if (e.target.id === 'ttUnhide') { e.preventDefault(); TT.hidden.clear(); ttSave(); ttRefreshIndex(); for (const s of TT.states.values()) s.at = 0; ttTick(); paintTTModal(); paintTT(); }
+});
+$('ttModal').addEventListener('change', (e) => {
+  const a = e.target.dataset?.ttl; if (!a) return;
+  const v = e.target.value.trim().slice(0, 40);
+  TT.labels[a] = { ...(TT.labels[a] || {}), label: v };
+  if (!v && !TT.labels[a].star) delete TT.labels[a];
+  ttSave(); paintTT();
+});
+$('ttFilter').oninput = paintTTModal;
+$('ttReload').onclick = () => {
+  TT.opts = { window: $('ttWin').value, by: $('ttBy').value, n: Math.max(10, Math.min(1000, Math.round(+$('ttN').value) || 250)), min: Math.max(0, +$('ttMin').value || 0) };
+  ttSave(); ttLoadLeaderboard(true);
+};
+$('ttAddBtn').onclick = () => {
+  const a = $('ttAddAddr').value.trim().toLowerCase();
+  if (!isAddr(a)) { toast('that is not an 0x address', 'down'); return; }
+  const label = $('ttAddLabel').value.trim().slice(0, 40);
+  if (!TT.added.includes(a)) TT.added = [...TT.added, a];
+  TT.hidden.delete(a);
+  if (label) TT.labels[a] = { ...(TT.labels[a] || {}), label };
+  $('ttAddAddr').value = ''; $('ttAddLabel').value = '';
+  ttSave(); ttRefreshIndex();
+  for (const s of TT.states.values()) s.at = 0;
+  ttTick(); paintTTModal(); paintTT();
+  toast(`tracking ${label || shortAddr(a)}`, 'up', 2500);
+};
+
 // --- keyboard ------------------------------------------------------------------
 //   /  search markets      B  long      S  short      M  market      L  limit
 //   Enter (in size / price / TP / SL)  place the order      Esc  leave a field
@@ -1055,6 +1321,7 @@ setInterval(() => {
   }
   byCoin = new Map(markets.map((m) => [m.coin, m]));
   dexTabs(); renderList(); paintAlertPanel();
+  ttLoadLeaderboard();
   const want = decodeURIComponent(location.hash.slice(1)) || store.get('perps.sel', 'BTC');
   await select(byCoin.has(want) ? want : 'BTC');
   let pending = false, listDrawn = 0;
@@ -1065,6 +1332,7 @@ setInterval(() => {
     for (const coin of new Set(alerts.map((a) => a.coin))) if (!(coin === sel?.coin && livePx)) runAlerts(coin, byCoin.get(coin)?.mid);
     paintTitle();
     if (tab === 'alerts' && Date.now() - alertsDrawn > 1000) renderAlertsTab();
+    if (tab === 'tt' && TT.view === 'market' && Date.now() - ttDrawn > 2500 && !document.activeElement?.closest?.('#bBody')) renderTT();
     if (pending) return;
     pending = true;
     requestAnimationFrame(() => {
