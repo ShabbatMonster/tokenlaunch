@@ -52,6 +52,7 @@
   .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; color: var(--logo); letter-spacing: .3px; }
   #themeBtn { border: 1px solid var(--border2); background: none; color: var(--dim); border-radius: 8px; width: 32px; height: 30px; font-size: 14px; }
   #themeBtn:hover { color: var(--text); }
+  .venuesel { width: auto; height: 30px; padding: 0 8px; font-size: 12px; font-weight: 600; background: var(--panel2); border-color: var(--border2); }
   /* classical music */
   .music { position: relative; display: flex; align-items: center; gap: 2px; border: 1px solid var(--border2); border-radius: 8px; padding: 2px 4px; height: 30px; }
   .music > button { border: none; background: none; color: var(--dim); border-radius: 6px; height: 24px; min-width: 26px; font-size: 12px; }
@@ -345,7 +346,8 @@
         <div class="dim" style="font-size:10px">Music plays only on this page. It ducks under price-alert sounds. Each licence links to the recording's page; the CC BY 3.0 recordings are by Musopen (musopen.org).</div>
       </div>
     </div>
-    <span class="dim" style="font-size:11px">via Hyperliquid</span>
+    <select id="venueSel" class="venuesel" title="exchange: switching reloads the page on it"></select>
+    <span class="dim" style="font-size:11px" id="viaVenue">via Hyperliquid</span>
     <button id="themeBtn" title="switch between the paper and dark themes">☾</button>
     <button id="aWallet">Sign In</button>
   </div>

@@ -14,6 +14,8 @@ import {
 import { createPerpsChart, INDICATORS, CHART_DEFAULTS, CHART_THEMES } from './perpsChart.js';
 import { parseTarget, makeAlert, checkAlerts, titleText, createSound } from './priceAlerts.js';
 import { createMusicPlayer } from './classical.js';
+import { VENUES, VENUE_IDS, venueName } from './venues/index.js';
+import { SOL_RPC } from './rpc.js';
 import {
   loadLeaderboard, scanPositions, confluence, overview, shortAddr, isAddr, TT_DEFAULTS, WINDOWS, RANK_BY,
 } from './topTraders.js';
@@ -67,6 +69,23 @@ const TT = {
 };
 let ttIndex = new Map(), ttDrawn = 0;
 
+// --- venue ------------------------------------------------------------------------
+// Hyperliquid is native to this page; every other venue is an adapter in
+// src/venues/ that hands back Hyperliquid-shaped markets, book, account and
+// orders, so the chart, book, ticket and tables work the same. The venue is
+// picked by ?venue=… (remembered), and switching reloads the page.
+const VENUE = (() => {
+  const v = new URLSearchParams(location.search).get('venue') || store.get('perps.venue', 'hl');
+  return VENUE_IDS.includes(v) ? v : 'hl';
+})();
+store.set('perps.venue', VENUE);
+const V = VENUE === 'hl' ? null : VENUES[VENUE];
+const SEL_KEY = V ? `perps.sel.${VENUE}` : 'perps.sel';
+let vs = null;                                 // the venue session once a key is loaded
+let venuePoll = null, venueTimer = 0, venueErr = '', venueNote = '';
+const venueLev = new Map();                    // coin -> 'lev|cross' last set this session
+const pairName = (m) => m.pair || `${m.label}-${m.collateral || 'USDC'}`;
+
 // --- sign in -------------------------------------------------------------------
 function loadWallet() {
   const k = store.get('keys.v1', null);
@@ -78,9 +97,43 @@ function loadWallet() {
   $('aWallet').classList.add('addr');
   return true;
 }
-function showKeyModal() { $('keyModal').classList.remove('hidden'); $('keyIn').focus(); }
+// a venue other than Hyperliquid: the key its adapter names (keys.v1.sol, keys.v1.evm,
+// or an exchange API key kept under keys.v1.<venue>)
+function venueSecret() {
+  const k = store.get('keys.v1', {}) || {};
+  return V.key.kind === 'sol' ? k.sol : V.key.kind === 'evm' ? k.evm : k[VENUE];
+}
+function loadVenue() {
+  const secret = venueSecret();
+  if (!secret) return false;
+  try { vs = V.connect(secret); } catch (e) { toast(`${V.name}: ${e.message}`, 'down', 8000); return false; }
+  wallet = { address: vs.address };
+  $('aWallet').textContent = vs.address.length > 14 ? vs.address.slice(0, 6) + '…' + vs.address.slice(-4) : vs.address;
+  $('aWallet').title = `${V.name} · ${vs.address}`;
+  $('aWallet').classList.add('addr');
+  return true;
+}
+function showKeyModal() {
+  const kind = V ? V.key.kind : 'evm';
+  $('keyModal').querySelector('h3').textContent = V ? `Sign In · ${V.name}` : 'Sign In';
+  $('keyModal').querySelector('p').textContent = V
+    ? `${V.key.help} The key stays in this browser (the same local store the launcher uses) and signs ${V.name} requests here; it is never sent anywhere.`
+    : 'Paste the private key of the EVM wallet that holds your Hyperliquid account. It stays in this browser (the same local store the launcher uses) and signs orders here; it is never sent anywhere.';
+  $('keyIn').placeholder = kind === 'sol' ? 'base58 Solana private key' : kind === 'evm' ? '0x… private key' : V.key.label;
+  $('keyModal').classList.remove('hidden'); $('keyIn').focus();
+}
 $('keySave').onclick = () => {
   const raw = $('keyIn').value.trim();
+  if (V) {
+    try { V.connect(V.key.kind === 'evm' && !raw.startsWith('0x') ? '0x' + raw : raw); } catch (e) { $('keyErr').textContent = e.message; return; }
+    const k = store.get('keys.v1', {}) || {};
+    if (V.key.kind === 'sol') k.sol = raw; else if (V.key.kind === 'evm') k.evm = raw.startsWith('0x') ? raw : '0x' + raw; else k[VENUE] = raw;
+    store.set('keys.v1', k);
+    $('keyIn').value = ''; $('keyErr').textContent = '';
+    $('keyModal').classList.add('hidden');
+    if (loadVenue()) startUser();
+    return;
+  }
   const hex = raw.startsWith('0x') ? raw : '0x' + raw;
   if (!/^0x[0-9a-fA-F]{64}$/.test(hex)) { $('keyErr').textContent = 'that is not a 32-byte hex private key'; return; }
   const k = store.get('keys.v1', {}) || {};
@@ -95,7 +148,7 @@ $('aWallet').onclick = () => { if (!wallet) showKeyModal(); };
 
 // --- markets -------------------------------------------------------------------
 function dexTabs() {
-  const names = [['all', 'All'], ['fav', '★'], ...[...new Map(markets.map((m) => [m.dex, m.dex ? m.dex : 'crypto'])).entries()]];
+  const names = [['all', 'All'], ['fav', '★'], ...[...new Map(markets.map((m) => [m.dex, m.dex ? m.dex : (V ? 'perps' : 'crypto')])).entries()]];
   $('dexTabs').innerHTML = names.map(([v, l]) => `<button data-v="${esc(v)}" class="${dexFilter === v ? 'on' : ''}" title="${esc(markets.find((m) => m.dex === v)?.dexName || '')}">${esc(l)}</button>`).join('');
 }
 $('dexTabs').onclick = (e) => {
@@ -113,7 +166,7 @@ function renderList() {
   if ($('mktPop').classList.contains('hidden')) return;     // nothing to draw while it is shut
   $('mList').innerHTML = rows.length ? rows.slice(0, 400).map((m) => `
     <div class="mrow ${sel?.coin === m.coin ? 'on' : ''}" data-c="${esc(m.coin)}">
-      <div class="nm"><span data-fav="${esc(m.coin)}" style="color:${favs.has(m.coin) ? '#facc15' : 'var(--faint)'}">★</span>${esc(m.label)}-${esc(m.collateral || 'USDC')}<span class="lev">${m.maxLeverage}x</span><small>${m.dex ? esc(m.dex) : ''}</small></div>
+      <div class="nm"><span data-fav="${esc(m.coin)}" style="color:${favs.has(m.coin) ? '#facc15' : 'var(--faint)'}">★</span>${esc(pairName(m))}<span class="lev">${m.spot ? 'spot' : m.maxLeverage + 'x'}</span><small>${m.dex ? esc(m.dex) : ''}</small></div>
       <div>${px(m.mid)}</div>
       <div class="${cls(m.change)}">${pct(m.change)}</div>
       <div class="${cls(m.funding)}">${(m.funding * 800).toFixed(4)}%</div>
@@ -144,7 +197,7 @@ $('mList').onclick = (e) => {
 function renderTicker() {
   const m = sel; if (!m) return;
   $('tDex').textContent = `${m.dexName}${m.dex ? ' · HIP-3' : ''}${m.onlyIsolated ? ' · isolated only' : ''}`;
-  $('tCoin').textContent = `${m.label}-${m.collateral || 'USDC'}`;
+  $('tCoin').textContent = pairName(m);
   $('tPx').textContent = px(m.mid);
   $('tPx').className = 'price ' + cls(m.change);
   $('tCh').innerHTML = `<span class="${cls(m.change)}">${pct(m.change)}</span>`;
@@ -159,8 +212,8 @@ function renderTicker() {
 async function select(coin) {
   const m = byCoin.get(coin); if (!m) return;
   sel = m;
-  store.set('perps.sel', coin);
-  history.replaceState(null, '', '#' + encodeURIComponent(coin));
+  store.set(SEL_KEY, coin);
+  history.replaceState(null, '', location.search + '#' + encodeURIComponent(coin));
   livePx = null; lastTitlePx = null; tickDir = 0;
   renderList(); renderTicker(); paintAlertPanel(); paintTT(); ttTick();
   const lev = $('lev');
@@ -193,8 +246,10 @@ const pc = createPerpsChart($('chart'), $('chartLegend'), {
   // Hyperliquid serves the most recent 5000 candles of any interval
   onNeedOlder: async (oldest) => {
     const m = sel, iv = interval;
-    const cs = await C.info.candleSnapshot({ coin: m.coin, interval: iv, startTime: oldest - IVAL_MS[iv] * 500, endTime: oldest - 1 }).catch(() => []);
-    return sel === m && iv === interval ? cs.map(toK) : [];
+    const cs = V
+      ? await V.candles(m.coin, iv, oldest - IVAL_MS[iv] * 500, oldest - 1).catch(() => [])
+      : (await C.info.candleSnapshot({ coin: m.coin, interval: iv, startTime: oldest - IVAL_MS[iv] * 500, endTime: oldest - 1 }).catch(() => [])).map(toK);
+    return sel === m && iv === interval ? cs : [];
   },
   // alt-click the chart: a limit order at that price
   onClickPrice: (price, ev) => {
@@ -271,12 +326,20 @@ async function loadCandles() {
   const iv = interval;
   const end = Date.now();
   let cs = [];
-  try { cs = (await C.info.candleSnapshot({ coin: m.coin, interval: iv, startTime: end - IVAL_MS[iv] * 500, endTime: end })).map(toK); } catch { /* empty chart */ }
+  try {
+    cs = V ? await V.candles(m.coin, iv, end - IVAL_MS[iv] * 500, end)
+      : (await C.info.candleSnapshot({ coin: m.coin, interval: iv, startTime: end - IVAL_MS[iv] * 500, endTime: end })).map(toK);
+  } catch { /* empty chart */ }
   if (sel !== m || iv !== interval) return;
   pc.setCandles(cs);
   pc.setUserLines(store.get('perps.lines', {})[m.coin] || []);
   paintChartAccount(true);
   try { await candleSub?.unsubscribe(); } catch { /* gone */ }
+  if (V) {
+    const stop = V.subCandles(m.coin, iv, (c) => { if (sel === m && iv === interval) pc.update(c); });
+    candleSub = { unsubscribe: async () => stop() };
+    return;
+  }
   candleSub = await C.subs.candle({ coin: m.coin, interval: iv }, (c) => {
     if (sel === m && iv === interval) pc.update(toK(c));
   }).catch(() => null);
@@ -333,6 +396,25 @@ async function subBook() {
   // and a fast subscription on one coin both just get the fast 5 levels.
   // The first request also paints the book before any push arrives.
   clearInterval(deepTimer);
+  if (V) {
+    // a venue adapter streams whole books (and maybe trades) in Hyperliquid's level shape
+    const stopB = V.subBook(m.coin, live((b) => {
+      book.deep = b.levels;
+      const bb = b.levels[0]?.[0], aa = b.levels[1]?.[0];
+      if (bb && aa) tickPx(m, +bb.px, +aa.px);
+    }));
+    bookSubs = [{ unsubscribe: async () => stopB() }];
+    if (V.subTrades) {
+      const stopT = V.subTrades(m.coin, (ts) => {
+        if (sel !== m) return;
+        for (const t of ts) trades.unshift(t);
+        trades.length = Math.min(trades.length, 60);
+        queueBook();
+      });
+      tradeSub = { unsubscribe: async () => stopT() };
+    }
+    return;
+  }
   const deep = () => C.info.l2Book({ coin: m.coin, ...nSig }).then(live((b) => { book.deep = b.levels; })).catch(() => {});
   deep(); deepTimer = setInterval(() => { if (sel === m && !document.hidden) deep(); }, 2000);
   const subs = await Promise.all([
@@ -405,7 +487,51 @@ function positionFor(coin) {
   for (const st of userStates.values()) for (const p of st.assetPositions || []) if (p.position.coin === coin && +p.position.szi) return p.position;
   return null;
 }
+// A venue adapter has no account stream: poll it, and turn new fills into toasts.
+function startVenueUser() {
+  clearTimeout(venueTimer);
+  let seen = null;
+  venuePoll = async () => {
+    clearTimeout(venueTimer);
+    try {
+      const r = await vs.state();
+      userStates.clear(); userStates.set('', r.st);
+      userOrders.clear(); userOrders.set('', r.orders || []);
+      if (r.spot) spot = r.spot;
+      if (r.fees) fees = { userCrossRate: r.fees.taker, userAddRate: r.fees.maker };
+      venueNote = r.st?.venueNote || '';
+      if (r.fills) {
+        const newest = r.fills[0]?.time ?? 0;
+        if (seen != null) {
+          const fresh = r.fills.filter((f) => f.time > seen);
+          if (fresh.length && alertCfg.fillSound) sound.fill(alertCfg.vol);
+          for (const f of fresh) toast(`${f.dir || (f.side === 'B' ? 'Buy' : 'Sell')} ${f.sz} ${f.coin} @ ${px(+f.px)}${+f.closedPnl ? ` · PnL ${usd(+f.closedPnl)}` : ''}`, +f.closedPnl < 0 ? 'down' : 'up');
+        }
+        if (r.fills.length || seen == null) seen = Math.max(seen ?? 0, newest);
+        fills = r.fills;
+      }
+      venueErr = '';
+    } catch (e) { venueErr = e.message; }
+    paintAccount();
+    venueTimer = setTimeout(venuePoll, document.hidden ? Math.max(10000, vs.pollMs || 3000) : (vs.pollMs || 3000));
+  };
+  venuePoll();
+}
+async function vsend(fn, what) {
+  const msg = $('msg');
+  msg.innerHTML = `<span class="dim">${esc(what)}…</span>`;
+  try {
+    const r = await fn();
+    msg.innerHTML = `<span class="up">${esc(r?.msg || 'done')}</span>`;
+    setTimeout(() => venuePoll?.(), 500);
+    return true;
+  } catch (e) {
+    msg.innerHTML = `<span class="err">${esc(V.name)}: ${esc(e?.message || String(e))}</span>`;
+    return false;
+  }
+}
 async function startUser() {
+  if (V) return startVenueUser();
   for (const s of userSubs) { try { await s.unsubscribe(); } catch { /* gone */ } }
   userSubs = [];
   const user = wallet.address;
@@ -434,6 +560,14 @@ async function startUser() {
 async function loadAssetData() {
   if (!wallet || !sel) return;
   const m = sel;
+  if (V) {
+    // no per-market account read: take leverage from an open position, if any
+    assetData = null;
+    const p = positionFor(m.coin);
+    if (p?.leverage?.value) { $('lev').value = Math.min(p.leverage.value, m.maxLeverage); cross = p.leverage.type === 'cross' && !m.onlyIsolated; venueLev.set(m.coin, `${$('lev').value}|${cross}`); paintLev(); }
+    paintSummary();
+    return;
+  }
   assetData = await C.info.activeAssetData({ user: wallet.address, coin: m.coin }).catch(() => null);
   if (sel !== m || !assetData) return;
   $('lev').value = Math.min(assetData.leverage.value, m.maxLeverage);
@@ -506,6 +640,24 @@ function renderBottom(positions, orders) {
         <td class="${o.side === 'B' ? 'up' : 'down'}">${o.side === 'B' ? 'Buy' : 'Sell'}</td><td>${esc(o.sz)}</td><td>${px(+o.limitPx)}</td>
         <td>${o.isTrigger ? esc(o.triggerCondition || px(+o.triggerPx)) : '—'}</td>
         <td class="x"><button class="tbtn" data-cancel="${esc(o.coin)}|${o.oid}">Cancel</button></td></tr>`).join('')}</table>` : '<div class="empty">no open orders</div>';
+  } else if (V) {
+    const st = userStates.get('');
+    const rows = st && +st.marginSummary.accountValue ? [[`perps · ${V.name}`, +st.marginSummary.accountValue, +st.withdrawable]] : [];
+    const sp = (spot?.balances || []).filter((b) => +b.total).map((b) => [`spot · ${b.coin}`, +b.total, +b.total - +b.hold]);
+    body.innerHTML = (rows.length + sp.length ? `<table class="table"><tr><th>Account</th><th>Total</th><th>Available</th></tr>${[...rows, ...sp].map(([a, t, f]) => `<tr><td>${esc(a)}</td><td>${t.toLocaleString('en-US', { maximumFractionDigits: 4 })}</td><td>${f.toLocaleString('en-US', { maximumFractionDigits: 4 })}</td></tr>`).join('')}</table>` : '')
+      + `<div class="empty">${venueErr ? `<span class="err">${esc(venueErr)}</span><br>` : ''}${esc(venueNote || `Fund this account at ${V.site}.`)}
+        ${vs?.deposit ? `<div class="inrow" style="margin-top:10px;max-width:420px"><input id="vDepAmt" inputmode="decimal" placeholder="USDC to deposit (min 10)"><button class="tbtn" id="vDepBtn">Deposit from wallet</button></div><div class="dim" id="vDepMsg" style="margin-top:6px">Moves USDC from this Solana wallet into ${esc(V.name)} (an on-chain transaction, simulated first).</div>` : ''}</div>`;
+    if (vs?.deposit) {
+      $('vDepBtn').onclick = async () => {
+        const amt = +$('vDepAmt').value;
+        if (!(amt > 0)) { $('vDepMsg').textContent = 'enter an amount'; return; }
+        if (!confirm(`Deposit ${amt} USDC from ${vs.address} into ${V.name}?`)) return;
+        $('vDepBtn').disabled = true; $('vDepMsg').textContent = 'simulating, then sending…';
+        try { const sig = await vs.deposit(amt, SOL_RPC); $('vDepMsg').innerHTML = `<span class="up">deposited</span> · <a href="https://solscan.io/tx/${esc(sig)}" target="_blank" rel="noopener">${esc(sig.slice(0, 16))}…</a> (it shows on ${esc(V.name)} after confirmation)`; setTimeout(() => venuePoll?.(), 4000); }
+        catch (e) { $('vDepMsg').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+        $('vDepBtn').disabled = false;
+      };
+    }
   } else {
     const rows = [...userStates.entries()].filter(([, st]) => +st.marginSummary.accountValue).map(([dex, st]) => [`perps · ${dex || 'Hyperliquid'}`, +st.marginSummary.accountValue, +st.withdrawable]);
     const sp = (spot?.balances || []).filter((b) => +b.total).map((b) => [`spot · ${b.coin}`, +b.total, +b.total - +b.hold]);
@@ -528,7 +680,9 @@ $('bBody').onclick = async (e) => {
     const pos = positionFor(coin); const m = byCoin.get(coin);
     if (!pos || !m) return;
     c.disabled = true;
-    await send(() => C.exchange.order(partialCloseOrder(m, pos.szi, +frac, slip())), `closing ${+frac >= 1 ? '' : `${+frac * 100}% of `}${m.coin}`);
+    const what = `closing ${+frac >= 1 ? '' : `${+frac * 100}% of `}${m.coin}`;
+    if (V) await vsend(() => vs.order({ coin, isBuy: +pos.szi < 0, sz: Math.abs(+pos.szi) * +frac, type: 'market', slippage: slip(), reduceOnly: true }), what);
+    else await send(() => C.exchange.order(partialCloseOrder(m, pos.szi, +frac, slip())), what);
     c.disabled = false; return;
   }
   const cd = e.target.closest('[data-card]');
@@ -536,6 +690,7 @@ $('bBody').onclick = async (e) => {
   const t = e.target.closest('[data-tpsl]');
   if (t) { openTpsl(t.dataset.tpsl); return; }
   if (e.target.closest('[data-cancelall]')) {
+    if (V) { await vsend(() => vs.cancelAll(), 'cancelling every order'); return; }
     const all = [...userOrders.values()].flat().map((o) => ({ a: byCoin.get(o.coin)?.asset, o: o.oid })).filter((x) => x.a != null);
     if (all.length) await send(() => C.exchange.cancel({ cancels: all }), `cancelling ${all.length} orders`);
     return;
@@ -545,6 +700,11 @@ $('bBody').onclick = async (e) => {
     const [coin, oid] = x.dataset.cancel.split('|'); const m = byCoin.get(coin);
     if (!m) return;
     x.disabled = true;
+    if (V) {
+      const o = (userOrders.get('') || []).find((y) => String(y.oid) === String(oid));
+      await vsend(() => vs.cancel(coin, oid, !!o?.isTrigger), 'cancelling');
+      return;
+    }
     await send(() => C.exchange.cancel({ cancels: [{ a: m.asset, o: +oid }] }), 'cancelling');
   }
 };
@@ -577,6 +737,12 @@ function openTpsl(coin) {
   $('ptTp').oninput = $('ptSl').oninput = hint;
   $('ptX').onclick = () => { tool.style.display = 'none'; };
   $('ptSet').onclick = async () => {
+    if (V) {
+      const tp = $('ptTp').value.trim(), sl = $('ptSl').value.trim();
+      if (!tp && !sl) { $('msg').innerHTML = '<span class="err">enter a take-profit or a stop-loss</span>'; return; }
+      if (await vsend(() => vs.setTpsl(coin, { tp: tp || null, sl: sl || null, long }), `setting TP/SL on ${coin}`)) tool.style.display = 'none';
+      return;
+    }
     let req;
     try { req = positionTpslOrders(m, positionFor(coin)?.szi, { tp: $('ptTp').value, sl: $('ptSl').value }); } catch (err) { $('msg').innerHTML = `<span class="err">${esc(err.message)}</span>`; return; }
     if (await send(() => C.exchange.order(req), `setting TP/SL on ${coin}`)) tool.style.display = 'none';
@@ -781,7 +947,7 @@ $('alertNotify').onchange = async () => {
 // unified account: every exchange margins from one balance
 function paintUnify() {
   const el = $('unifyNote');
-  const show = wallet && sel?.dex && abstraction && abstraction !== 'unifiedAccount' && abstraction !== 'portfolioMargin';
+  const show = !V && wallet && sel?.dex && abstraction && abstraction !== 'unifiedAccount' && abstraction !== 'portfolioMargin';
   el.style.display = show ? '' : 'none';
   if (!show) return;
   el.innerHTML = `<b>${esc(sel.dexName)}</b> is a HIP-3 exchange with its own margin. Turn on Hyperliquid's <b>unified account</b> and every exchange trades from one balance, the way app.hyperliquid.xyz does it (one signature, can be turned off there).<br><button class="tbtn" id="unifyBtn">TURN ON UNIFIED ACCOUNT</button>`;
@@ -827,8 +993,10 @@ $('sizeUnit').onchange = paintSummary;
 $('reduce').onchange = paintSummary;
 document.querySelector('.pcts').onclick = (e) => {
   const b = e.target.closest('button'); if (!b || !sel) return;
-  if (!assetData) { $('msg').innerHTML = '<span class="err">sign in to size from your balance</span>'; return; }
-  const maxCoins = +assetData.maxTradeSzs[side === 'long' ? 0 : 1];
+  // a venue adapter has no max-size read: size from available margin × leverage
+  const venueMax = V && wallet ? (+(userStates.get('')?.withdrawable || 0) * (sel.spot ? 1 : +$('lev').value)) / refPx() : null;
+  if (!assetData && !(venueMax > 0)) { $('msg').innerHTML = `<span class="err">${wallet ? 'no balance to size from' : 'sign in to size from your balance'}</span>`; return; }
+  const maxCoins = assetData ? +assetData.maxTradeSzs[side === 'long' ? 0 : 1] : venueMax;
   const coins = maxCoins * (+b.dataset.p) / 100;
   const price = refPx();
   $('size').value = $('sizeUnit').value === 'usd' ? (coins * price * 0.995).toFixed(2) : formatSize(String(coins * 0.995), sel.szDecimals);
@@ -842,7 +1010,7 @@ function ticketSize() {
   return $('sizeUnit').value === 'usd' ? sizeForUsd(v, refPx(), sel.szDecimals) : v;
 }
 // the wallet's own rates once signed in, Hyperliquid's base tier until then
-const feeRate = () => +(otype === 'market' ? fees?.userCrossRate ?? 0.00045 : fees?.userAddRate ?? 0.00015);
+const feeRate = () => +(otype === 'market' ? fees?.userCrossRate ?? V?.fees?.taker ?? 0.00045 : fees?.userAddRate ?? V?.fees?.maker ?? 0.00015);
 function paintSummary() {
   const go = $('goBtn');
   go.textContent = wallet ? 'Place Order' : 'Sign In to Trade';
@@ -890,6 +1058,26 @@ $('goBtn').onclick = async () => {
   if (!wallet) { showKeyModal(); return; }
   if (!sel) return;
   const go = $('goBtn');
+  if (V) {
+    let sz;
+    try { sz = ticketSize(); } catch (e) { $('msg').innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+    if (otype === 'limit' && !(+$('limitPx').value > 0)) { $('msg').innerHTML = '<span class="err">enter a limit price</span>'; return; }
+    go.disabled = true;
+    try {
+      // leverage is an account setting per market: change it only when it differs
+      const lev = +$('lev').value, want = `${lev}|${cross}`;
+      if (!sel.spot && venueLev.get(sel.coin) !== want) {
+        const ok = await vsend(() => vs.setLeverage(sel.coin, lev, cross), `setting ${lev}x ${cross ? 'cross' : 'isolated'}`);
+        if (!ok) return;
+        venueLev.set(sel.coin, want);
+      }
+      await vsend(() => vs.order({
+        coin: sel.coin, isBuy: side === 'long', sz, type: otype, px: +$('limitPx').value, slippage: slip(), reduceOnly: $('reduce').checked,
+        tp: $('tpslOn').checked ? $('tp').value || null : null, sl: $('tpslOn').checked ? $('sl').value || null : null,
+      }), `${side === 'long' ? 'buying' : 'selling'} ${sel.label} on ${V.name}`);
+    } finally { go.disabled = false; }
+    return;
+  }
   let req;
   try {
     req = buildOrders({
@@ -1081,6 +1269,7 @@ async function ttScan(dex = '') {
   if (sel && (sel.dex || '') === dex) paintChartAccount();
 }
 function ttTick() {
+  if (V) return;                       // top traders are Hyperliquid's leaderboard
   if (TT.lb && Date.now() - TT.lb.at > 6 * 3600e3 && !TT.progress) { ttLoadLeaderboard(true); return; }
   const maxAge = document.hidden ? 300e3 : 120e3;
   const stale = (dex) => !TT.states.has(dex) || Date.now() - TT.states.get(dex).at > maxAge;
@@ -1117,6 +1306,7 @@ function ttStatusText() {
 }
 function paintTTChip() {
   const el = $('ttChip');
+  if (V) { el.classList.add('hidden'); return; }
   const c = ttConf();
   $('nTT').textContent = c?.n ? `(${c.n})` : '';
   if (!c) { el.classList.toggle('hidden', !TT.progress); el.textContent = '🧠 reading top traders…'; return; }
@@ -1312,22 +1502,36 @@ setInterval(() => {
 }, 1000);
 
 // --- boot ----------------------------------------------------------------------
+// the venue picker in the top bar: switching reloads the page on that venue
+function paintVenues() {
+  const sel_ = $('venueSel');
+  sel_.innerHTML = VENUE_IDS.map((v) => `<option value="${v}" ${v === VENUE ? 'selected' : ''}>${esc(venueName(v))}</option>`).join('');
+  sel_.onchange = () => { store.set('perps.venue', sel_.value); location.href = location.pathname + (sel_.value === 'hl' ? '?venue=hl' : `?venue=${sel_.value}`); };
+  $('viaVenue').textContent = `via ${venueName(VENUE)}`;
+  if (V) {
+    for (const el of document.querySelectorAll('[data-t="tt"]')) el.style.display = 'none';
+    $('bookGroup').style.display = 'none';
+    if (tab === 'tt') tab = 'pos';
+  }
+}
+paintVenues();
+
 (async () => {
   try {
-    markets = await hlMarkets(C.info);
+    markets = V ? await V.markets() : await hlMarkets(C.info);
   } catch (e) {
-    $('mList').innerHTML = `<div class="empty err">could not reach Hyperliquid: ${esc(e.message)}</div>`;
+    $('mList').innerHTML = `<div class="empty err">could not reach ${esc(venueName(VENUE))}: ${esc(e.message)}</div>`;
+    toast(`could not reach ${venueName(VENUE)}: ${e.message}`, 'down', 10000);
     return;
   }
   byCoin = new Map(markets.map((m) => [m.coin, m]));
   dexTabs(); renderList(); paintAlertPanel();
-  ttLoadLeaderboard();
-  const want = decodeURIComponent(location.hash.slice(1)) || store.get('perps.sel', 'BTC');
-  await select(byCoin.has(want) ? want : 'BTC');
+  if (!V) ttLoadLeaderboard();
+  const fallback = V ? (V.defaultCoin && byCoin.has(V.defaultCoin) ? V.defaultCoin : byCoin.has('BTC') ? 'BTC' : markets[0]?.coin) : 'BTC';
+  const want = decodeURIComponent(location.hash.slice(1)) || store.get(SEL_KEY, fallback);
+  await select(byCoin.has(want) ? want : fallback);
   let pending = false, listDrawn = 0;
-  C.subs.allDexsAssetCtxs((ev) => {
-    applyCtxs(markets, ev);
-    for (const [dex, ctxs] of ev.ctxs) for (const m of markets) if (m.dex === dex) { const c = ctxs[m.asset - (m.dexIndex ? 100000 + m.dexIndex * 10000 : 0)]; if (c) m.oracle = +c.oraclePx; }
+  const onPrices = () => {
     // the open market is checked off its own faster stream (tickPx) once that is live
     for (const coin of new Set(alerts.map((a) => a.coin))) if (!(coin === sel?.coin && livePx)) runAlerts(coin, byCoin.get(coin)?.mid);
     paintTitle();
@@ -1340,6 +1544,14 @@ setInterval(() => {
       // the list is ~350 rows: redraw it at most every 2s, and not under the pointer
       if (Date.now() - listDrawn > 2000 && !$('mList').matches(':active')) { listDrawn = Date.now(); renderList(); }
     });
-  }).catch(() => { /* list stays as loaded */ });
-  if (loadWallet()) startUser(); else { paintAccount(); paintSummary(); }
+  };
+  if (V) V.watchPrices(markets, onPrices);
+  else {
+    C.subs.allDexsAssetCtxs((ev) => {
+      applyCtxs(markets, ev);
+      for (const [dex, ctxs] of ev.ctxs) for (const m of markets) if (m.dex === dex) { const c = ctxs[m.asset - (m.dexIndex ? 100000 + m.dexIndex * 10000 : 0)]; if (c) m.oracle = +c.oraclePx; }
+      onPrices();
+    }).catch(() => { /* list stays as loaded */ });
+  }
+  if (V ? loadVenue() : loadWallet()) startUser(); else { paintAccount(); paintSummary(); }
 })();
