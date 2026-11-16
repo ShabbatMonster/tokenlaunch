@@ -46,7 +46,7 @@ check(throws(() => parseTarget('', 1)) && throws(() => parseTarget('abc', 1)) &&
   const fmt = (n) => n.toLocaleString('en-US');
   check(titleText({ price: 97123.5, label: 'BTC', change: 1.234, tick: 1, fmt }) === '▲ 97,123.5 BTC +1.23%', 'title: arrow, price, market, 24h change');
   check(titleText({ price: 3.5, label: 'xyz:TSLA', change: -0.5, tick: -1, pnl: -12.3, fmt }) === '▼ 3.5 xyz:TSLA -0.50% · -$12.30', 'title: a falling tick and an open position\'s PnL');
-  check(titleText({ price: null, label: 'BTC' }) === 'BTC · perps', 'title: no price yet');
+  check(titleText({ price: null, label: 'BTC' }) === 'BTC · ShabbatLiquid', 'title: no price yet');
 }
 check(Object.values(TONES).every((t) => t.up.length && t.down.length && t.wave), 'every tone has a rising and a falling version');
 

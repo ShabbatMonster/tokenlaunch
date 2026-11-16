@@ -66,7 +66,7 @@ export function checkAlerts(alerts, coin, price) {
 /// The browser tab's text: price first, because the tab is narrow.
 ///   ▲ 97,123.5 BTC +1.23% · +$12.30
 export function titleText({ price, label, change, tick = 0, pnl = null, fmt = String }) {
-  if (!(price > 0)) return `${label || ''} · perps`.trim();
+  if (!(price > 0)) return `${label || ''} · ShabbatLiquid`.trim();
   const arrow = tick > 0 ? '▲ ' : tick < 0 ? '▼ ' : '';
   const ch = change == null || !isFinite(change) ? '' : ` ${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
   const p = pnl == null || !isFinite(pnl) ? '' : ` · ${pnl < 0 ? '-' : '+'}$${Math.abs(pnl).toFixed(2)}`;

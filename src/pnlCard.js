@@ -20,7 +20,7 @@ export const CARD_DEFAULTS = {
   showPrices: true,
   showSize: false,
   showLev: true,
-  brand: 'PERPS',
+  brand: 'ShabbatLiquid',
   caption: '',
   handle: '',
   dim: 55,                   // % darkening over an uploaded image
