@@ -44,10 +44,15 @@
 // Errors come back as thrown Error with the venue's own message.
 
 import { pacifica } from './pacifica.js';
+import { aster } from './aster.js';
+import { backpack, setBackpackBase } from './backpack.js';
 
 export const VENUES = {
   pacifica,
+  aster,
+  backpack,
 };
+export { setBackpackBase };
 export const VENUE_IDS = ['hl', ...Object.keys(VENUES)];
 export const venueName = (id) => (id === 'hl' ? 'Hyperliquid' : VENUES[id]?.name || id);
 

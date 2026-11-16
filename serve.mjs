@@ -14,6 +14,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { handleAbyssProxy } from './abyssProxy.mjs';
 import { handleBagsProxy } from './bagsProxy.mjs';
 import { handleHlLeaderboard } from './hlLeaderboardProxy.mjs';
+import { handleBackpackProxy } from './backpackProxy.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, 'docs');
@@ -43,6 +44,8 @@ const server = createServer(async (req, res) => {
     if (await handleBagsProxy(req, res)) return;
     // Hyperliquid's 39 MB leaderboard, trimmed to the top traders the perps page asks for
     if (await handleHlLeaderboard(req, res)) return;
+    // Backpack's REST API only allows its own site as an origin
+    if (await handleBackpackProxy(req, res)) return;
     let path = decodeURIComponent((req.url || '/').split('?')[0]);
     if (path === '/') path = '/index.html';
     // prevent path traversal outside docs/

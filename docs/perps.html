@@ -52,7 +52,13 @@
   .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; color: var(--logo); letter-spacing: .3px; }
   #themeBtn { border: 1px solid var(--border2); background: none; color: var(--dim); border-radius: 8px; width: 32px; height: 30px; font-size: 14px; }
   #themeBtn:hover { color: var(--text); }
-  .venuesel { width: auto; height: 30px; padding: 0 8px; font-size: 12px; font-weight: 600; background: var(--panel2); border-color: var(--border2); }
+  /* which exchange a market / position / balance is on */
+  .vtag { display: inline-block; font-size: 10px; font-weight: 600; line-height: 15px; padding: 0 5px; border-radius: 4px; margin-left: 6px; white-space: nowrap; vertical-align: 1px; color: var(--vt, var(--dim)); background: color-mix(in srgb, var(--vt, var(--dim)) 14%, transparent); }
+  .v-hl { --vt: #2a9d8f; } .v-pacifica { --vt: #3b82f6; } .v-aster { --vt: #d97706; } .v-lighter { --vt: #8b5cf6; } .v-backpack { --vt: #e11d48; }
+  #tDex .vtag { margin-left: 0; }
+  .balhead { padding: 12px 14px 4px; font-size: 12px; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); }
+  .balhead:first-child { border-top: none; }
+  .balhead .vtag { margin-left: 0; font-size: 11px; }
   /* classical music */
   .music { position: relative; display: flex; align-items: center; gap: 2px; border: 1px solid var(--border2); border-radius: 8px; padding: 2px 4px; height: 30px; }
   .music > button { border: none; background: none; color: var(--dim); border-radius: 6px; height: 24px; min-width: 26px; font-size: 12px; }
@@ -346,7 +352,6 @@
         <div class="dim" style="font-size:10px">Music plays only on this page. It ducks under price-alert sounds. Each licence links to the recording's page; the CC BY 3.0 recordings are by Musopen (musopen.org).</div>
       </div>
     </div>
-    <select id="venueSel" class="venuesel" title="exchange: switching reloads the page on it"></select>
     <span class="dim" style="font-size:11px" id="viaVenue">via Hyperliquid</span>
     <button id="themeBtn" title="switch between the paper and dark themes">☾</button>
     <button id="aWallet">Sign In</button>
