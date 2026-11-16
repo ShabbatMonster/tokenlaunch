@@ -5,119 +5,223 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>perps</title>
 <link rel="icon" id="favicon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
+  /* Hyperliquid-style trading layout: dark teal panels, a teal accent, the market
+     picker in the market bar, chart + book + ticket across, history underneath. */
   :root {
-    --bg: #0b0d10; --panel: #14171c; --panel2: #1a1e24; --border: #262b33; --border2: #323844;
-    --text: #e6e9ee; --dim: #8a93a1; --faint: #5b6370;
-    --long: #4ade80; --short: #f87171; --longbg: rgba(74,222,128,.12); --shortbg: rgba(248,113,113,.12);
+    --bg: #071116; --panel: #0f1a1f; --panel2: #1b2429; --panel3: #222e34;
+    --border: #1f2c32; --border2: #2c3b42;
+    --text: #f6fefd; --dim: #949e9c; --faint: #5e6a6d;
+    --accent: #50d2c1; --mint: #97fce4;
+    --long: #1fa67d; --short: #ed7088; --longbg: rgba(31,166,125,.16); --shortbg: rgba(237,112,136,.16);
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { background: var(--bg); color: var(--text); }
-  body { font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; min-height: 100vh; }
-  a { color: var(--dim); text-decoration: none; }
-  a:hover { color: var(--text); }
-  button { font: inherit; cursor: pointer; }
-  input, select { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; outline: none; width: 100%; }
-  input:focus, select:focus { border-color: var(--border2); }
+  body { font: 12px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; min-height: 100vh; font-variant-numeric: tabular-nums; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--mint); }
+  button { font: inherit; cursor: pointer; color: inherit; }
+  input, select { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border2); border-radius: 6px; padding: 7px 10px; outline: none; width: 100%; }
+  input:focus, select:focus { border-color: var(--accent); }
+  input[type=checkbox] { accent-color: var(--accent); width: auto; }
   .up { color: var(--long); } .down { color: var(--short); } .dim { color: var(--dim); } .err { color: var(--short); }
+  .hidden { display: none !important; }
 
-  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  header h1 { font-size: 14px; letter-spacing: 3px; font-weight: 600; }
-  header .acct { margin-left: auto; display: flex; gap: 18px; align-items: center; font-size: 12px; flex-wrap: wrap; }
-  header .acct b { color: var(--text); font-weight: 600; }
-  .chip { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; color: var(--dim); background: var(--panel); }
+  /* top bar */
+  .top { display: flex; align-items: center; gap: 22px; padding: 0 16px; height: 52px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; color: var(--mint); letter-spacing: .3px; }
+  .logo svg { width: 22px; height: 22px; }
+  .nav { display: flex; gap: 18px; font-size: 13px; }
+  .nav a { color: var(--dim); }
+  .nav a:hover, .nav a.on { color: var(--mint); }
+  .top .right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+  #aWallet { border: none; background: var(--accent); color: #04110f; font-weight: 600; border-radius: 8px; padding: 7px 16px; font-size: 12px; }
+  #aWallet.addr { background: var(--panel2); color: var(--text); border: 1px solid var(--border2); font-weight: 500; }
 
-  .grid { display: grid; grid-template-columns: 290px minmax(0, 1fr) 320px; gap: 10px; padding: 10px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
-  .card h2 { font-size: 10px; letter-spacing: 2px; color: var(--dim); font-weight: 600; padding: 10px 12px 0; }
+  .wrap { padding: 4px; display: flex; flex-direction: column; gap: 4px; }
+  .panel { background: var(--panel); border-radius: 6px; min-width: 0; }
 
-  /* markets */
-  .markets { display: flex; flex-direction: column; height: calc(100vh - 74px); min-height: 520px; position: sticky; top: 10px; }
-  .markets .tools { padding: 10px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
-  .dexes { display: flex; gap: 5px; flex-wrap: wrap; }
-  .dexes button { border: 1px solid var(--border); background: var(--panel2); color: var(--dim); border-radius: 6px; padding: 3px 8px; font-size: 11px; }
-  .dexes button.on { border-color: var(--text); color: var(--text); }
+  /* market bar */
+  .mbar { display: flex; align-items: center; gap: 26px; padding: 8px 14px; flex-wrap: wrap; position: relative; z-index: 12; }
+  .msel { position: relative; }
+  #mktBtn { display: flex; align-items: center; gap: 8px; background: none; border: none; padding: 4px 6px 4px 0; font-size: 17px; font-weight: 600; }
+  #mktBtn:hover #tCoin { color: var(--mint); }
+  #mktBtn .caret { color: var(--dim); font-size: 11px; }
+  .badge { font-size: 11px; font-weight: 500; color: var(--accent); background: rgba(80,210,193,.12); border-radius: 4px; padding: 1px 5px; }
+  .mbar .price { font-size: 17px; font-weight: 600; min-width: 92px; }
+  .stat { font-size: 11px; color: var(--dim); white-space: nowrap; }
+  .stat b { display: block; color: var(--text); font-size: 12px; font-weight: 500; margin-top: 1px; }
+  .stat .u { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+  #tDex { font-size: 11px; color: var(--faint); }
+  .mbar .grow { flex: 1; }
+
+  /* market picker */
+  .mpop { position: absolute; top: 40px; left: 0; width: min(820px, calc(100vw - 24px)); background: var(--panel); border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 16px 40px rgba(0,0,0,.6); display: flex; flex-direction: column; max-height: min(560px, calc(100vh - 120px)); }
+  .mpop .tools { padding: 10px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
+  .mpop .trow { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .dexes { display: flex; gap: 2px; flex-wrap: wrap; flex: 1; }
+  .dexes button { border: none; background: none; color: var(--dim); border-radius: 5px; padding: 4px 9px; font-size: 12px; }
+  .dexes button:hover { color: var(--text); }
+  .dexes button.on { color: var(--text); background: var(--panel2); }
+  .mhead, .mrow { display: grid; grid-template-columns: minmax(150px, 1.6fr) 1fr 1fr .9fr 1fr 1fr; gap: 8px; padding: 6px 14px; align-items: center; }
+  .mhead { color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--border); }
+  .mhead span:not(:first-child), .mrow > div:not(:first-child) { text-align: right; }
   .mlist { overflow-y: auto; flex: 1; }
-  .mrow { display: grid; grid-template-columns: 1fr auto 62px; gap: 6px; padding: 7px 12px; cursor: pointer; border-bottom: 1px solid #191c22; align-items: center; }
+  .mrow { cursor: pointer; }
   .mrow:hover { background: var(--panel2); }
-  .mrow.on { background: var(--panel2); box-shadow: inset 2px 0 0 var(--text); }
+  .mrow.on { background: var(--panel2); }
   .mrow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mrow .nm small { color: var(--faint); font-size: 10px; margin-left: 4px; }
-  .mrow .px { text-align: right; font-variant-numeric: tabular-nums; }
-  .mrow .ch { text-align: right; font-size: 12px; }
-  .lev { font-size: 9px; border: 1px solid var(--border2); border-radius: 4px; padding: 0 3px; color: var(--dim); margin-left: 4px; }
+  .mrow [data-fav] { cursor: pointer; margin-right: 4px; }
+  .lev { font-size: 10px; color: var(--accent); background: rgba(80,210,193,.12); border-radius: 3px; padding: 0 4px; margin-left: 5px; }
 
-  /* center */
-  .center { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-  .ticker { display: flex; gap: 22px; align-items: baseline; padding: 12px 14px; flex-wrap: wrap; }
-  .ticker .big { font-size: 20px; font-weight: 700; }
-  .ticker .stat { font-size: 11px; color: var(--dim); }
-  .ticker .stat b { display: block; color: var(--text); font-size: 13px; font-weight: 500; }
-  .chartwrap { padding: 8px 10px 10px; }
-  .ivals { display: flex; gap: 4px; margin-bottom: 6px; }
-  .ivals button { border: none; background: none; color: var(--faint); padding: 2px 7px; border-radius: 5px; font-size: 11px; }
-  .ivals button.on { color: var(--text); background: var(--panel2); }
-  .ctool { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
-  .ctool .ivals { margin: 0; }
-  .ctool select { width: auto; padding: 3px 6px; font-size: 11px; }
-  .ivals select { width: auto; padding: 2px 4px; font-size: 11px; background: none; border-color: transparent; color: var(--faint); }
-  .tb { border: 1px solid var(--border); background: none; color: var(--dim); border-radius: 6px; padding: 3px 8px; font-size: 11px; }
-  .tb:hover { color: var(--text); }
-  .tb.on { color: var(--text); border-color: var(--text); background: var(--panel2); }
-  .indpanel { position: absolute; top: 28px; left: 0; z-index: 15; padding: 8px; width: 270px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
-  .indpanel.hidden { display: none; }
-  .alertwrap { position: relative; align-self: center; }
-  .alertpanel { position: absolute; top: 34px; left: 0; z-index: 16; width: 300px; padding: 12px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.5); font-size: 12px; }
-  .alertpanel.hidden { display: none; }
+  /* main grid */
+  .main { display: grid; grid-template-columns: minmax(0, 1fr) 290px 320px; grid-template-areas: "chart book right" "hist hist right"; gap: 4px; align-items: start; }
+  .chartp { grid-area: chart; padding: 6px 8px 8px; }
+  .bookp { grid-area: book; align-self: stretch; }
+  .hist { grid-area: hist; min-height: 260px; }
+  .rightcol { grid-area: right; display: flex; flex-direction: column; gap: 4px; position: sticky; top: 4px; }
+
+  /* chart */
+  .ctool { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; padding-bottom: 6px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+  .ivals { display: flex; gap: 2px; }
+  .ivals button { border: none; background: none; color: var(--dim); padding: 3px 7px; border-radius: 4px; font-size: 12px; }
+  .ivals button:hover { color: var(--text); }
+  .ivals button.on { color: var(--accent); }
+  .ivals select { width: auto; padding: 2px 4px; font-size: 12px; background: none; border-color: transparent; color: var(--dim); }
+  .ctool select { width: auto; padding: 3px 6px; font-size: 12px; background: none; border-color: transparent; color: var(--dim); }
+  .vsep { width: 1px; height: 16px; background: var(--border2); margin: 0 4px; }
+  .tb { border: none; background: none; color: var(--dim); border-radius: 4px; padding: 3px 8px; font-size: 12px; }
+  .tb:hover { color: var(--text); background: var(--panel2); }
+  .tb.on { color: var(--accent); }
+  .indpanel { position: absolute; top: 28px; left: 0; z-index: 15; padding: 8px; width: 270px; display: flex; flex-direction: column; gap: 4px; background: var(--panel); border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  .indrow { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+  .indrow span { flex: 1; }
+  .indp { width: 46px !important; padding: 2px 5px !important; font-size: 11px; }
+  .chartbox { position: relative; }
+  #chart { width: 100%; height: 470px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 3px 12px; font-size: 11px; color: var(--dim); min-height: 18px; margin-bottom: 4px; }
+  .legend b { font-weight: 500; color: var(--text); }
+  .legend b.up { color: var(--long); } .legend b.down { color: var(--short); }
+  .chint { font-size: 10px; color: var(--faint); margin-top: 6px; }
+
+  /* alerts */
+  .alertwrap { position: relative; }
+  #alertBtn { border: 1px solid var(--border2); background: none; color: var(--dim); border-radius: 6px; padding: 4px 10px; font-size: 12px; }
+  #alertBtn:hover { color: var(--text); }
+  #alertBtn.has { color: #facc15; border-color: rgba(250,204,21,.5); }
+  .alertpanel { position: absolute; top: 34px; right: 0; z-index: 16; width: 300px; padding: 12px; display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
   .alertpanel .qrow { display: flex; gap: 4px; }
   .alertpanel .qrow button { flex: 1; }
   .alertpanel .alist { display: flex; flex-direction: column; gap: 3px; max-height: 150px; overflow: auto; }
   .alertpanel .arow { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 4px 6px; background: var(--panel2); border-radius: 6px; }
   .alertpanel .sep { border-top: 1px solid var(--border); margin: 2px 0; }
   .alertpanel label.ck { display: flex; align-items: center; gap: 6px; color: var(--dim); }
-  .alertpanel label.ck input { width: auto; }
-  #alertBtn.has { color: #facc15; border-color: #facc15; }
   .lock { color: #facc15; font-size: 11px; }
-  .lock.hidden { display: none; }
-  .toast.alert { border-left-color: #facc15; cursor: pointer; font-size: 13px; }
-  .indrow { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
-  .indrow input[type=checkbox] { width: auto; }
-  .indrow span { flex: 1; }
-  .indp { width: 46px !important; padding: 2px 5px !important; font-size: 11px; }
-  .chartbox { position: relative; }
-  #chart { width: 100%; height: 510px; }
-  .legend { display: flex; flex-wrap: wrap; gap: 3px 12px; font-size: 11px; color: var(--dim); min-height: 18px; margin-bottom: 4px; }
-  .legend b { font-weight: 500; color: var(--text); }
-  .legend b.up { color: var(--long); } .legend b.down { color: var(--short); }
-  .chint { font-size: 10px; color: var(--faint); margin-top: 6px; }
-  .lower { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 10px; }
-  .book { padding-bottom: 8px; font-variant-numeric: tabular-nums; font-size: 12px; }
-  .book .row { display: grid; grid-template-columns: 1.1fr 1fr 1fr; padding: 1px 12px; position: relative; cursor: pointer; }
+
+  /* book */
+  .book { font-size: 12px; display: flex; flex-direction: column; }
+  .bookhead { display: flex; align-items: center; border-bottom: 1px solid var(--border); padding: 0 6px; }
+  .bookhead button { border: none; background: none; color: var(--dim); font-size: 12px; padding: 9px 8px 7px; border-bottom: 2px solid transparent; flex: 1; }
+  .bookhead button.on { color: var(--text); border-bottom-color: var(--accent); }
+  .bookbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; }
+  .bookbar select { width: auto; padding: 2px 6px; font-size: 11px; background: var(--panel2); border-color: transparent; }
+  .live { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); margin-left: auto; }
+  .live.on { background: var(--long); box-shadow: 0 0 6px var(--long); }
+  .book .row { display: grid; grid-template-columns: 1.1fr 1fr 1fr; padding: 2px 10px; position: relative; cursor: pointer; line-height: 17px; }
   .book .row:hover { background: rgba(255,255,255,.04); }
   .book .row span:not(:first-child) { text-align: right; }
-  .book .row.hd { color: var(--faint); font-size: 10px; letter-spacing: 1px; cursor: default; padding-top: 6px; }
+  .book .row.hd { color: var(--dim); font-size: 11px; cursor: default; padding-bottom: 4px; }
   .book .row.hd:hover { background: none; }
-  .book .row i { position: absolute; top: 0; bottom: 0; right: 0; opacity: .14; pointer-events: none; }
-  .book .spread { text-align: center; color: var(--dim); font-size: 11px; padding: 4px 0; }
-  .bookhead { display: flex; align-items: center; gap: 2px; padding: 8px 8px 0 6px; }
-  .bookhead button { border: none; background: none; color: var(--dim); font-size: 11px; letter-spacing: 1px; padding: 3px 6px; border-bottom: 2px solid transparent; }
-  .bookhead button.on { color: var(--text); border-bottom-color: var(--text); }
-  .bookhead select { width: auto; margin-left: auto; padding: 2px 4px; font-size: 10px; }
-  .live { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); margin-left: 6px; }
-  .live.on { background: var(--long); box-shadow: 0 0 6px var(--long); }
+  .book .row i { position: absolute; top: 1px; bottom: 1px; right: 0; opacity: .16; pointer-events: none; }
+  .book .spread { display: flex; justify-content: center; gap: 14px; color: var(--text); font-size: 11px; padding: 5px 0; margin: 2px 0; background: var(--panel2); }
   #tradeTape .row { cursor: default; }
-  .postool { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
+
+  /* history */
+  .tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .tabs button { border: none; background: none; color: var(--dim); padding: 10px 10px 8px; border-bottom: 2px solid transparent; font-size: 12px; white-space: nowrap; }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  .table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .table th { text-align: left; color: var(--dim); font-weight: 400; font-size: 11px; padding: 8px 10px; white-space: nowrap; }
+  .table td { padding: 6px 10px; white-space: nowrap; }
+  .table tr:hover td { background: rgba(255,255,255,.02); }
+  .table td.x { text-align: right; }
+  .tbtn { border: none; background: none; color: var(--accent); border-radius: 4px; padding: 2px 6px; font-size: 12px; }
+  .tbtn:hover { color: var(--mint); background: var(--panel2); }
+  .empty { color: var(--faint); padding: 22px 14px; font-size: 12px; }
+  .tablewrap { overflow-x: auto; max-height: 360px; overflow-y: auto; }
+  .postool { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px; border-bottom: 1px solid var(--border); }
   .postool input { width: 150px; padding: 5px 8px; }
-  .keys { font-size: 10px; color: var(--faint); line-height: 1.7; }
+
+  /* ticket */
+  .ticket { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+  .pills { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .pills button { background: var(--panel2); border: none; border-radius: 6px; padding: 7px; font-size: 12px; font-weight: 500; }
+  .pills button:hover { background: var(--panel3); }
+  .seg { display: flex; border-bottom: 1px solid var(--border); }
+  .seg button { flex: 1; border: none; background: none; color: var(--dim); padding: 7px 4px; font-size: 12px; border-bottom: 2px solid transparent; }
+  .seg button.on { color: var(--text); border-bottom-color: var(--accent); }
+  .side { display: grid; grid-template-columns: 1fr 1fr; background: var(--panel2); border-radius: 7px; padding: 2px; }
+  .side button { padding: 7px; border-radius: 6px; border: none; background: none; color: var(--dim); font-weight: 500; font-size: 12px; }
+  .side button.long.on { background: var(--accent); color: #04110f; }
+  .side button.short.on { background: var(--short); color: #1d070c; }
+  .kv { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); }
+  .kv b { color: var(--text); font-weight: 500; }
+  .field { position: relative; }
+  .field label { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--dim); pointer-events: none; font-size: 12px; }
+  .field input { padding-left: 64px; text-align: right; padding-right: 92px; height: 38px; }
+  .field select { position: absolute; right: 4px; top: 4px; bottom: 4px; width: 82px; padding: 0 6px; background: var(--panel3); border-color: transparent; font-size: 12px; }
+  .field.plain input { padding-right: 10px; }
+  .lbl { font-size: 11px; color: var(--dim); display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .pcts { display: flex; gap: 4px; }
+  .pcts button { flex: 1; border: 1px solid var(--border2); background: none; color: var(--dim); border-radius: 5px; font-size: 11px; padding: 4px; }
+  .pcts button:hover { color: var(--accent); border-color: var(--accent); }
+  input[type=range] { padding: 0; accent-color: var(--accent); background: none; border: none; }
+  .levbox { background: var(--panel2); border-radius: 6px; padding: 8px 10px; }
+  .check { display: flex; gap: 7px; align-items: center; font-size: 12px; color: var(--dim); cursor: pointer; }
+  .checks2 { display: flex; flex-direction: column; gap: 7px; }
+  .slipbox { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+  .slipbox input { width: 58px; padding: 4px 6px; text-align: right; }
+  .go { padding: 11px; border: none; border-radius: 8px; font-weight: 600; font-size: 13px; color: #04110f; background: var(--accent); }
+  .go:hover { filter: brightness(1.08); }
+  .go.short { background: var(--short); color: #1d070c; }
+  .go:disabled { opacity: .5; cursor: default; }
+  .summary { font-size: 12px; color: var(--dim); line-height: 1.85; border-top: 1px solid var(--border); padding-top: 8px; }
+  .summary b { color: var(--text); font-weight: 500; float: right; }
+  .msg { font-size: 12px; min-height: 0; word-break: break-word; }
+  .msg:empty { display: none; }
+  .note { font-size: 11px; color: var(--dim); line-height: 1.5; border: 1px solid var(--border2); border-radius: 6px; padding: 8px 10px; }
+  .note button { margin-top: 6px; }
+  .keys { font-size: 10px; color: var(--faint); line-height: 1.8; }
   kbd { border: 1px solid var(--border2); border-radius: 3px; padding: 0 4px; font: inherit; color: var(--dim); }
+
+  /* account */
+  .acct { padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .acct h4 { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .acct .kv { line-height: 1.6; }
+
+  /* toasts + modals */
   #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 6px; z-index: 30; max-width: calc(100vw - 32px); }
-  .toast { background: var(--panel2); border: 1px solid var(--border2); border-left: 3px solid var(--text); border-radius: 8px; padding: 9px 12px; font-size: 12px; transition: opacity .5s; }
+  .toast { background: var(--panel2); border: 1px solid var(--border2); border-left: 3px solid var(--accent); border-radius: 6px; padding: 9px 12px; font-size: 12px; transition: opacity .5s; }
   .toast.up { border-left-color: var(--long); } .toast.down { border-left-color: var(--short); }
+  .toast.alert { border-left-color: #facc15; cursor: pointer; font-size: 13px; }
   .toast.gone { opacity: 0; }
+  .card { background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; }
+  .overlay { position: fixed; inset: 0; background: rgba(2,8,10,.75); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
+  .modal { width: 100%; max-width: 420px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+  .modal h3 { font-size: 14px; font-weight: 600; }
+  .modal p { font-size: 12px; color: var(--dim); }
   .cardbox { width: 100%; max-width: 1180px; max-height: calc(100vh - 32px); overflow: auto; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; padding: 16px; }
   .cardprev { align-self: start; }
   .cardprev canvas { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--border); }
   .cardctl { display: flex; flex-direction: column; gap: 12px; }
+  .cardctl .seg { border: none; gap: 4px; }
+  .cardctl .seg button { border: 1px solid var(--border2); border-radius: 6px; padding: 5px; }
+  .cardctl .seg button.on { border-color: var(--accent); color: var(--accent); }
   .wrapseg { flex-wrap: wrap; } .wrapseg button { flex: 1 0 30%; }
   .swatches { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .swatches button { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; padding: 0; }
@@ -126,237 +230,227 @@
   .swatches .auto.on { color: var(--text); border-color: var(--text); }
   .swatches input[type=color] { width: 30px; height: 28px; padding: 0; border: none; background: none; }
   .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  @media (max-width: 860px) { .cardbox { grid-template-columns: minmax(0, 1fr); } }
-
-  .tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); }
-  .tabs button { border: none; background: none; color: var(--dim); padding: 6px 10px; border-bottom: 2px solid transparent; font-size: 12px; }
-  .tabs button.on { color: var(--text); border-bottom-color: var(--text); }
-  .table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-  .table th { text-align: left; color: var(--faint); font-weight: 500; font-size: 10px; letter-spacing: 1px; padding: 8px 10px; }
-  .table td { padding: 7px 10px; border-top: 1px solid #191c22; white-space: nowrap; }
-  .table td.x { text-align: right; }
-  .tbtn { border: 1px solid var(--border2); background: var(--panel2); color: var(--text); border-radius: 6px; padding: 3px 9px; font-size: 11px; }
-  .tbtn:hover { border-color: var(--text); }
-  .empty { color: var(--faint); padding: 18px 12px; font-size: 12px; }
-  .tablewrap { overflow-x: auto; max-height: 340px; overflow-y: auto; }
-
-  /* ticket */
-  .ticket { padding: 12px; display: flex; flex-direction: column; gap: 10px; position: sticky; top: 10px; }
-  .side { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .side button { padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel2); color: var(--dim); font-weight: 700; letter-spacing: 1px; }
-  .side button.long.on { background: var(--longbg); border-color: var(--long); color: var(--long); }
-  .side button.short.on { background: var(--shortbg); border-color: var(--short); color: var(--short); }
-  .seg { display: flex; gap: 4px; }
-  .seg button { flex: 1; border: 1px solid var(--border); background: none; color: var(--dim); border-radius: 6px; padding: 5px; font-size: 12px; }
-  .seg button.on { color: var(--text); border-color: var(--border2); background: var(--panel2); }
-  .lbl { font-size: 10px; letter-spacing: 2px; color: var(--dim); display: flex; justify-content: space-between; margin-bottom: 4px; }
-  .lbl span { letter-spacing: 0; }
   .inrow { display: flex; gap: 6px; }
-  .inrow select { width: 86px; flex: none; }
-  input[type=range] { padding: 0; accent-color: var(--text); background: none; border: none; }
-  .pcts { display: flex; gap: 4px; }
-  .pcts button { flex: 1; border: 1px solid var(--border); background: var(--panel2); color: var(--dim); border-radius: 5px; font-size: 11px; padding: 3px; }
-  .check { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); cursor: pointer; }
-  .check input { width: auto; }
-  .go { padding: 12px; border: none; border-radius: 9px; font-weight: 700; letter-spacing: 2px; font-size: 14px; color: #08130c; background: var(--long); }
-  .go.short { background: var(--short); color: #1a0606; }
-  .go:disabled { opacity: .5; cursor: default; }
-  .summary { font-size: 11px; color: var(--dim); line-height: 1.7; }
-  .summary b { color: var(--text); font-weight: 500; float: right; }
-  .msg { font-size: 12px; min-height: 16px; word-break: break-word; }
-  .note { font-size: 11px; color: var(--dim); line-height: 1.5; border: 1px dashed var(--border2); border-radius: 8px; padding: 8px 10px; }
-  .note button { margin-top: 6px; }
 
-  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
-  .overlay.hidden { display: none; }
-  .modal { width: 100%; max-width: 420px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
-  .modal h3 { font-size: 13px; letter-spacing: 2px; }
-  .modal p { font-size: 12px; color: var(--dim); }
-
-  @media (max-width: 1100px) {
-    .grid { grid-template-columns: 250px minmax(0, 1fr); }
-    .ticketcol { grid-column: 1 / -1; }
-    .ticket { position: static; }
+  @media (max-width: 1250px) {
+    .main { grid-template-columns: minmax(0, 1fr) 320px; grid-template-areas: "chart right" "book right" "hist hist"; }
+    .bookp #bookAsks .row:nth-child(-n+5), .bookp #bookBids .row:nth-child(n+7) { display: none; }
   }
-  @media (max-width: 760px) {
-    .grid { grid-template-columns: minmax(0, 1fr); padding: 8px; }
-    .markets { position: static; height: 340px; min-height: 0; }
-    .lower { grid-template-columns: minmax(0, 1fr); }
-    #chart { height: 380px; }
-    header .acct { margin-left: 0; }
+  @media (max-width: 820px) {
+    .main { grid-template-columns: minmax(0, 1fr); grid-template-areas: "chart" "right" "book" "hist"; }
+    .rightcol { position: static; }
+    #chart { height: 360px; }
+    .mbar { gap: 14px; }
+    .nav { display: none; }
+    .cardbox { grid-template-columns: minmax(0, 1fr); }
+    .mhead, .mrow { grid-template-columns: minmax(120px, 1.6fr) 1fr 1fr; }
+    .mhead span:nth-child(n+4), .mrow > div:nth-child(n+4) { display: none; }
   }
 </style>
 </head>
 <body>
-<header>
-  <h1>PERPS</h1>
-  <span class="chip">Hyperliquid</span>
-  <a href="index.html">← launcher</a>
-  <a href="trade.html">trade</a>
-  <div class="acct">
-    <span>equity <b id="aEquity">—</b></span>
-    <span>available <b id="aFree">—</b></span>
-    <span>uPnL <b id="aPnl">—</b></span>
-    <span class="chip" id="aWallet">no wallet</span>
+<header class="top">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M3 17l5-6 4 4 8-10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    perps
+  </div>
+  <nav class="nav">
+    <a href="perps.html" class="on">Trade</a>
+    <a href="trade.html">Spot</a>
+    <a href="index.html">Launcher</a>
+  </nav>
+  <div class="right">
+    <span class="dim" style="font-size:11px">via Hyperliquid</span>
+    <button id="aWallet">Sign In</button>
   </div>
 </header>
 
-<div class="grid">
-  <!-- markets -->
-  <div class="card markets">
-    <div class="tools">
-      <input id="mSearch" placeholder="search 350+ markets (BTC, NVDA, xyz:…)" spellcheck="false" autocomplete="off">
-      <div class="dexes" id="dexTabs"></div>
-      <label class="check"><input type="checkbox" id="mFav">favourites only</label>
-    </div>
-    <div class="mlist" id="mList"><div class="empty">loading markets…</div></div>
-  </div>
-
-  <!-- center -->
-  <div class="center">
-    <div class="card">
-      <div class="ticker">
-        <div><div class="dim" id="tDex" style="font-size:11px">—</div><div class="big" id="tCoin">—</div></div>
-        <div class="big" id="tPx">—</div>
-        <div class="alertwrap">
-          <button class="tb" id="alertBtn" title="price alerts for this market (A)">🔔 alert</button>
-          <div class="alertpanel card hidden" id="alertPanel">
-            <div><b id="alertTitle">PRICE ALERT</b> <span class="dim" id="alertNow"></span></div>
-            <input type="text" id="alertPx" spellcheck="false" placeholder="price, 100k, or a move like +2%">
-            <div class="qrow"><button class="tbtn" data-q="-5%">-5%</button><button class="tbtn" data-q="-1%">-1%</button><button class="tbtn" data-q="+1%">+1%</button><button class="tbtn" data-q="+5%">+5%</button></div>
-            <input type="text" id="alertNote" spellcheck="false" placeholder="note (optional)" maxlength="60">
-            <label class="ck"><input type="checkbox" id="alertRepeat"> repeat: re-arm once the price is back across</label>
-            <button class="go" id="alertAdd" style="padding:8px">ADD ALERT</button>
-            <div class="alist" id="alertList"></div>
-            <div class="sep"></div>
-            <div class="row" style="display:flex;gap:6px;align-items:center">
-              <select id="alertTone" style="flex:1"><option value="chime">chime</option><option value="beep">beep</option><option value="alarm">alarm</option><option value="off">no sound</option></select>
-              <select id="alertTimes" style="flex:0 0 70px" title="how many times the tone plays"><option value="1">1×</option><option value="3">3×</option><option value="6">6×</option></select>
-              <button class="tbtn" id="alertTest">TEST</button>
-            </div>
-            <label class="ck">volume <input type="range" id="alertVol" min="0" max="1" step="0.05" style="flex:1"></label>
-            <label class="ck"><input type="checkbox" id="alertFill"> also a short sound on every fill</label>
-            <label class="ck"><input type="checkbox" id="alertNotify"> desktop notification when this tab is hidden</label>
-            <div class="lock hidden" id="alertLock">🔇 sound starts after you click or type anywhere on this page</div>
-            <div class="dim" style="font-size:11px">shift-click the chart for an alert at that price · alerts live in this browser and only fire while this page is open</div>
+<div class="wrap">
+  <!-- market bar -->
+  <div class="panel mbar">
+    <div class="msel">
+      <button id="mktBtn" title="all markets (/)"><span id="tCoin">—</span><span class="badge" id="tLev">—</span><span class="caret">▼</span></button>
+      <div class="mpop hidden" id="mktPop">
+        <div class="tools">
+          <input id="mSearch" placeholder="Search 350+ markets (BTC, NVDA, xyz:…)" spellcheck="false" autocomplete="off">
+          <div class="trow">
+            <div class="dexes" id="dexTabs"></div>
+            <label class="check"><input type="checkbox" id="mFav">Favourites only</label>
           </div>
         </div>
-        <div class="stat">24h<b id="tCh">—</b></div>
-        <div class="stat">oracle<b id="tOracle">—</b></div>
-        <div class="stat">funding / 1h<b id="tFund">—</b></div>
-        <div class="stat">next funding<b id="tNext">—</b></div>
-        <div class="stat">open interest<b id="tOi">—</b></div>
-        <div class="stat">24h volume<b id="tVol">—</b></div>
-        <div class="stat">max leverage<b id="tLev">—</b></div>
-      </div>
-      <div class="chartwrap">
-        <div class="ctool">
-          <div class="ivals" id="ivals"></div>
-          <select id="chartType" title="chart type">
-            <option value="candles">candles</option><option value="heikin">heikin-ashi</option><option value="line">line</option><option value="area">area</option>
-          </select>
-          <div style="position:relative">
-            <button class="tb" id="indBtn">ƒx indicators</button>
-            <div class="indpanel card hidden" id="indPanel"></div>
-          </div>
-          <button class="tb" id="chartLog" title="logarithmic price scale">log</button>
-          <button class="tb" id="chartDraw" title="draw horizontal lines: click to add, click a line to remove (D)">─ line</button>
-          <button class="tb" id="chartClear" title="remove this market's drawn lines">clear</button>
-          <button class="tb" id="chartFit" title="fit everything loaded (F)">fit</button>
-        </div>
-        <div class="chartbox">
-          <div class="legend" id="chartLegend"></div>
-          <div id="chart"></div>
-        </div>
-        <div class="chint">drag to move · scroll to zoom · drag the price axis to stretch it, double-click it to reset · alt-click sets a limit price · shift-click sets an alert · older candles load as you drag left</div>
+        <div class="mhead"><span>Symbol</span><span>Last Price</span><span>24h Change</span><span>8h Funding</span><span>Volume</span><span>Open Interest</span></div>
+        <div class="mlist" id="mList"><div class="empty">loading markets…</div></div>
       </div>
     </div>
-    <div class="lower">
-      <div class="card book">
-        <div class="bookhead" id="bookTabs">
-          <button data-v="book" class="on">BOOK</button><button data-v="trades">TRADES</button>
-          <span id="bookLive" class="live" title="green: updated in the last 3 seconds"></span>
-          <select id="bookGroup" title="group prices">
-            <option value="">all prices</option><option value="5">5 sig. figs</option><option value="4">4 sig. figs</option><option value="3">3 sig. figs</option><option value="2">2 sig. figs</option>
-          </select>
+    <div class="price" id="tPx">—</div>
+    <div class="stat">Oracle<b id="tOracle">—</b></div>
+    <div class="stat">24h Change<b id="tCh">—</b></div>
+    <div class="stat">24h Volume<b id="tVol">—</b></div>
+    <div class="stat">Open Interest<b id="tOi">—</b></div>
+    <div class="stat"><span class="u" title="paid every hour; the rate shown is per hour">Funding / Countdown</span><b><span id="tFund">—</span> &nbsp;<span id="tNext">—</span></b></div>
+    <div id="tDex">—</div>
+    <div class="grow"></div>
+    <div class="alertwrap">
+      <button id="alertBtn" title="price alerts for this market (A)">🔔 alert</button>
+      <div class="alertpanel hidden" id="alertPanel">
+        <div><b id="alertTitle">PRICE ALERT</b> <span class="dim" id="alertNow"></span></div>
+        <input type="text" id="alertPx" spellcheck="false" placeholder="price, 100k, or a move like +2%">
+        <div class="qrow"><button class="tbtn" data-q="-5%">-5%</button><button class="tbtn" data-q="-1%">-1%</button><button class="tbtn" data-q="+1%">+1%</button><button class="tbtn" data-q="+5%">+5%</button></div>
+        <input type="text" id="alertNote" spellcheck="false" placeholder="note (optional)" maxlength="60">
+        <label class="check"><input type="checkbox" id="alertRepeat"> repeat: re-arm once the price is back across</label>
+        <button class="go" id="alertAdd" style="padding:8px">Add Alert</button>
+        <div class="alist" id="alertList"></div>
+        <div class="sep"></div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="alertTone" style="flex:1"><option value="chime">chime</option><option value="beep">beep</option><option value="alarm">alarm</option><option value="off">no sound</option></select>
+          <select id="alertTimes" style="flex:0 0 70px" title="how many times the tone plays"><option value="1">1×</option><option value="3">3×</option><option value="6">6×</option></select>
+          <button class="tbtn" id="alertTest">Test</button>
         </div>
-        <div id="bookView">
-          <div class="row hd"><span>PRICE</span><span>SIZE</span><span>TOTAL</span></div>
-          <div id="bookAsks"></div>
-          <div class="spread" id="bookSpread">—</div>
-          <div id="bookBids"></div>
-        </div>
-        <div id="tradeTape" style="display:none"></div>
-      </div>
-      <div class="card">
-        <div class="tabs" id="bTabs">
-          <button data-t="pos" class="on">POSITIONS <span id="nPos"></span></button>
-          <button data-t="ord">OPEN ORDERS <span id="nOrd"></span></button>
-          <button data-t="fills">FILLS</button>
-          <button data-t="bal">BALANCES</button>
-          <button data-t="alerts">ALERTS <span id="nAl"></span></button>
-        </div>
-        <div class="postool" id="posTool" style="display:none"></div>
-        <div class="tablewrap" id="bBody"><div class="empty">sign in to see positions</div></div>
+        <label class="check">volume <input type="range" id="alertVol" min="0" max="1" step="0.05" style="flex:1"></label>
+        <label class="check"><input type="checkbox" id="alertFill"> also a short sound on every fill</label>
+        <label class="check"><input type="checkbox" id="alertNotify"> desktop notification when this tab is hidden</label>
+        <div class="lock hidden" id="alertLock">🔇 sound starts after you click or type anywhere on this page</div>
+        <div class="dim" style="font-size:11px">shift-click the chart for an alert at that price · alerts live in this browser and only fire while this page is open</div>
       </div>
     </div>
   </div>
 
-  <!-- ticket -->
-  <div class="ticketcol">
-    <div class="card ticket">
-      <div class="side">
-        <button class="long on" id="sLong">LONG</button>
-        <button class="short" id="sShort">SHORT</button>
-      </div>
-      <div class="seg" id="oType">
-        <button data-v="market" class="on">Market</button>
-        <button data-v="limit">Limit</button>
-      </div>
-      <div id="limitWrap" style="display:none">
-        <div class="lbl">LIMIT PRICE <span><a href="#" id="useMid">mid</a></span></div>
-        <input id="limitPx" inputmode="decimal" spellcheck="false">
-      </div>
-      <div>
-        <div class="lbl">SIZE <span id="sizeHint"></span></div>
-        <div class="inrow">
-          <input id="size" inputmode="decimal" placeholder="0" spellcheck="false">
-          <select id="sizeUnit"><option value="usd">USD</option><option value="coin">coin</option></select>
+  <div class="main">
+    <!-- chart -->
+    <section class="panel chartp">
+      <div class="ctool">
+        <div class="ivals" id="ivals"></div>
+        <span class="vsep"></span>
+        <select id="chartType" title="chart type">
+          <option value="candles">Candles</option><option value="heikin">Heikin-Ashi</option><option value="line">Line</option><option value="area">Area</option>
+        </select>
+        <div style="position:relative">
+          <button class="tb" id="indBtn">ƒx Indicators</button>
+          <div class="indpanel hidden" id="indPanel"></div>
         </div>
-        <div class="pcts" style="margin-top:6px">
-          <button data-p="10">10%</button><button data-p="25">25%</button><button data-p="50">50%</button><button data-p="100">MAX</button>
+        <span class="vsep"></span>
+        <button class="tb" id="chartLog" title="logarithmic price scale">log</button>
+        <button class="tb" id="chartDraw" title="draw horizontal lines: click to add, click a line to remove (D)">─ line</button>
+        <button class="tb" id="chartClear" title="remove this market's drawn lines">clear</button>
+        <button class="tb" id="chartFit" title="fit everything loaded (F)">fit</button>
+      </div>
+      <div class="chartbox">
+        <div class="legend" id="chartLegend"></div>
+        <div id="chart"></div>
+      </div>
+      <div class="chint">drag to move · scroll to zoom · drag the price axis to stretch it, double-click it to reset · alt-click sets a limit price · shift-click sets an alert · older candles load as you drag left</div>
+    </section>
+
+    <!-- order book -->
+    <section class="panel bookp book">
+      <div class="bookhead" id="bookTabs">
+        <button data-v="book" class="on">Order Book</button><button data-v="trades">Trades</button>
+      </div>
+      <div class="bookbar">
+        <select id="bookGroup" title="group prices">
+          <option value="">All prices</option><option value="5">5 sig. figs</option><option value="4">4 sig. figs</option><option value="3">3 sig. figs</option><option value="2">2 sig. figs</option>
+        </select>
+        <span id="bookLive" class="live" title="green: updated in the last 3 seconds"></span>
+      </div>
+      <div id="bookView">
+        <div class="row hd"><span>Price</span><span>Size</span><span>Total</span></div>
+        <div id="bookAsks"></div>
+        <div class="spread" id="bookSpread">—</div>
+        <div id="bookBids"></div>
+      </div>
+      <div id="tradeTape" style="display:none"></div>
+    </section>
+
+    <!-- ticket + account -->
+    <div class="rightcol">
+      <section class="panel ticket">
+        <div class="pills">
+          <button id="marginMode" title="cross or isolated margin">Cross</button>
+          <button id="levPill" title="leverage"><span id="levVal">10</span>x</button>
         </div>
-      </div>
-      <div>
-        <div class="lbl">LEVERAGE <span><b id="levVal">10</b>× · <a href="#" id="marginMode">cross</a></span></div>
-        <input type="range" id="lev" min="1" max="40" value="10">
-      </div>
-      <label class="check"><input type="checkbox" id="tpslOn">take-profit / stop-loss</label>
-      <div id="tpslWrap" class="inrow" style="display:none">
-        <input id="tp" placeholder="TP price" inputmode="decimal" spellcheck="false">
-        <input id="sl" placeholder="SL price" inputmode="decimal" spellcheck="false">
-      </div>
-      <div class="inrow" style="align-items:center">
-        <label class="check" style="flex:1"><input type="checkbox" id="reduce">reduce only</label>
-        <span class="dim" style="font-size:11px">slippage</span>
-        <input id="slip" value="1" style="width:56px" inputmode="decimal"><span class="dim">%</span>
-      </div>
-      <div class="summary" id="summary"></div>
-      <button class="go" id="goBtn">LONG</button>
-      <div class="msg" id="msg"></div>
-      <div class="note" id="unifyNote" style="display:none"></div>
-      <div class="keys"><kbd>/</kbd> search · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw lines · <kbd>F</kbd> fit chart · <kbd>A</kbd> price alert · <kbd>Enter</kbd> in a field places the order · click a book price for a limit, a book size to size up to it</div>
+        <div class="levbox hidden" id="levBox">
+          <div class="lbl">Leverage <span class="dim">drag, then place the order</span></div>
+          <input type="range" id="lev" min="1" max="40" value="10">
+        </div>
+        <div class="seg" id="oType">
+          <button data-v="market" class="on">Market</button>
+          <button data-v="limit">Limit</button>
+        </div>
+        <div class="side">
+          <button class="long on" id="sLong">Buy / Long</button>
+          <button class="short" id="sShort">Sell / Short</button>
+        </div>
+        <div>
+          <div class="kv">Available to Trade <b id="tkAvail">—</b></div>
+          <div class="kv">Current Position <b id="tkPos">—</b></div>
+        </div>
+        <div id="limitWrap" style="display:none">
+          <div class="field plain">
+            <label>Price</label>
+            <input id="limitPx" inputmode="decimal" spellcheck="false">
+          </div>
+          <div class="lbl" style="margin:4px 0 0;justify-content:flex-end"><a href="#" id="useMid">Mid</a></div>
+        </div>
+        <div>
+          <div class="field">
+            <label>Size</label>
+            <input id="size" inputmode="decimal" placeholder="0" spellcheck="false">
+            <select id="sizeUnit"><option value="usd">USD</option><option value="coin">coin</option></select>
+          </div>
+          <div class="lbl" style="margin:4px 0 0;justify-content:flex-end"><span id="sizeHint"></span></div>
+          <div class="pcts" style="margin-top:4px">
+            <button data-p="10">10%</button><button data-p="25">25%</button><button data-p="50">50%</button><button data-p="100">Max</button>
+          </div>
+        </div>
+        <div class="checks2">
+          <label class="check"><input type="checkbox" id="reduce">Reduce Only</label>
+          <label class="check"><input type="checkbox" id="tpslOn">Take Profit / Stop Loss</label>
+        </div>
+        <div id="tpslWrap" class="inrow" style="display:none">
+          <input id="tp" placeholder="TP Price" inputmode="decimal" spellcheck="false">
+          <input id="sl" placeholder="SL Price" inputmode="decimal" spellcheck="false">
+        </div>
+        <button class="go" id="goBtn">Place Order</button>
+        <div class="msg" id="msg"></div>
+        <div class="summary" id="summary"></div>
+        <div class="slipbox">Max Slippage <span style="flex:1"></span><input id="slip" value="1" inputmode="decimal">%</div>
+        <div class="note" id="unifyNote" style="display:none"></div>
+      </section>
+
+      <section class="panel acct">
+        <h4>Account Equity</h4>
+        <div class="kv">Equity <b id="aEquity">—</b></div>
+        <div class="kv">Available <b id="aFree">—</b></div>
+        <div class="kv">Unrealized PNL <b id="aPnl">—</b></div>
+        <div class="kv">Cross Margin Ratio <b id="aRatio">—</b></div>
+        <div class="kv">Maintenance Margin <b id="aMaint">—</b></div>
+        <div class="kv">Cross Account Leverage <b id="aLevA">—</b></div>
+        <div class="keys" style="margin-top:6px"><kbd>/</kbd> markets · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw · <kbd>F</kbd> fit · <kbd>A</kbd> alert · <kbd>Enter</kbd> places the order · click a book price for a limit, a book size to size up to it</div>
+      </section>
     </div>
+
+    <!-- history -->
+    <section class="panel hist">
+      <div class="tabs" id="bTabs">
+        <button data-t="bal">Balances</button>
+        <button data-t="pos" class="on">Positions <span id="nPos"></span></button>
+        <button data-t="ord">Open Orders <span id="nOrd"></span></button>
+        <button data-t="fills">Trade History</button>
+        <button data-t="alerts">Price Alerts <span id="nAl"></span></button>
+      </div>
+      <div class="postool" id="posTool" style="display:none"></div>
+      <div class="tablewrap" id="bBody"><div class="empty">sign in to see positions</div></div>
+    </section>
   </div>
 </div>
 
 <div class="overlay hidden" id="keyModal">
   <div class="card modal">
-    <h3>SIGN IN</h3>
+    <h3>Sign In</h3>
     <p>Paste the private key of the EVM wallet that holds your Hyperliquid account. It stays in this browser (the same local store the launcher uses) and signs orders here; it is never sent anywhere.</p>
     <input type="password" id="keyIn" placeholder="0x… private key" spellcheck="false" autocomplete="off">
     <div class="err" id="keyErr"></div>
-    <button class="go" id="keySave">SIGN IN</button>
+    <button class="go" id="keySave">Sign In</button>
     <a href="#" id="keySkip" style="font-size:12px;text-align:center">just look around</a>
   </div>
 </div>
@@ -365,18 +459,18 @@
   <div class="card cardbox">
     <div class="cardprev"><canvas id="cardCanvas" width="1200" height="675"></canvas></div>
     <div class="cardctl">
-      <div class="lbl">PNL CARD <span><a href="#" id="cardClose">close ✕</a></span></div>
+      <div class="lbl">PnL Card <span><a href="#" id="cardClose">close ✕</a></span></div>
       <div>
-        <div class="lbl">BACKGROUND</div>
+        <div class="lbl">Background</div>
         <div class="seg wrapseg" id="cardStyle"></div>
         <div id="cardImgWrap" style="display:none;margin-top:6px">
           <input type="file" id="cardImg" accept="image/*">
-          <div class="lbl" style="margin-top:6px">DARKEN <span id="cardDimVal"></span></div>
+          <div class="lbl" style="margin-top:6px">Darken <span id="cardDimVal"></span></div>
           <input type="range" id="cardDim" min="0" max="90">
         </div>
       </div>
       <div>
-        <div class="lbl">ACCENT</div>
+        <div class="lbl">Accent</div>
         <div class="swatches" id="cardAccent"></div>
       </div>
       <div class="checks">
@@ -386,15 +480,15 @@
         <label class="check"><input type="checkbox" id="cardLevOn">leverage</label>
       </div>
       <div id="cardLevWrap">
-        <div class="lbl">LEVERAGE ON THIS TRADE <span>Hyperliquid doesn't keep it for closed trades</span></div>
+        <div class="lbl">Leverage on this trade <span>Hyperliquid doesn't keep it for closed trades</span></div>
         <input id="cardLev" inputmode="decimal">
       </div>
-      <div><div class="lbl">BRAND</div><input id="cardBrand" maxlength="24" spellcheck="false"></div>
-      <div><div class="lbl">HANDLE</div><input id="cardHandle" maxlength="32" placeholder="@you" spellcheck="false"></div>
-      <div><div class="lbl">CAPTION</div><input id="cardCaption" maxlength="90" placeholder="optional"></div>
+      <div><div class="lbl">Brand</div><input id="cardBrand" maxlength="24" spellcheck="false"></div>
+      <div><div class="lbl">Handle</div><input id="cardHandle" maxlength="32" placeholder="@you" spellcheck="false"></div>
+      <div><div class="lbl">Caption</div><input id="cardCaption" maxlength="90" placeholder="optional"></div>
       <div class="inrow">
-        <button class="go" id="cardSave" style="flex:1">DOWNLOAD PNG</button>
-        <button class="go" id="cardCopy" style="flex:1;background:var(--text);color:#0b0d10">COPY</button>
+        <button class="go" id="cardSave" style="flex:1">Download PNG</button>
+        <button class="go" id="cardCopy" style="flex:1;background:var(--panel3);color:var(--text)">Copy</button>
       </div>
       <div class="msg" id="cardMsg"></div>
     </div>

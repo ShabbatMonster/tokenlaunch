@@ -63,6 +63,7 @@ function loadWallet() {
   C = { ...C, ...hlClients({ wallet, ws: false }), subs: C.subs };
   $('aWallet').textContent = wallet.address.slice(0, 6) + '…' + wallet.address.slice(-4);
   $('aWallet').title = wallet.address;
+  $('aWallet').classList.add('addr');
   return true;
 }
 function showKeyModal() { $('keyModal').classList.remove('hidden'); $('keyIn').focus(); }
@@ -97,13 +98,25 @@ function renderList() {
     && (dexFilter === 'all' || dexFilter === 'fav' || m.dex === dexFilter)
     && (!favOnly || favs.has(m.coin))
     && (!q || m.coin.toLowerCase().includes(q) || m.dexName.toLowerCase().includes(q)));
+  if ($('mktPop').classList.contains('hidden')) return;     // nothing to draw while it is shut
   $('mList').innerHTML = rows.length ? rows.slice(0, 400).map((m) => `
     <div class="mrow ${sel?.coin === m.coin ? 'on' : ''}" data-c="${esc(m.coin)}">
-      <div class="nm"><span data-fav="${esc(m.coin)}" style="color:${favs.has(m.coin) ? '#facc15' : 'var(--faint)'}">★</span> ${esc(m.label)}<small>${m.dex ? esc(m.dex) : ''}</small><span class="lev">${m.maxLeverage}×</span></div>
-      <div class="px">${px(m.mid)}</div>
-      <div class="ch ${cls(m.change)}">${pct(m.change)}</div>
+      <div class="nm"><span data-fav="${esc(m.coin)}" style="color:${favs.has(m.coin) ? '#facc15' : 'var(--faint)'}">★</span>${esc(m.label)}-${esc(m.collateral || 'USDC')}<span class="lev">${m.maxLeverage}x</span><small>${m.dex ? esc(m.dex) : ''}</small></div>
+      <div>${px(m.mid)}</div>
+      <div class="${cls(m.change)}">${pct(m.change)}</div>
+      <div class="${cls(m.funding)}">${(m.funding * 800).toFixed(4)}%</div>
+      <div>$${big(m.volume)}</div>
+      <div>$${big(m.oi * m.mark)}</div>
     </div>`).join('') : '<div class="empty">no market matches</div>';
 }
+function openMarkets(show) {
+  const pop = $('mktPop');
+  const open = show ?? pop.classList.contains('hidden');
+  pop.classList.toggle('hidden', !open);
+  if (open) { renderList(); $('mSearch').focus(); $('mSearch').select(); }
+}
+$('mktBtn').onclick = (e) => { e.stopPropagation(); openMarkets(); };
+document.addEventListener('click', (e) => { if (!e.target.closest('#mktPop') && !e.target.closest('#mktBtn')) $('mktPop').classList.add('hidden'); });
 $('mSearch').oninput = renderList;
 $('mFav').onchange = renderList;
 $('mList').onclick = (e) => {
@@ -113,21 +126,21 @@ $('mList').onclick = (e) => {
     favs.has(c) ? favs.delete(c) : favs.add(c);
     store.set('perps.favs', [...favs]); renderList(); return;
   }
-  const r = e.target.closest('.mrow'); if (r) select(r.dataset.c);
+  const r = e.target.closest('.mrow'); if (r) { openMarkets(false); select(r.dataset.c); }
 };
 
 function renderTicker() {
   const m = sel; if (!m) return;
-  $('tDex').textContent = `${m.dexName}${m.dex ? ' · HIP-3' : ''} · margin ${m.collateral}${m.onlyIsolated ? ' · isolated only' : ''}`;
-  $('tCoin').textContent = m.label + '-PERP';
+  $('tDex').textContent = `${m.dexName}${m.dex ? ' · HIP-3' : ''}${m.onlyIsolated ? ' · isolated only' : ''}`;
+  $('tCoin').textContent = `${m.label}-${m.collateral || 'USDC'}`;
   $('tPx').textContent = px(m.mid);
-  $('tPx').className = 'big ' + cls(m.change);
+  $('tPx').className = 'price ' + cls(m.change);
   $('tCh').innerHTML = `<span class="${cls(m.change)}">${pct(m.change)}</span>`;
   $('tOracle').textContent = px(m.oracle ?? m.mark);
   $('tFund').innerHTML = `<span class="${cls(m.funding)}">${(m.funding * 100).toFixed(4)}%</span>`;
   $('tOi').textContent = '$' + big(m.oi * m.mark);
   $('tVol').textContent = '$' + big(m.volume);
-  $('tLev').textContent = m.maxLeverage + '×';
+  $('tLev').textContent = m.maxLeverage + 'x';
   paintTitle();
 }
 
@@ -327,7 +340,7 @@ function drawBook() {
     const sp = a[0].px - b[0].px;
     // how lopsided the visible book is: >50% means more resting bids than asks
     const imb = cb / (ca + cb) * 100;
-    $('bookSpread').innerHTML = `spread ${px(sp)} (${(sp / a[0].px * 100).toFixed(3)}%) · <span class="${imb >= 50 ? 'up' : 'down'}">${imb.toFixed(0)}% bids</span>`;
+    $('bookSpread').innerHTML = `<span class="dim">Spread</span><span>${px(sp)}</span><span>${(sp / a[0].px * 100).toFixed(3)}%</span><span class="${imb >= 50 ? 'up' : 'down'}" title="share of the visible book that is bids">${imb.toFixed(0)}% bids</span>`;
   }
 }
 function drawTrades() {
@@ -393,6 +406,15 @@ async function loadAssetData() {
   cross = assetData.leverage.type === 'cross' && !m.onlyIsolated;
   paintLev(); paintSummary();
 }
+// the two lines above the size box, as on Hyperliquid
+function paintTicketAcct() {
+  if (!sel) return;
+  if (!wallet) { $('tkAvail').textContent = '—'; $('tkPos').textContent = '—'; return; }
+  const avail = assetData?.availableToTrade ? +assetData.availableToTrade[side === 'long' ? 0 : 1] : +(userStates.get(sel.dex)?.withdrawable ?? NaN);
+  $('tkAvail').textContent = isFinite(avail) ? usd(avail) + ' ' + (sel.collateral || 'USDC') : '—';
+  const p = positionFor(sel.coin);
+  $('tkPos').innerHTML = p ? `<span class="${+p.szi > 0 ? 'up' : 'down'}">${(+p.szi).toLocaleString('en-US', { maximumFractionDigits: 6 })} ${esc(sel.label)}</span>` : `0 ${esc(sel.label)}`;
+}
 function paintAccount() {
   let eq = 0, pnl = 0, free = 0;
   for (const st of userStates.values()) {
@@ -404,6 +426,17 @@ function paintAccount() {
   $('aEquity').textContent = wallet ? usd(eq) : '—';
   $('aFree').textContent = wallet ? usd(free) + (stable > 0.01 ? ` · spot ${usd(stable)}` : '') : '—';
   $('aPnl').innerHTML = wallet ? `<span class="${cls(pnl)}">${usd(pnl)}</span>` : '—';
+  // cross-margin health, summed over every exchange the account uses
+  let maint = 0, crossEq = 0, ntl = 0;
+  for (const st of userStates.values()) {
+    maint += +(st.crossMaintenanceMarginUsed ?? 0);
+    crossEq += +(st.crossMarginSummary?.accountValue ?? 0);
+    ntl += +(st.crossMarginSummary?.totalNtlPos ?? 0);
+  }
+  $('aRatio').textContent = wallet ? (crossEq > 0 ? (maint / crossEq * 100).toFixed(2) + '%' : '0.00%') : '—';
+  $('aMaint').textContent = wallet ? usd(maint) : '—';
+  $('aLevA').textContent = wallet ? (crossEq > 0 ? (ntl / crossEq).toFixed(2) + 'x' : '0.00x') : '—';
+  paintTicketAcct();
   const positions = [...userStates.entries()].flatMap(([dex, st]) => (st.assetPositions || []).filter((p) => +p.position.szi).map((p) => ({ dex, ...p.position })));
   const orders = [...userOrders.values()].flat();
   $('nPos').textContent = positions.length ? `(${positions.length})` : '';
@@ -416,32 +449,32 @@ function renderBottom(positions, orders) {
   if (tab === 'alerts') { renderAlertsTab(); return; }
   if (!wallet) { body.innerHTML = '<div class="empty"><a href="#" id="signLink">sign in</a> to see positions</div>'; $('signLink').onclick = (e) => { e.preventDefault(); showKeyModal(); }; return; }
   if (tab === 'pos') {
-    body.innerHTML = positions.length ? `<table class="table"><tr><th>MARKET</th><th>SIZE</th><th>VALUE</th><th>ENTRY</th><th>MARK</th><th>PNL (ROE)</th><th>LIQ.</th><th>MARGIN</th><th>TP / SL</th><th></th></tr>${positions.map((p) => {
+    body.innerHTML = positions.length ? `<table class="table"><tr><th>Coin</th><th>Size</th><th>Position Value</th><th>Entry Price</th><th>Mark Price</th><th>PNL (ROE %)</th><th>Liq. Price</th><th>Margin</th><th>TP / SL</th><th></th></tr>${positions.map((p) => {
       const m = byCoin.get(p.coin); const long = +p.szi > 0;
-      return `<tr><td><a href="#" data-sel="${esc(p.coin)}" style="color:var(--text)">${esc(p.coin)}</a> <span class="${long ? 'up' : 'down'}">${long ? 'LONG' : 'SHORT'} ${p.leverage.value}×</span></td>
+      return `<tr><td><a href="#" data-sel="${esc(p.coin)}" style="color:var(--text)">${esc(p.coin)}</a> <span class="${long ? 'up' : 'down'}">${long ? 'Long' : 'Short'} ${p.leverage.value}x</span></td>
         <td>${Math.abs(+p.szi)}</td><td>${usd(+p.positionValue)}</td><td>${px(+p.entryPx)}</td><td>${px(m?.mark)}</td>
         <td class="${cls(+p.unrealizedPnl)}">${usd(+p.unrealizedPnl)} (${pct(+p.returnOnEquity * 100, 1)})</td>
         <td>${p.liquidationPx ? px(+p.liquidationPx) : '—'}</td><td>${usd(+p.marginUsed)} ${p.leverage.type === 'cross' ? 'cross' : 'iso'}</td>
         <td>${esc(tpslFor(p.coin))}</td>
-        <td class="x"><button class="tbtn" data-card="pos|${esc(p.coin)}">CARD</button> <button class="tbtn" data-tpsl="${esc(p.coin)}">TP/SL</button> <button class="tbtn" data-close="${esc(p.coin)}|0.25">25%</button> <button class="tbtn" data-close="${esc(p.coin)}|0.5">50%</button> <button class="tbtn" data-close="${esc(p.coin)}|1">CLOSE</button></td></tr>`;
+        <td class="x"><button class="tbtn" data-card="pos|${esc(p.coin)}">Card</button> <button class="tbtn" data-tpsl="${esc(p.coin)}">TP/SL</button> <button class="tbtn" data-close="${esc(p.coin)}|0.25">25%</button> <button class="tbtn" data-close="${esc(p.coin)}|0.5">50%</button> <button class="tbtn" data-close="${esc(p.coin)}|1">Close</button></td></tr>`;
     }).join('')}</table>` : '<div class="empty">no open positions</div>';
   } else if (tab === 'fills') {
-    body.innerHTML = fills.length ? `<table class="table"><tr><th>TIME</th><th>MARKET</th><th>DIRECTION</th><th>SIZE</th><th>PRICE</th><th>FEE</th><th>CLOSED PNL</th><th></th></tr>${fills.slice(0, 100).map((f) => `<tr>
+    body.innerHTML = fills.length ? `<table class="table"><tr><th>Time</th><th>Coin</th><th>Direction</th><th>Size</th><th>Price</th><th>Fee</th><th>Closed PNL</th><th></th></tr>${fills.slice(0, 100).map((f) => `<tr>
         <td class="dim">${new Date(f.time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</td>
         <td>${esc(f.coin)}</td><td class="${f.side === 'B' ? 'up' : 'down'}">${esc(f.dir || (f.side === 'B' ? 'Buy' : 'Sell'))}${f.liquidation ? ' · LIQUIDATED' : ''}</td>
         <td>${esc(f.sz)}</td><td>${px(+f.px)}</td><td class="dim">${(+f.fee).toFixed(4)} ${esc(f.feeToken || '')}</td>
         <td class="${cls(+f.closedPnl)}">${+f.closedPnl ? usd(+f.closedPnl) : '—'}</td>
-        <td class="x">${+f.closedPnl ? `<button class="tbtn" data-card="fill|${esc(f.coin)}|${f.oid}">CARD</button>` : ''}</td></tr>`).join('')}</table>` : '<div class="empty">no fills yet</div>';
+        <td class="x">${+f.closedPnl ? `<button class="tbtn" data-card="fill|${esc(f.coin)}|${f.oid}">Card</button>` : ''}</td></tr>`).join('')}</table>` : '<div class="empty">no fills yet</div>';
   } else if (tab === 'ord') {
-    body.innerHTML = orders.length ? `<div style="padding:8px 10px 0;text-align:right"><button class="tbtn" data-cancelall="1">CANCEL ALL (${orders.length})</button></div><table class="table"><tr><th>MARKET</th><th>TYPE</th><th>SIDE</th><th>SIZE</th><th>PRICE</th><th>TRIGGER</th><th></th></tr>${orders.map((o) => `<tr>
+    body.innerHTML = orders.length ? `<div style="padding:8px 10px 0;text-align:right"><button class="tbtn" data-cancelall="1">Cancel All (${orders.length})</button></div><table class="table"><tr><th>Coin</th><th>Type</th><th>Direction</th><th>Size</th><th>Price</th><th>Trigger Conditions</th><th></th></tr>${orders.map((o) => `<tr>
         <td>${esc(o.coin)}</td><td>${esc(o.orderType || 'Limit')}${o.reduceOnly ? ' · reduce' : ''}</td>
-        <td class="${o.side === 'B' ? 'up' : 'down'}">${o.side === 'B' ? 'BUY' : 'SELL'}</td><td>${esc(o.sz)}</td><td>${px(+o.limitPx)}</td>
+        <td class="${o.side === 'B' ? 'up' : 'down'}">${o.side === 'B' ? 'Buy' : 'Sell'}</td><td>${esc(o.sz)}</td><td>${px(+o.limitPx)}</td>
         <td>${o.isTrigger ? esc(o.triggerCondition || px(+o.triggerPx)) : '—'}</td>
-        <td class="x"><button class="tbtn" data-cancel="${esc(o.coin)}|${o.oid}">CANCEL</button></td></tr>`).join('')}</table>` : '<div class="empty">no open orders</div>';
+        <td class="x"><button class="tbtn" data-cancel="${esc(o.coin)}|${o.oid}">Cancel</button></td></tr>`).join('')}</table>` : '<div class="empty">no open orders</div>';
   } else {
     const rows = [...userStates.entries()].filter(([, st]) => +st.marginSummary.accountValue).map(([dex, st]) => [`perps · ${dex || 'Hyperliquid'}`, +st.marginSummary.accountValue, +st.withdrawable]);
     const sp = (spot?.balances || []).filter((b) => +b.total).map((b) => [`spot · ${b.coin}`, +b.total, +b.total - +b.hold]);
-    body.innerHTML = rows.length + sp.length ? `<table class="table"><tr><th>ACCOUNT</th><th>TOTAL</th><th>AVAILABLE</th></tr>${[...rows, ...sp].map(([a, t, f]) => `<tr><td>${esc(a)}</td><td>${t.toLocaleString('en-US', { maximumFractionDigits: 4 })}</td><td>${f.toLocaleString('en-US', { maximumFractionDigits: 4 })}</td></tr>`).join('')}</table>
+    body.innerHTML = rows.length + sp.length ? `<table class="table"><tr><th>Account</th><th>Total</th><th>Available</th></tr>${[...rows, ...sp].map(([a, t, f]) => `<tr><td>${esc(a)}</td><td>${t.toLocaleString('en-US', { maximumFractionDigits: 4 })}</td><td>${f.toLocaleString('en-US', { maximumFractionDigits: 4 })}</td></tr>`).join('')}</table>
       <div class="empty">mode: <b>${esc(abstraction || '—')}</b>. Deposit at app.hyperliquid.xyz (USDC from Arbitrum) to fund this wallet.</div>`
       : '<div class="empty">this wallet has nothing on Hyperliquid yet. Deposit USDC at app.hyperliquid.xyz, then come back.</div>';
   }
@@ -494,11 +527,11 @@ function openTpsl(coin) {
   const long = +pos.szi > 0;
   const tool = $('posTool');
   tool.style.display = '';
-  tool.innerHTML = `<b>${esc(coin)}</b> <span class="${long ? 'up' : 'down'}">${long ? 'LONG' : 'SHORT'} ${Math.abs(+pos.szi)}</span>
+  tool.innerHTML = `<b>${esc(coin)}</b> <span class="${long ? 'up' : 'down'}">${long ? 'Long' : 'Short'} ${Math.abs(+pos.szi)}</span>
     <span class="dim">entry ${px(+pos.entryPx)} · mark ${px(m.mark)}</span>
     <input id="ptTp" placeholder="take-profit ${long ? '>' : '<'} ${px(m.mark)}" inputmode="decimal">
     <input id="ptSl" placeholder="stop-loss ${long ? '<' : '>'} ${px(m.mark)}" inputmode="decimal">
-    <button class="tbtn" id="ptSet">SET</button> <button class="tbtn" id="ptX">✕</button>
+    <button class="tbtn" id="ptSet">Set</button> <button class="tbtn" id="ptX">✕</button>
     <span class="dim" id="ptHint"></span>`;
   const hint = () => {
     const e = +pos.entryPx, sz = Math.abs(+pos.szi), dir = long ? 1 : -1;
@@ -625,10 +658,10 @@ function renderAlertsTab() {
   const body = $('bBody');
   if (!alerts.length) { body.innerHTML = '<div class="empty">no price alerts. Press <b>🔔 alert</b> next to the price, <kbd>A</kbd>, or shift-click the chart.</div>'; return; }
   const rows = alerts.slice().sort((a, b) => Math.abs(alertLine(a).dist ?? 1e9) - Math.abs(alertLine(b).dist ?? 1e9));
-  body.innerHTML = `<div style="padding:8px 10px 0;text-align:right"><button class="tbtn" data-clearalerts="1">REMOVE ALL (${alerts.length})</button></div><table class="table"><tr><th>MARKET</th><th>WHEN</th><th>PRICE</th><th>NOW</th><th>DISTANCE</th><th>TYPE</th><th>NOTE</th><th>SET</th><th></th></tr>${rows.map((a) => {
+  body.innerHTML = `<div style="padding:8px 10px 0;text-align:right"><button class="tbtn" data-clearalerts="1">Remove All (${alerts.length})</button></div><table class="table"><tr><th>Coin</th><th>When</th><th>Price</th><th>Now</th><th>Distance</th><th>Type</th><th>Note</th><th>Set</th><th></th></tr>${rows.map((a) => {
     const { label, now, dist } = alertLine(a);
     return `<tr><td><a href="#" data-sel="${esc(a.coin)}" style="color:var(--text)">${esc(label)}</a></td>
-      <td class="${a.dir === 'above' ? 'up' : 'down'}">${a.dir === 'above' ? '▲ rises to' : '▼ falls to'}</td><td>${px(a.px)}</td><td>${px(now)}</td>
+      <td class="${a.dir === 'above' ? 'up' : 'down'}">${a.dir === 'above' ? '▲ Rises to' : '▼ Falls to'}</td><td>${px(a.px)}</td><td>${px(now)}</td>
       <td class="dim">${dist == null ? '—' : pct(dist, Math.abs(dist) < 0.1 ? 3 : 2)}</td><td>${a.repeat ? (a.armed ? 'repeat' : 'repeat · re-arms when back') : 'once'}</td>
       <td class="dim">${esc(a.note || '')}</td>
       <td class="dim">${new Date(a.created).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}</td>
@@ -733,9 +766,10 @@ $('oType').onclick = (e) => { const b = e.target.closest('button'); if (b) setTy
 $('useMid').onclick = (e) => { e.preventDefault(); if (sel) { $('limitPx').value = sel.mid; paintSummary(); } };
 function paintLev() {
   $('levVal').textContent = $('lev').value;
-  $('marginMode').textContent = cross ? 'cross' : 'isolated';
+  $('marginMode').textContent = cross ? 'Cross' : 'Isolated';
 }
 $('lev').oninput = () => { paintLev(); paintSummary(); };
+$('levPill').onclick = () => $('levBox').classList.toggle('hidden');
 $('marginMode').onclick = (e) => {
   e.preventDefault();
   if (sel?.onlyIsolated) { cross = false; } else cross = !cross;
@@ -765,8 +799,9 @@ function ticketSize() {
 const feeRate = () => +(otype === 'market' ? fees?.userCrossRate ?? 0.00045 : fees?.userAddRate ?? 0.00015);
 function paintSummary() {
   const go = $('goBtn');
-  const label = (side === 'long' ? 'LONG ' : 'SHORT ') + (sel?.label || '');
-  go.textContent = wallet ? label : 'SIGN IN TO TRADE';
+  go.textContent = wallet ? 'Place Order' : 'Sign In to Trade';
+  go.title = (side === 'long' ? 'Buy / Long ' : 'Sell / Short ') + (sel?.label || '');
+  paintTicketAcct();
   const el = $('summary');
   if (!sel) { el.innerHTML = ''; return; }
   const lev = +$('lev').value;
@@ -776,12 +811,12 @@ function paintSummary() {
   const liq = side === 'long' ? refPx() * (1 - liqDist * 0.9) : refPx() * (1 + liqDist * 0.9);
   $('sizeHint').textContent = s ? `${s} ${sel.label}` : `min lot ${1 / 10 ** sel.szDecimals}`;
   el.innerHTML = `
-    <div>order value <b>${usd(notional)}</b></div>
-    <div>margin required <b>${usd(notional / lev)}</b></div>
-    <div>${otype === 'market' ? `fills up to <b>${px(sel.mid * (side === 'long' ? 1 + slip() / 100 : 1 - slip() / 100))}</b>` : `rests at <b>${px(refPx())}</b>`}</div>
-    <div>est. liquidation <b>~${px(liq)}</b></div>
-    ${!sel.dex ? `<div>fee (${otype === 'market' ? 'taker' : 'maker'}) <b>~${usd(notional * feeRate(), notional * feeRate() < 1 ? 3 : 2)}</b></div>` : `<div>fee <b>set by ${esc(sel.dexName)}</b></div>`}
-    ${assetData ? `<div>max this side <b>${(+assetData.maxTradeSzs[side === 'long' ? 0 : 1]).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${esc(sel.label)}</b></div>` : ''}`;
+    <div>Liquidation Price <b>${notional ? '~' + px(liq) : 'N/A'}</b></div>
+    <div>Order Value <b>${notional ? usd(notional) : 'N/A'}</b></div>
+    <div>Margin Required <b>${notional ? usd(notional / lev) : 'N/A'}</b></div>
+    <div>${otype === 'market' ? `Fills Up To <b>${px(sel.mid * (side === 'long' ? 1 + slip() / 100 : 1 - slip() / 100))}</b>` : `Rests At <b>${px(refPx())}</b>`}</div>
+    ${!sel.dex ? `<div>Fees <b>${(feeRate() * 100).toFixed(4)}%${notional ? ' · ~' + usd(notional * feeRate(), notional * feeRate() < 1 ? 3 : 2) : ''}</b></div>` : `<div>Fees <b>set by ${esc(sel.dexName)}</b></div>`}
+    ${assetData ? `<div>Max Size This Side <b>${(+assetData.maxTradeSzs[side === 'long' ? 0 : 1]).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${esc(sel.label)}</b></div>` : ''}`;
   paintUnify();
 }
 
@@ -952,16 +987,16 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('cardModal').classList.contains('hidden')) { closeCard(); return; }
   if (e.key === 'Escape' && !$('alertPanel').classList.contains('hidden')) { toggleAlertPanel(false); document.activeElement?.blur(); return; }
   if (typing) {
-    if (e.key === 'Escape') document.activeElement.blur();
+    if (e.key === 'Escape') { document.activeElement.blur(); openMarkets(false); }
     if (e.key === 'Enter' && ['size', 'limitPx', 'tp', 'sl'].includes(document.activeElement.id)) { e.preventDefault(); $('goBtn').click(); }
     if (e.key === 'Enter' && ['alertPx', 'alertNote'].includes(document.activeElement.id)) { e.preventDefault(); addFromPanel(); }
     if (e.key === 'Enter' && document.activeElement.id === 'mSearch') {
-      const first = $('mList').querySelector('.mrow'); if (first) { select(first.dataset.c); $('size').focus(); }
+      const first = $('mList').querySelector('.mrow'); if (first) { openMarkets(false); select(first.dataset.c); $('size').focus(); }
     }
     return;
   }
   const k = e.key.toLowerCase();
-  if (k === '/') { e.preventDefault(); $('mSearch').focus(); $('mSearch').select(); }
+  if (k === '/') { e.preventDefault(); openMarkets(true); }
   else if (k === 'b') setSide('long');
   else if (k === 's') setSide('short');
   else if (k === 'm') setType('market');
@@ -977,7 +1012,8 @@ setInterval(() => {
   if (!sel) return;
   const ms = 3600e3 - (Date.now() % 3600e3);
   const mm = String(Math.floor(ms / 60e3)).padStart(2, '0'), ss = String(Math.floor(ms / 1e3) % 60).padStart(2, '0');
-  $('tNext').innerHTML = `${mm}:${ss} <span class="dim" style="font-size:11px">${pct(sel.funding * 24 * 365 * 100, 1)}/yr</span>`;
+  $('tNext').textContent = `00:${mm}:${ss}`;
+  $('tNext').title = `${pct(sel.funding * 24 * 365 * 100, 1)} a year at this rate`;
 }, 1000);
 
 // --- boot ----------------------------------------------------------------------

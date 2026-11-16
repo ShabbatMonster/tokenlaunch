@@ -8,7 +8,7 @@ import {
 } from 'lightweight-charts';
 import { sma, ema, bollinger, rsi, macd, vwap, stochRsi, atr, heikinAshi } from './indicators.js';
 
-const UP = '#4ade80', DOWN = '#f87171';
+const UP = '#1fa67d', DOWN = '#ed7088';   // Hyperliquid's long / short
 const SUB_H = 110;            // px per indicator pane
 export const INDICATORS = {
   vol:   { label: 'Volume', pane: false, params: [] },
@@ -54,12 +54,12 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
 
   const chart = createChart(el, {
     autoSize: true,
-    layout: { background: { color: 'transparent' }, textColor: '#8a93a1', fontFamily: 'ui-monospace, "Cascadia Mono", Consolas, monospace', fontSize: 11, panes: { separatorColor: '#262b33', separatorHoverColor: '#3b4453' } },
-    grid: { vertLines: { color: '#1a1e24' }, horzLines: { color: '#1a1e24' } },
-    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#5b6370', labelBackgroundColor: '#262b33' }, horzLine: { color: '#5b6370', labelBackgroundColor: '#262b33' } },
-    rightPriceScale: { borderColor: '#262b33' },
+    layout: { background: { color: 'transparent' }, textColor: '#949e9c', fontFamily: 'Inter, ui-sans-serif, system-ui, "Segoe UI", sans-serif', fontSize: 11, panes: { separatorColor: '#273035', separatorHoverColor: '#3b4453' } },
+    grid: { vertLines: { color: '#16232a' }, horzLines: { color: '#16232a' } },
+    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#5e6a6d', labelBackgroundColor: '#273035' }, horzLine: { color: '#5e6a6d', labelBackgroundColor: '#273035' } },
+    rightPriceScale: { borderColor: '#273035' },
     timeScale: {
-      borderColor: '#262b33', timeVisible: true, secondsVisible: false, rightOffset: 6, barSpacing: 8,
+      borderColor: '#273035', timeVisible: true, secondsVisible: false, rightOffset: 6, barSpacing: 8,
       tickMarkFormatter: (t, type) => {
         const d = new Date(t * 1000);
         if (type <= 1) return type === 0 ? String(d.getFullYear()) : d.toLocaleDateString(undefined, { month: 'short' });
@@ -78,8 +78,8 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
   function buildMain() {
     if (main) { chart.removeSeries(main); main = null; markers = null; priceLines = []; userLines.forEach((u) => { u.line = null; }); }
     const base = { priceLineVisible: true, lastValueVisible: true };
-    if (opts.type === 'line') main = chart.addSeries(LineSeries, { ...base, color: '#e6e9ee', lineWidth: 2 });
-    else if (opts.type === 'area') main = chart.addSeries(AreaSeries, { ...base, lineColor: '#e6e9ee', topColor: 'rgba(230,233,238,.18)', bottomColor: 'rgba(230,233,238,0)', lineWidth: 2 });
+    if (opts.type === 'line') main = chart.addSeries(LineSeries, { ...base, color: '#50d2c1', lineWidth: 2 });
+    else if (opts.type === 'area') main = chart.addSeries(AreaSeries, { ...base, lineColor: '#50d2c1', topColor: 'rgba(80,210,193,.18)', bottomColor: 'rgba(80,210,193,0)', lineWidth: 2 });
     else main = chart.addSeries(CandlestickSeries, { ...base, upColor: UP, downColor: DOWN, borderVisible: false, wickUpColor: UP, wickDownColor: DOWN });
     markers = createSeriesMarkers(main, []);
     accountKey = '';
@@ -104,8 +104,8 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
     }
   }
   const toPts = (vals, mapper = (v) => ({ value: v })) => vals.map((v, i) => (v == null ? { time: sec(candles[i].t) } : { time: sec(candles[i].t), ...mapper(v, i) }));
-  const volColor = (i) => (candles[i].c >= candles[i].o ? 'rgba(74,222,128,.35)' : 'rgba(248,113,113,.35)');
-  const histColor = (v) => (v >= 0 ? 'rgba(74,222,128,.6)' : 'rgba(248,113,113,.6)');
+  const volColor = (i) => (candles[i].c >= candles[i].o ? 'rgba(31,166,125,.4)' : 'rgba(237,112,136,.4)');
+  const histColor = (v) => (v >= 0 ? 'rgba(31,166,125,.65)' : 'rgba(237,112,136,.65)');
 
   function buildIndicators() {
     for (const x of ind) for (const s of x.series) chart.removeSeries(s);
@@ -131,7 +131,7 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
         series = [line(def.color, key === 'rsi' || key === 'atr' ? { lastValueVisible: true } : {})];
       }
       if (key === 'rsi' || key === 'stoch') {
-        for (const lv of key === 'rsi' ? [70, 30] : [80, 20]) series[0].createPriceLine({ price: lv, color: '#3b4453', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false });
+        for (const lv of key === 'rsi' ? [70, 30] : [80, 20]) series[0].createPriceLine({ price: lv, color: '#2c3b42', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false });
       }
       ind.push({ key, series });
     }
