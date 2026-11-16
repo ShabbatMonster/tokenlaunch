@@ -238,3 +238,17 @@ export function positionTpslOrders(market, szi, { tp, sl } = {}) {
   if (!orders.length) throw new Error('enter a take-profit or a stop-loss price');
   return { orders, grouping: 'positionTpsl' };
 }
+
+/// Live profit / loss of an open position at `price`: dollars, the return on
+/// the margin it uses (Hyperliquid's ROE) and a short label for the chart line,
+/// e.g. "LONG 0.05 · +$12.30 (+4.52%)". null without a position or a price.
+export function positionPnl(pos, price) {
+  const szi = +pos?.szi, entry = +pos?.entryPx;
+  if (!szi || !(entry > 0) || !(price > 0)) return null;
+  const value = szi * (price - entry);
+  const margin = +pos.marginUsed > 0 ? +pos.marginUsed : Math.abs(szi) * entry / Math.max(1, +pos.leverage?.value || 1);
+  const roe = (value / margin) * 100;
+  const usdTxt = (value < 0 ? '-$' : '+$') + Math.abs(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const size = Math.abs(szi).toLocaleString('en-US', { maximumFractionDigits: 6 });
+  return { value, roe, text: `${szi > 0 ? 'LONG' : 'SHORT'} ${size} · ${usdTxt} (${roe >= 0 ? '+' : ''}${roe.toFixed(2)}%)` };
+}

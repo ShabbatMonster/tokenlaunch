@@ -6,7 +6,7 @@
 import { privateKeyToAccount } from 'viem/accounts';
 import {
   hlClients, hlMarkets, applyCtxs, sizeForUsd, buildOrders, orderOutcome, hlError, formatSize, formatPrice,
-  mergeBook, partialCloseOrder, positionTpslOrders,
+  mergeBook, partialCloseOrder, positionTpslOrders, positionPnl,
 } from './hyperliquid.js';
 import {
   CARD_DEFAULTS, CARD_STYLES, drawPnlCard, cardFromPosition, closedTrades, closedRoe,
@@ -703,6 +703,7 @@ function paintTitle(now = false) {
   const t = Date.now();
   if (!now && t - titleAt < 200) { if (!titleTimer) titleTimer = setTimeout(() => { titleTimer = 0; paintTitle(); }, 200); return; }
   titleAt = t;
+  pc.setPnl(positionPnl(positionFor(sel.coin), livePx || sel.mid));
   if (flash && t < flash.until) {
     // alternate the alert and the price each second so both stay visible
     document.title = Math.floor(t / 1000) % 2 ? flash.text : flash.text + ' · ' + px(livePx || sel.mid);

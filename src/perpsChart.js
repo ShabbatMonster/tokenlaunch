@@ -71,6 +71,7 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
   let loadingOlder = false, noMoreOlder = false;
   let drawMode = false;
   let accountKey = '';
+  let entryLine = null, pnl = null;   // the position line and its live PnL label
 
   const chart = createChart(el, {
     autoSize: true,
@@ -103,7 +104,7 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
   // --- the price series and indicators ------------------------------------------
   function shown() { return opts.type === 'heikin' ? heikinAshi(candles) : candles; }
   function buildMain() {
-    if (main) { chart.removeSeries(main); main = null; markers = null; priceLines = []; userLines.forEach((u) => { u.line = null; }); }
+    if (main) { chart.removeSeries(main); main = null; markers = null; priceLines = []; entryLine = null; userLines.forEach((u) => { u.line = null; }); }
     const base = { priceLineVisible: true, lastValueVisible: true };
     if (opts.type === 'line') main = chart.addSeries(LineSeries, { ...base, color: T.line, lineWidth: 2 });
     else if (opts.type === 'area') main = chart.addSeries(AreaSeries, { ...base, lineColor: T.line, topColor: T.areaTop, bottomColor: T.areaBot, lineWidth: 2 });
@@ -263,13 +264,25 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
     if (key === accountKey) return;
     accountKey = key;
     for (const l of priceLines) main.removePriceLine(l);
-    priceLines = [];
-    const add = (price, color, title, style = LineStyle.Dashed) => priceLines.push(main.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title }));
-    if (entry) add(entry, T.entry, `entry ${long ? 'long' : 'short'}`, LineStyle.Solid);
+    priceLines = []; entryLine = null;
+    const add = (price, color, title, style = LineStyle.Dashed, width = 1) => { const l = main.createPriceLine({ price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title }); priceLines.push(l); return l; };
+    if (entry) { entryLine = add(entry, T.entry, `entry ${long ? 'long' : 'short'}`, LineStyle.Solid, 2); applyPnl(); }
     if (liq) add(liq, T.liq, 'liquidation');
     if (opts.showOrders) for (const o of orders) add(o.px, o.color, o.label, LineStyle.Dotted);
     // price alerts always show: they are this browser's, not the exchange's
     for (const a of alerts) add(a.px, T.alert, a.label, LineStyle.LargeDashed);
+  }
+  // The active PnL line: the entry line, relabelled with the live profit or loss
+  // and coloured by its sign. A label change is one applyOptions on one line,
+  // so this can run on every price tick.
+  function applyPnl() {
+    if (!entryLine || !pnl) return;
+    entryLine.applyOptions({ title: pnl.text, color: pnl.value >= 0 ? T.up : T.down, axisLabelColor: pnl.value >= 0 ? T.up : T.down });
+  }
+  function setPnl(p) {
+    const same = pnl && p && pnl.text === p.text && Math.sign(pnl.value) === Math.sign(p.value);
+    pnl = p;
+    if (!same) applyPnl();
   }
   function setFills(list) { fillMarks = list; applyFillMarkers(); }
   function applyFillMarkers() {
@@ -326,7 +339,7 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
       tickIndicators();
       paintLegend();
     },
-    setAccount, setFills,
+    setAccount, setFills, setPnl,
     setDrawMode(on) { drawMode = on; el.style.cursor = on ? 'crosshair' : ''; },
     setUserLines(prices) {
       for (const u of userLines) if (u.line && main) main.removePriceLine(u.line);

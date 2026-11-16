@@ -15,6 +15,7 @@ import {
   mergeBook, partialCloseOrder, positionTpslOrders,
 } from '../../src/hyperliquid.js';
 import { cardFromPosition, closedTrades, closedRoe } from '../../src/pnlCard.js';
+import { positionPnl } from '../../src/hyperliquid.js';
 
 const fails = [];
 const check = (ok, label, detail = '') => { console.log((ok ? 'PASS' : 'FAIL') + '  ' + label + (detail ? '  — ' + detail : '')); if (!ok) fails.push(label); };
@@ -150,6 +151,18 @@ for (const [label, fn] of [
 ]) {
   const r = await fn().then(() => null, (e) => e);
   check(r && named(r), `signing: Hyperliquid recovers our own address from ${label}`, r ? hlError(r).slice(0, 90) : 'it was ACCEPTED from an empty wallet?');
+}
+
+// --- the active PnL line on the chart ---------------------------------------------
+{
+  const long = { szi: '0.05', entryPx: '64000', marginUsed: '320', leverage: { value: 10 } };
+  const a = positionPnl(long, 64246);          // +246 a coin on 0.05 = +12.30 on 320 margin
+  check(Math.abs(a.value - 12.3) < 1e-9 && Math.abs(a.roe - 3.84375) < 1e-9 && a.text === 'LONG 0.05 · +$12.30 (+3.84%)', 'PnL line: a long in profit', a.text);
+  const b = positionPnl({ szi: '-2', entryPx: '150', marginUsed: '60', leverage: { value: 5 } }, 153);
+  check(b.value === -6 && b.text === 'SHORT 2 · -$6.00 (-10.00%)', 'PnL line: a short the price has moved against', b.text);
+  const c = positionPnl({ szi: '1', entryPx: '100', marginUsed: '0', leverage: { value: 4 } }, 101);
+  check(Math.abs(c.roe - 4) < 1e-9, 'PnL line: ROE falls back to size × entry / leverage when margin is not given');
+  check(positionPnl(null, 100) === null && positionPnl({ szi: '0', entryPx: '1' }, 1) === null && positionPnl(long, NaN) === null, 'PnL line: nothing without a position or a price');
 }
 
 console.log('');
