@@ -11,7 +11,7 @@ import {
 import {
   CARD_DEFAULTS, CARD_STYLES, drawPnlCard, cardFromPosition, closedTrades, closedRoe,
 } from './pnlCard.js';
-import { createPerpsChart, INDICATORS, CHART_DEFAULTS } from './perpsChart.js';
+import { createPerpsChart, INDICATORS, CHART_DEFAULTS, CHART_THEMES } from './perpsChart.js';
 import { parseTarget, makeAlert, checkAlerts, titleText, createSound } from './priceAlerts.js';
 
 const $ = (id) => document.getElementById(id);
@@ -153,6 +153,7 @@ async function select(coin) {
   renderList(); renderTicker(); paintAlertPanel();
   const lev = $('lev');
   lev.max = m.maxLeverage;
+  $('levMax').textContent = m.maxLeverage + 'x max';
   if (+lev.value > m.maxLeverage) lev.value = m.maxLeverage;
   if (m.onlyIsolated) cross = false;
   paintLev();
@@ -193,6 +194,21 @@ const pc = createPerpsChart($('chart'), $('chartLegend'), {
   },
 });
 pc.setOptions(chartOpts);
+
+// --- theme -----------------------------------------------------------------------
+// 'paper' (cream) or 'dark' (Hyperliquid teal). The page picks it before first
+// paint from the same key (see the inline script in perps.html).
+let theme = store.get('perps.theme', 'paper') === 'dark' ? 'dark' : 'paper';
+const CT = () => CHART_THEMES[theme];
+function applyTheme() {
+  document.documentElement.dataset.theme = theme;
+  $('themeBtn').textContent = theme === 'paper' ? '☾' : '☀';
+  pc.setTheme(theme);
+  if (sel) { paintChartAccount(true); const lines = store.get('perps.lines', {})[sel.coin]; if (lines) pc.setUserLines(lines); }
+  paintChartBar();
+}
+$('themeBtn').onclick = () => { theme = theme === 'paper' ? 'dark' : 'paper'; store.set('perps.theme', theme); applyTheme(); };
+applyTheme();
 pc.onLinesChange = (prices) => {
   if (!sel) return;
   const all = store.get('perps.lines', {});
@@ -210,7 +226,7 @@ function paintChartBar() {
   $('chartDraw').classList.toggle('on', drawing);
   $('indPanel').innerHTML = Object.entries(INDICATORS).map(([k, d]) => `
     <label class="indrow"><input type="checkbox" data-ind="${k}" ${chartOpts.on[k] ? 'checked' : ''}>
-      <span style="color:${d.color || 'var(--text)'}">${d.label}</span>
+      <span style="color:${CHART_THEMES[theme].ind[k] || d.color || 'var(--text)'}">${d.label}</span>
       ${d.params.map(([p]) => `<input class="indp" data-ind="${k}" data-p="${p}" value="${esc(chartOpts.params[k]?.[p])}" title="${p}" inputmode="decimal">`).join('')}
     </label>`).join('')
     + `<label class="indrow"><input type="checkbox" id="chOrders" ${chartOpts.showOrders ? 'checked' : ''}><span>position &amp; order lines</span></label>`
@@ -264,7 +280,7 @@ function paintChartAccount(force = false) {
     const tp = trig && /take profit/i.test(o.orderType), slo = trig && /stop/i.test(o.orderType);
     return {
       px: +(trig ? o.triggerPx : o.limitPx),
-      color: tp ? '#4ade80' : slo ? '#f87171' : o.side === 'B' ? 'rgba(74,222,128,.7)' : 'rgba(248,113,113,.7)',
+      color: tp ? CT().up : slo ? CT().down : o.side === 'B' ? CT().histUp : CT().histDown,
       label: tp ? 'TP' : slo ? 'SL' : `${o.side === 'B' ? 'buy' : 'sell'} ${o.sz}`,
     };
   });

@@ -8,7 +8,27 @@ import {
 } from 'lightweight-charts';
 import { sma, ema, bollinger, rsi, macd, vwap, stochRsi, atr, heikinAshi } from './indicators.js';
 
-const UP = '#1fa67d', DOWN = '#ed7088';   // Hyperliquid's long / short
+// Two looks: 'dark' (Hyperliquid's colours) and 'paper' (cream, ink-dark line,
+// muted green / brick red). Indicator colours are per theme because the bright
+// ones that read on dark vanish on cream.
+export const CHART_THEMES = {
+  dark: {
+    up: '#1fa67d', down: '#ed7088', volUp: 'rgba(31,166,125,.4)', volDown: 'rgba(237,112,136,.4)', histUp: 'rgba(31,166,125,.65)', histDown: 'rgba(237,112,136,.65)',
+    text: '#949e9c', grid: '#16232a', gridStyle: LineStyle.Solid, vert: true, border: '#273035', cross: '#5e6a6d', sepHover: '#3b4453',
+    line: '#50d2c1', areaTop: 'rgba(80,210,193,.18)', areaBot: 'rgba(80,210,193,0)', userLine: '#e6e9ee', guide: '#2c3b42',
+    entry: '#a5b4fc', liq: '#f97316', alert: '#facc15', alt: '#fb923c', ind: {},
+  },
+  paper: {
+    up: '#2f7a4a', down: '#b5483f', volUp: 'rgba(47,122,74,.28)', volDown: 'rgba(181,72,63,.28)', histUp: 'rgba(47,122,74,.6)', histDown: 'rgba(181,72,63,.6)',
+    text: '#8a7d64', grid: 'rgba(110,90,50,.16)', gridStyle: LineStyle.Dashed, vert: false, border: '#dccfb3', cross: '#a3946f', sepHover: '#cbbd9c',
+    line: '#2a2317', areaTop: 'rgba(120,96,58,.20)', areaBot: 'rgba(120,96,58,.03)', userLine: '#2a2317', guide: '#d6c8a8',
+    entry: '#4f46e5', liq: '#c2410c', alert: '#a16207', alt: '#c2410c',
+    ind: { ma1: '#a16207', ma2: '#c2410c', ema1: '#2563eb', ema2: '#7c3aed', bb: '#6b7280', vwap: '#db2777', rsi: '#7c3aed', macd: '#2563eb', stoch: '#0e7490', atr: '#b45309' },
+  },
+};
+let T = CHART_THEMES.dark;
+const UP = () => T.up, DOWN = () => T.down;
+const indColor = (key) => T.ind[key] || INDICATORS[key]?.color;
 const SUB_H = 110;            // px per indicator pane
 export const INDICATORS = {
   vol:   { label: 'Volume', pane: false, params: [] },
@@ -54,12 +74,10 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
 
   const chart = createChart(el, {
     autoSize: true,
-    layout: { background: { color: 'transparent' }, textColor: '#949e9c', fontFamily: 'Inter, ui-sans-serif, system-ui, "Segoe UI", sans-serif', fontSize: 11, panes: { separatorColor: '#273035', separatorHoverColor: '#3b4453' } },
-    grid: { vertLines: { color: '#16232a' }, horzLines: { color: '#16232a' } },
-    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#5e6a6d', labelBackgroundColor: '#273035' }, horzLine: { color: '#5e6a6d', labelBackgroundColor: '#273035' } },
-    rightPriceScale: { borderColor: '#273035' },
+    layout: { background: { color: 'transparent' }, fontFamily: 'Inter, ui-sans-serif, system-ui, "Segoe UI", sans-serif', fontSize: 11 },
+    crosshair: { mode: CrosshairMode.Normal },
     timeScale: {
-      borderColor: '#273035', timeVisible: true, secondsVisible: false, rightOffset: 6, barSpacing: 8,
+      timeVisible: true, secondsVisible: false, rightOffset: 6, barSpacing: 8,
       tickMarkFormatter: (t, type) => {
         const d = new Date(t * 1000);
         if (type <= 1) return type === 0 ? String(d.getFullYear()) : d.toLocaleDateString(undefined, { month: 'short' });
@@ -73,14 +91,23 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
     },
   });
 
+  const themeOptions = () => ({
+    layout: { textColor: T.text, panes: { separatorColor: T.border, separatorHoverColor: T.sepHover } },
+    grid: { vertLines: { color: T.grid, style: T.gridStyle, visible: T.vert }, horzLines: { color: T.grid, style: T.gridStyle } },
+    crosshair: { vertLine: { color: T.cross, labelBackgroundColor: T.cross }, horzLine: { color: T.cross, labelBackgroundColor: T.cross } },
+    rightPriceScale: { borderColor: T.border },
+    timeScale: { borderColor: T.border },
+  });
+  chart.applyOptions(themeOptions());
+
   // --- the price series and indicators ------------------------------------------
   function shown() { return opts.type === 'heikin' ? heikinAshi(candles) : candles; }
   function buildMain() {
     if (main) { chart.removeSeries(main); main = null; markers = null; priceLines = []; userLines.forEach((u) => { u.line = null; }); }
     const base = { priceLineVisible: true, lastValueVisible: true };
-    if (opts.type === 'line') main = chart.addSeries(LineSeries, { ...base, color: '#50d2c1', lineWidth: 2 });
-    else if (opts.type === 'area') main = chart.addSeries(AreaSeries, { ...base, lineColor: '#50d2c1', topColor: 'rgba(80,210,193,.18)', bottomColor: 'rgba(80,210,193,0)', lineWidth: 2 });
-    else main = chart.addSeries(CandlestickSeries, { ...base, upColor: UP, downColor: DOWN, borderVisible: false, wickUpColor: UP, wickDownColor: DOWN });
+    if (opts.type === 'line') main = chart.addSeries(LineSeries, { ...base, color: T.line, lineWidth: 2 });
+    else if (opts.type === 'area') main = chart.addSeries(AreaSeries, { ...base, lineColor: T.line, topColor: T.areaTop, bottomColor: T.areaBot, lineWidth: 2 });
+    else main = chart.addSeries(CandlestickSeries, { ...base, upColor: UP(), downColor: DOWN(), borderVisible: false, wickUpColor: UP(), wickDownColor: DOWN() });
     markers = createSeriesMarkers(main, []);
     accountKey = '';
     for (const u of userLines) u.line = main.createPriceLine(userLineOpts(u.price));
@@ -104,8 +131,8 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
     }
   }
   const toPts = (vals, mapper = (v) => ({ value: v })) => vals.map((v, i) => (v == null ? { time: sec(candles[i].t) } : { time: sec(candles[i].t), ...mapper(v, i) }));
-  const volColor = (i) => (candles[i].c >= candles[i].o ? 'rgba(31,166,125,.4)' : 'rgba(237,112,136,.4)');
-  const histColor = (v) => (v >= 0 ? 'rgba(31,166,125,.65)' : 'rgba(237,112,136,.65)');
+  const volColor = (i) => (candles[i].c >= candles[i].o ? T.volUp : T.volDown);
+  const histColor = (v) => (v >= 0 ? T.histUp : T.histDown);
 
   function buildIndicators() {
     for (const x of ind) for (const s of x.series) chart.removeSeries(s);
@@ -122,16 +149,16 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
         series = [chart.addSeries(HistogramSeries, { priceScaleId: 'vol', priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 0)];
         series[0].priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
       } else if (key === 'bb') {
-        series = [line(def.color, { lineStyle: LineStyle.Dashed }), line(def.color, { lineWidth: 1 }), line(def.color, { lineStyle: LineStyle.Dashed })];
+        series = [line(indColor(key), { lineStyle: LineStyle.Dashed }), line(indColor(key), { lineWidth: 1 }), line(indColor(key), { lineStyle: LineStyle.Dashed })];
       } else if (key === 'macd') {
-        series = [chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pi), line('#60a5fa'), line('#fb923c')];
+        series = [chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pi), line(indColor('macd')), line(T.alt)];
       } else if (key === 'stoch') {
-        series = [line('#22d3ee'), line('#fb923c')];
+        series = [line(indColor('stoch')), line(T.alt)];
       } else {
-        series = [line(def.color, key === 'rsi' || key === 'atr' ? { lastValueVisible: true } : {})];
+        series = [line(indColor(key), key === 'rsi' || key === 'atr' ? { lastValueVisible: true } : {})];
       }
       if (key === 'rsi' || key === 'stoch') {
-        for (const lv of key === 'rsi' ? [70, 30] : [80, 20]) series[0].createPriceLine({ price: lv, color: '#2c3b42', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false });
+        for (const lv of key === 'rsi' ? [70, 30] : [80, 20]) series[0].createPriceLine({ price: lv, color: T.guide, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false });
       }
       ind.push({ key, series });
     }
@@ -186,7 +213,7 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
       const d = INDICATORS[x.key];
       const vals = computeInd(x.key).map((a) => a[idx]);
       const ps = d.params.map(([k]) => opts.params[x.key]?.[k]).join(',');
-      h += `<span style="color:${d.color}">${d.label}${ps ? `(${ps})` : ''} <b>${vals.map((v) => fmt(v)).join(' / ')}</b></span>`;
+      h += `<span style="color:${indColor(x.key)}">${d.label}${ps ? `(${ps})` : ''} <b>${vals.map((v) => fmt(v)).join(' / ')}</b></span>`;
     }
     legend.innerHTML = h;
   }
@@ -214,7 +241,7 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
   });
 
   // --- drawn lines ------------------------------------------------------------------
-  const userLineOpts = (price) => ({ price, color: '#e6e9ee', lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: '' });
+  const userLineOpts = (price) => ({ price, color: T.userLine, lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: '' });
   chart.subscribeClick((p) => {
     if (!p.point || !main) return;
     const price = main.coordinateToPrice(p.point.y);
@@ -238,11 +265,11 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
     for (const l of priceLines) main.removePriceLine(l);
     priceLines = [];
     const add = (price, color, title, style = LineStyle.Dashed) => priceLines.push(main.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title }));
-    if (entry) add(entry, '#a5b4fc', `entry ${long ? 'long' : 'short'}`, LineStyle.Solid);
-    if (liq) add(liq, '#f97316', 'liquidation');
+    if (entry) add(entry, T.entry, `entry ${long ? 'long' : 'short'}`, LineStyle.Solid);
+    if (liq) add(liq, T.liq, 'liquidation');
     if (opts.showOrders) for (const o of orders) add(o.px, o.color, o.label, LineStyle.Dotted);
     // price alerts always show: they are this browser's, not the exchange's
-    for (const a of alerts) add(a.px, '#facc15', a.label, LineStyle.LargeDashed);
+    for (const a of alerts) add(a.px, T.alert, a.label, LineStyle.LargeDashed);
   }
   function setFills(list) { fillMarks = list; applyFillMarkers(); }
   function applyFillMarkers() {
@@ -253,7 +280,7 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
       // snap to the bar the fill happened in
       time: sec(t0 + Math.floor((f.time - t0) / step) * step),
       position: f.buy ? 'belowBar' : 'aboveBar', shape: f.buy ? 'arrowUp' : 'arrowDown',
-      color: f.buy ? UP : DOWN, text: f.text || '', size: 1,
+      color: f.buy ? UP() : DOWN(), text: f.text || '', size: 1,
     })).sort((a, b) => a.time - b.time);
     markers.setMarkers(ms);
   }
@@ -272,6 +299,15 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
       paintLegend();
     },
     options: () => opts,
+    /// 'dark' | 'paper': recolours everything and rebuilds the series in place
+    setTheme(name) {
+      T = CHART_THEMES[name] || CHART_THEMES.dark;
+      chart.applyOptions(themeOptions());
+      if (!main) return;
+      buildMain();
+      if (candles.length) main.setData(shown().map(mainPoint));
+      buildIndicators(); applyFillMarkers(); paintLegend();
+    },
     setCandles(cs) {
       candles = cs.slice();
       noMoreOlder = false;
