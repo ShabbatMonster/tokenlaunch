@@ -13,6 +13,7 @@ import {
 } from './pnlCard.js';
 import { createPerpsChart, INDICATORS, CHART_DEFAULTS, CHART_THEMES } from './perpsChart.js';
 import { parseTarget, makeAlert, checkAlerts, titleText, createSound } from './priceAlerts.js';
+import { createMusicPlayer } from './classical.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -588,6 +589,16 @@ let livePx = null, lastTitlePx = null, tickDir = 0, titleAt = 0, titleTimer = 0,
 const saveAlerts = () => store.set('perps.alerts', alerts);
 const saveAlertCfg = () => store.set('perps.alertCfg', alertCfg);
 
+// classical music in the top bar (src/classical.js): this page only
+const music = createMusicPlayer({
+  play: $('musPlay'), next: $('musNext'), mute: $('musMute'), now: $('musNow'),
+  vol: $('musVol'), shuffle: $('musShuffle'), list: $('musTracks'), composers: $('musComposers'),
+}, store);
+$('musList').onclick = (e) => { e.stopPropagation(); $('musPanel').classList.toggle('hidden'); };
+$('musNow').onclick = () => $('musPanel').classList.toggle('hidden');
+// (a click on a row the panel just redrew is no longer in the page: not an outside click)
+document.addEventListener('click', (e) => { if (e.target.isConnected && !e.target.closest('#music')) $('musPanel').classList.add('hidden'); });
+
 // browsers only allow sound after a gesture on the page
 for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, () => { sound.unlock(); setTimeout(paintLock, 50); }, true);
 function paintLock() { $('alertLock').classList.toggle('hidden', sound.ready || alertCfg.tone === 'off'); }
@@ -614,7 +625,7 @@ function fireAlert(a) {
   const up = a.dir === 'above';
   const text = `🔔 ${label} ${up ? 'reached' : 'fell to'} ${px(a.px)} · now ${px(a.at)}${a.note ? ' · ' + a.note : ''}`;
   toast(text, 'alert', 20000, () => { if (sel?.coin !== a.coin) select(a.coin); });
-  if (alertCfg.tone !== 'off' && !sound.alert(up, alertCfg)) paintLock();
+  if (alertCfg.tone !== 'off') { music.duck(1500 * alertCfg.times + 1500); if (!sound.alert(up, alertCfg)) paintLock(); }
   flash = { text: `🔔 ${label} ${up ? '≥' : '≤'} ${px(a.px)}`, until: Date.now() + (document.hidden ? 60000 : 8000) };
   paintTitle(true);
   if (alertCfg.notify && document.hidden && globalThis.Notification?.permission === 'granted') {
@@ -1020,6 +1031,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'd') $('chartDraw').click();
   else if (k === 'f') pc.fit();
   else if (k === 'a') { e.preventDefault(); toggleAlertPanel(true); }
+  else if (k === 'p') music.toggle();
   else if (e.key === 'Escape' && drawing) $('chartDraw').click();
 });
 

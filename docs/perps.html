@@ -52,6 +52,21 @@
   .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; color: var(--logo); letter-spacing: .3px; }
   #themeBtn { border: 1px solid var(--border2); background: none; color: var(--dim); border-radius: 8px; width: 32px; height: 30px; font-size: 14px; }
   #themeBtn:hover { color: var(--text); }
+  /* classical music */
+  .music { position: relative; display: flex; align-items: center; gap: 2px; border: 1px solid var(--border2); border-radius: 8px; padding: 2px 4px; height: 30px; }
+  .music > button { border: none; background: none; color: var(--dim); border-radius: 6px; height: 24px; min-width: 26px; font-size: 12px; }
+  .music > button:hover { color: var(--text); background: var(--panel2); }
+  #musPlay { color: var(--accent); }
+  #musNow { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dim); padding: 0 4px; text-align: left; }
+  .muspanel { position: absolute; top: 36px; right: 0; z-index: 40; width: 360px; padding: 12px; display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 10px 30px var(--shadow); }
+  .muspanel .comps { display: flex; gap: 2px; flex-wrap: wrap; }
+  .muspanel .comps button { border: none; background: none; color: var(--dim); border-radius: 5px; padding: 3px 8px; font-size: 11px; }
+  .muspanel .comps button.on { color: var(--text); background: var(--panel2); }
+  .mlist2 { max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .mtrack { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; line-height: 1.4; }
+  .mtrack:hover { background: var(--hover); }
+  .mtrack.on { background: var(--panel2); box-shadow: inset 2px 0 0 var(--accent); }
+  .mtrack .dim { font-size: 10px; }
   .logo svg { width: 22px; height: 22px; }
   .nav { display: flex; gap: 18px; font-size: 13px; }
   .nav a { color: var(--dim); }
@@ -268,6 +283,8 @@
     #chart { height: 360px; }
     .mbar { gap: 14px; }
     .nav { display: none; }
+    #musNow, .top .right > .dim { display: none; }
+    .muspanel { position: fixed; top: 56px; left: 8px; right: 8px; width: auto; }
     .cardbox { grid-template-columns: minmax(0, 1fr); }
     .mhead, .mrow { grid-template-columns: minmax(120px, 1.6fr) 1fr 1fr; }
     .mhead span:nth-child(n+4), .mrow > div:nth-child(n+4) { display: none; }
@@ -286,6 +303,21 @@
     <a href="index.html">Launcher</a>
   </nav>
   <div class="right">
+    <div class="music" id="music">
+      <button id="musPlay" title="play classical music (P)">▶</button>
+      <span id="musNow" title="">classical</span>
+      <button id="musNext" title="next piece">⏭</button>
+      <button id="musMute" title="mute">🔊</button>
+      <button id="musList" title="playlist, volume and credits">☰</button>
+      <div class="muspanel hidden" id="musPanel">
+        <div class="lbl" style="margin:0">Classical radio <span class="dim">public-domain &amp; CC recordings via Wikimedia Commons</span></div>
+        <div class="comps" id="musComposers"></div>
+        <label class="check">volume <input type="range" id="musVol" min="0" max="1" step="0.05" style="flex:1"></label>
+        <label class="check"><input type="checkbox" id="musShuffle"> shuffle</label>
+        <div class="mlist2" id="musTracks"></div>
+        <div class="dim" style="font-size:10px">Music plays only on this page. It ducks under price-alert sounds. Each licence links to the recording's page; the CC BY 3.0 recordings are by Musopen (musopen.org).</div>
+      </div>
+    </div>
     <span class="dim" style="font-size:11px">via Hyperliquid</span>
     <button id="themeBtn" title="switch between the paper and dark themes">☾</button>
     <button id="aWallet">Sign In</button>
@@ -454,7 +486,7 @@
         <div class="kv">Cross Margin Ratio <b id="aRatio">—</b></div>
         <div class="kv">Maintenance Margin <b id="aMaint">—</b></div>
         <div class="kv">Cross Account Leverage <b id="aLevA">—</b></div>
-        <div class="keys" style="margin-top:6px"><kbd>/</kbd> markets · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw · <kbd>F</kbd> fit · <kbd>A</kbd> alert · <kbd>Enter</kbd> places the order · click a book price for a limit, a book size to size up to it</div>
+        <div class="keys" style="margin-top:6px"><kbd>/</kbd> markets · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw · <kbd>F</kbd> fit · <kbd>A</kbd> alert · <kbd>P</kbd> music · <kbd>Enter</kbd> places the order · click a book price for a limit, a book size to size up to it</div>
       </section>
     </div>
 
