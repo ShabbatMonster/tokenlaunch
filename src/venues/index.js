@@ -46,11 +46,13 @@
 import { pacifica } from './pacifica.js';
 import { aster } from './aster.js';
 import { backpack, setBackpackBase } from './backpack.js';
+import { lighter } from './lighter.js';
 
 export const VENUES = {
   pacifica,
   aster,
   backpack,
+  lighter,
 };
 export { setBackpackBase };
 export const VENUE_IDS = ['hl', ...Object.keys(VENUES)];

@@ -711,7 +711,8 @@ function renderBalances(body) {
     const sp = (vx.spot?.balances || []).filter((b) => +b.total).map((b) => [`spot · ${b.coin}`, +b.total, +b.total - +b.hold]);
     h += table([...rows, ...sp]);
     h += `<div class="empty">${vx.err ? `<span class="err">${esc(vx.err)}</span><br>` : ''}${esc(vx.note || (rows.length + sp.length ? '' : `nothing here yet: fund it at ${A.site}.`))}`;
-    if (s.setupApiKey) h += `<div style="margin-top:8px"><button class="tbtn" data-vsetup="${id}">Set up ${esc(A.name)} trading key</button> <span class="dim" id="vSetupMsg-${id}"></span></div>`;
+    // only while the venue says it still needs one (Aster: approve an API wallet; Lighter: register a trading key)
+    if (s.setupApiKey && /button below|press set up|set up a .* trading key|not registered/i.test(vx.note || '')) h += `<div style="margin-top:8px"><button class="tbtn" data-vsetup="${id}">Set up ${esc(A.name)} trading key</button> <span class="dim" id="vSetupMsg-${id}"></span></div>`;
     if (s.deposit) h += `<div class="inrow" style="margin-top:10px;max-width:420px"><input id="vDepAmt-${id}" inputmode="decimal" placeholder="USDC to deposit (min 10)"><button class="tbtn" data-vdep="${id}">Deposit from wallet</button></div><div class="dim" id="vDepMsg-${id}" style="margin-top:6px">Moves USDC from this wallet into ${esc(A.name)} (an on-chain transaction, simulated first).</div>`;
     h += '</div>';
   }
