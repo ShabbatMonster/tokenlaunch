@@ -114,7 +114,10 @@
   .mrow { cursor: pointer; }
   .mrow:hover { background: var(--panel2); }
   .mrow.on { background: var(--panel2); }
-  .mrow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the name may shorten, never the leverage or the exchange tag */
+  .mrow .nm { display: flex; align-items: center; min-width: 0; white-space: nowrap; }
+  .mrow .nm .pn { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .mrow .nm .lev, .mrow .nm .vtag, .mrow .nm [data-fav] { flex-shrink: 0; }
   .mrow .nm small { color: var(--faint); font-size: 10px; margin-left: 4px; }
   .mrow [data-fav] { cursor: pointer; margin-right: 4px; }
   .lev { font-size: 10px; color: var(--accent); background: var(--accentsoft); border-radius: 3px; padding: 0 4px; margin-left: 5px; }
@@ -365,7 +368,7 @@
       <button id="mktBtn" title="all markets (/)"><span id="tCoin">—</span><span class="badge" id="tLev">—</span><span class="caret">▼</span></button>
       <div class="mpop hidden" id="mktPop">
         <div class="tools">
-          <input id="mSearch" placeholder="Search 350+ markets (BTC, NVDA, xyz:…)" spellcheck="false" autocomplete="off">
+          <input id="mSearch" placeholder="Search 1,000+ markets on every exchange (BTC, BP, NVDA, lighter…)" spellcheck="false" autocomplete="off">
           <div class="trow">
             <div class="dexes" id="dexTabs"></div>
             <label class="check"><input type="checkbox" id="mFav">Favourites only</label>

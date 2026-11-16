@@ -51,8 +51,8 @@ import { lighter } from './lighter.js';
 export const VENUES = {
   pacifica,
   aster,
-  backpack,
   lighter,
+  // backpack,   off for now: it needs a KYC'd Backpack account (src/venues/backpack.js still works; add it back here)
 };
 export { setBackpackBase };
 export const VENUE_IDS = ['hl', ...Object.keys(VENUES)];

@@ -89,6 +89,8 @@ const sessionOf = (m) => (m?.venue ? sessions.get(m.venue) : null);
 const canTrade = (m = sel) => (m?.venue ? sessions.has(m.venue) : !!wallet);
 const signedIn = () => !!wallet || sessions.size > 0;
 const venueTag = (m) => (m.venue ? VENUES[m.venue].name : m.dex ? `HL · ${m.dex}` : 'Hyperliquid');
+// the market list is narrow: Hyperliquid shortens to HL there (full name on hover)
+const venueShort = (m) => (m.venue ? VENUES[m.venue].name : m.dex ? `HL · ${m.dex}` : 'HL');
 // a venue adapter's markets, listed under unique names; prices are copied over
 // from the adapter's own objects, which its price feed keeps updating
 function wrapVenue(id, list) {
@@ -192,7 +194,7 @@ function renderList() {
   rows.sort((a, b) => (b.volume || 0) - (a.volume || 0));
   $('mList').innerHTML = rows.length ? rows.slice(0, 1500).map((m) => `
     <div class="mrow ${sel?.coin === m.coin ? 'on' : ''}" data-c="${esc(m.coin)}">
-      <div class="nm"><span data-fav="${esc(m.coin)}" style="color:${favs.has(m.coin) ? '#facc15' : 'var(--faint)'}">★</span>${esc(pairName(m))}<span class="lev">${m.spot ? 'spot' : m.maxLeverage + 'x'}</span><span class="vtag v-${esc(m.venue || 'hl')}">${esc(venueTag(m))}</span></div>
+      <div class="nm"><span data-fav="${esc(m.coin)}" style="color:${favs.has(m.coin) ? '#facc15' : 'var(--faint)'}">★</span><span class="pn">${esc(pairName(m))}</span><span class="lev">${m.spot ? 'spot' : m.maxLeverage + 'x'}</span><span class="vtag v-${esc(m.venue || 'hl')}" title="${esc(venueTag(m))}">${esc(venueShort(m))}</span></div>
       <div>${px(m.mid)}</div>
       <div class="${cls(m.change)}">${pct(m.change)}</div>
       <div class="${cls(m.funding)}">${(m.funding * 800).toFixed(4)}%</div>
