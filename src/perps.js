@@ -339,6 +339,8 @@ $('ivals').onclick = (e) => { const b = e.target.closest('button'); if (b) setIn
 $('chartType').onchange = () => { chartOpts.type = $('chartType').value; saveChart(); pc.setOptions(chartOpts); paintChartAccount(true); };
 $('chartLog').onclick = () => { chartOpts.log = !chartOpts.log; saveChart(); pc.setOptions(chartOpts); paintChartBar(); };
 $('chartFit').onclick = () => pc.fit();
+// right-click the chart: back to the default view (instead of the browser's menu)
+$('chart').addEventListener('contextmenu', (e) => { e.preventDefault(); pc.reset(); });
 $('chartDraw').onclick = () => { drawing = !drawing; pc.setDrawMode(drawing); paintChartBar(); };
 $('chartClear').onclick = () => { pc.setUserLines([]); pc.onLinesChange([]); };
 $('indBtn').onclick = (e) => { e.stopPropagation(); $('indPanel').classList.toggle('hidden'); };

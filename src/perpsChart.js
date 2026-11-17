@@ -323,12 +323,22 @@ export function createPerpsChart(el, legend, { onNeedOlder, onClickPrice } = {})
       if (candles.length) main.setData(shown().map(mainPoint));
       buildIndicators(); applyFillMarkers(); paintLegend();
     },
+    // a new market or interval: its own price range, not the last one's. A
+    // dragged or stretched price axis stops auto-scaling, and without this the
+    // next market opened inside the old range (NVDA's prices on XYZ100).
     setCandles(cs) {
       candles = cs.slice();
       noMoreOlder = false;
       if (!main) buildMain();
       main.setData(shown().map(mainPoint));
       fillIndicators(); applyFillMarkers(); paintLegend();
+      api.reset();
+    },
+    /// back to the default view: auto-scaled prices on every pane, the latest candles, default zoom
+    reset() {
+      for (const p of chart.panes()) for (const s of p.getSeries()) s.priceScale().applyOptions({ autoScale: true });
+      chart.priceScale('right').applyOptions({ autoScale: true });
+      chart.timeScale().applyOptions({ barSpacing: 8, rightOffset: 6 });
       chart.timeScale().scrollToRealTime();
     },
     update(k) {
