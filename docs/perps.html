@@ -283,7 +283,30 @@
   @media (max-width: 820px) { .ttsum { grid-template-columns: 1fr; } .ttsum .r, .ttsum .mid { text-align: left; grid-column: auto; } .ttli { grid-template-columns: 36px 1fr 70px 56px; } .ttli .hide-sm { display: none; } }
 
   /* toasts + modals */
-  #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 6px; z-index: 30; max-width: calc(100vw - 32px); }
+  /* watched wallets: a small pill in the corner, opening upward */
+  .wdock { position: fixed; right: 12px; bottom: 12px; z-index: 29; }
+  .wpill { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border2); background: var(--panel); color: var(--dim); border-radius: 999px; padding: 4px 11px; font-size: 12px; opacity: .8; box-shadow: 0 4px 14px var(--shadow); }
+  .wpill:hover { opacity: 1; color: var(--text); }
+  .wdot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); display: inline-block; }
+  .wpanel { position: absolute; right: 0; bottom: 38px; width: min(390px, calc(100vw - 24px)); max-height: min(480px, 70vh); display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; box-shadow: 0 14px 40px var(--shadow); font-size: 12px; }
+  .whead { display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
+  .whead .check { margin-left: auto; font-size: 11px; }
+  .wbody { overflow-y: auto; padding: 4px 0; }
+  .wev { padding: 7px 12px; border-bottom: 1px solid var(--border); cursor: pointer; line-height: 1.5; }
+  .wev:hover, .wpos:hover { background: var(--hover); }
+  .wtop { display: flex; gap: 6px; align-items: baseline; }
+  .wtop .dim { margin-left: auto; font-size: 11px; }
+  .wev .dim { font-size: 11px; }
+  .wgrp { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .wpos { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; cursor: pointer; }
+  .wpos .r { margin-left: auto; }
+  .wadd { display: flex; gap: 6px; padding: 8px 12px; }
+  .wadd input { padding: 5px 8px; }
+  .wadd input:first-child { flex: 2; } .wadd input:nth-child(2) { flex: 1; }
+  .wrow { display: flex; gap: 6px; align-items: center; padding: 4px 12px; }
+  .wrow input { flex: 1; padding: 4px 7px; }
+  .wrow .vtag { margin-left: 0; }
+  #toasts { position: fixed; right: 16px; bottom: 52px; display: flex; flex-direction: column; gap: 6px; z-index: 30; max-width: calc(100vw - 32px); }
   .toast { background: var(--panel2); border: 1px solid var(--border2); border-left: 3px solid var(--accent); border-radius: 6px; padding: 9px 12px; font-size: 12px; transition: opacity .5s; }
   .toast.up { border-left-color: var(--long); } .toast.down { border-left-color: var(--short); }
   .toast.alert { border-left-color: var(--warn); cursor: pointer; font-size: 13px; }
@@ -524,7 +547,7 @@
         <div class="kv">Cross Margin Ratio <b id="aRatio">—</b></div>
         <div class="kv">Maintenance Margin <b id="aMaint">—</b></div>
         <div class="kv">Cross Account Leverage <b id="aLevA">—</b></div>
-        <div class="keys" style="margin-top:6px"><kbd>/</kbd> markets · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw · <kbd>F</kbd> fit · <kbd>A</kbd> alert · <kbd>P</kbd> music · <kbd>Enter</kbd> places the order · click a book price for a limit, a book size to size up to it</div>
+        <div class="keys" style="margin-top:6px"><kbd>/</kbd> markets · <kbd>B</kbd> long · <kbd>S</kbd> short · <kbd>M</kbd> market · <kbd>L</kbd> limit · <kbd>D</kbd> draw · <kbd>F</kbd> fit · <kbd>A</kbd> alert · <kbd>P</kbd> music · <kbd>W</kbd> watched wallets · <kbd>Enter</kbd> places the order · click a book price for a limit, a book size to size up to it</div>
       </section>
     </div>
 
@@ -616,6 +639,18 @@
     <div class="ttlist" id="ttList"></div>
     <div class="dim" style="font-size:11px"><span id="ttHiddenInfo"></span></div>
   </div>
+</div>
+
+<div class="wdock" id="wDock">
+  <div class="wpanel hidden" id="wPanel">
+    <div class="whead">
+      <div class="seg2" id="wTabs"><button data-w="feed" class="on">Feed</button><button data-w="pos">Positions</button><button data-w="wallets">Wallets</button></div>
+      <label class="check" title="a pop-up for every move a watched wallet makes"><input type="checkbox" id="wToast"> notify</label>
+      <button class="tbtn" id="wClose" title="close (W)">✕</button>
+    </div>
+    <div class="wbody" id="wBody"></div>
+  </div>
+  <button class="wpill" id="wPill" title="watched wallets (W)">👁 <span id="wCount">0</span> <i class="wdot hidden" id="wDot"></i></button>
 </div>
 
 <div id="toasts"></div>

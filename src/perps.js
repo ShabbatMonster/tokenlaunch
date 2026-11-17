@@ -16,6 +16,8 @@ import { parseTarget, makeAlert, checkAlerts, titleText, createSound } from './p
 import { createMusicPlayer } from './classical.js';
 import { VENUES, VENUE_IDS, venueName, setBackpackBase } from './venues/index.js';
 import { SOL_RPC } from './rpc.js';
+import { groupFills, describe, sideOf, venueForAddress, pacificaFills, pacificaPositions } from './walletWatch.js';
+import { PACIFICA_API } from './venues/pacifica.js';
 import {
   loadLeaderboard, scanPositions, confluence, overview, shortAddr, isAddr, TT_DEFAULTS, WINDOWS, RANK_BY,
 } from './topTraders.js';
@@ -1457,7 +1459,7 @@ function renderTT() {
       <td class="${cls(p.unrealizedPnl)}">${usdK(p.unrealizedPnl)} (${pct(p.returnOnEquity * 100, 1)})</td>
       <td>${p.lev ? p.lev + 'x' + (p.levType === 'isolated' ? ' iso' : '') : '—'}</td><td>${p.liquidationPx ? px(p.liquidationPx) : '—'}</td>
       <td>${usdK(p.accountValue)}</td><td class="${cls(p.allTime)}">${p.allTime == null ? '—' : usdK(p.allTime)}</td>
-      <td class="x"><button class="tbtn" data-ttlabel="${p.addr}" title="label this trader">✎</button><button class="tbtn" data-ttstar="${p.addr}" title="star">${p.star ? '★' : '☆'}</button></td></tr>`).join('')}</table>`;
+      <td class="x"><button class="tbtn" data-ttwatch="${p.addr}" title="${wFind(p.addr) ? 'watching: their moves are in the feed (bottom right)' : 'watch this wallet: its moves go to the feed (bottom right)'}">${wFind(p.addr) ? '👁✓' : '👁'}</button><button class="tbtn" data-ttlabel="${p.addr}" title="label this trader">✎</button><button class="tbtn" data-ttstar="${p.addr}" title="star">${p.star ? '★' : '☆'}</button></td></tr>`).join('')}</table>`;
 }
 
 function ttLabel(addr) {
@@ -1478,6 +1480,8 @@ $('bBody').addEventListener('click', (e) => {
   const v = e.target.closest('[data-ttv]'); if (v) { TT.view = v.dataset.ttv; renderTT(); return; }
   if (e.target.closest('[data-ttrescan]')) { for (const s of TT.states.values()) s.at = 0; ttTick(); paintTTStatus(); return; }
   if (e.target.closest('[data-ttmanage]')) { openTTModal(); return; }
+  const tw = e.target.closest('[data-ttwatch]');
+  if (tw) { const a = tw.dataset.ttwatch; if (wFind(a)) wRemove(a); else wAdd(a, TT.labels[a]?.label || ttIndex.get(a)?.name || ''); renderTT(); return; }
   const lb = e.target.closest('[data-ttlabel]'); if (lb) { ttLabel(lb.dataset.ttlabel); return; }
   const st = e.target.closest('[data-ttstar]'); if (st) { ttStar(st.dataset.ttstar); return; }
   const row = e.target.closest('[data-ttsel]'); if (row && !e.target.closest('a')) { select(row.dataset.ttsel); TT.view = 'market'; }
@@ -1553,6 +1557,164 @@ $('ttAddBtn').onclick = () => {
   toast(`tracking ${label || shortAddr(a)}`, 'up', 2500);
 };
 
+// --- watched wallets: the feed dock (bottom right) ---------------------------------
+// Wallets you follow - added by hand, or with 👁 on a top trader. Hyperliquid
+// wallets stream (their fills, and their positions on every Hyperliquid
+// exchange); Pacifica wallets (Solana addresses) are read every 15 s from
+// Pacifica's public trade history and positions. Moves land in the Feed, what
+// they hold in Positions. The list and the notify switch stay in this browser.
+// See src/walletWatch.js.
+const W = {
+  list: store.get('perps.watch', []),          // [{ addr, label, venue }]
+  events: new Map(),                           // id -> event
+  pos: new Map(),                              // addr -> { venue, positions, accountValue, at }
+  live: new Map(),                             // addr -> stop()
+  tab: 'feed', toast: store.get('perps.watchToast', true), seenAt: store.get('perps.watchSeen', 0),
+};
+const wSave = () => { store.set('perps.watch', W.list); store.set('perps.watchToast', W.toast); store.set('perps.watchSeen', W.seenAt); };
+const wFind = (addr) => W.list.find((w) => w.addr === addr);
+function wName(addr) {
+  const w = wFind(addr);
+  return w?.label || TT.labels[addr]?.label || ttIndex.get(addr)?.name || shortAddr(addr);
+}
+const wKey = (venue, coin) => (venue === 'hl' ? coin : `${venue}:${coin}`);
+function wAddEvents(evs, { fresh }) {
+  let added = 0;
+  for (const e of evs) {
+    if (W.events.has(e.id)) continue;
+    W.events.set(e.id, e); added++;
+    if (fresh && W.toast) {
+      const m = byCoin.get(e.coin);
+      toast(`👁 ${wName(e.addr)} ${describe(e, { label: () => m?.label || e.coin, fmt: px })}${e.closedPnl ? ` · PnL ${usd(e.closedPnl)}` : ''}`, e.closedPnl < 0 ? 'down' : e.closedPnl > 0 || /LONG/.test(sideOf(e)) ? 'up' : 'down', 9000, () => { if (byCoin.has(e.coin)) select(e.coin); });
+    }
+  }
+  // keep the newest 400
+  if (W.events.size > 400) for (const id of [...W.events.values()].sort((a, b) => a.time - b.time).slice(0, W.events.size - 400).map((e) => e.id)) W.events.delete(id);
+  if (added) paintW();
+}
+async function wStart(w) {
+  if (W.live.has(w.addr)) return;
+  if (w.venue === 'hl') {
+    const subs = [];
+    const user = w.addr;
+    W.live.set(user, () => subs.forEach((s) => s?.unsubscribe().catch(() => {})));
+    subs.push(await C.subs.userFills({ user, aggregateByTime: true }, (ev) => {
+      // the first message is recent history: shown, not announced
+      const evs = groupFills(ev.fills, { addr: user, venue: 'hl' }).map((e) => ({ ...e, coin: wKey('hl', e.coin) }));
+      wAddEvents(ev.isSnapshot ? evs.slice(0, 15) : evs, { fresh: !ev.isSnapshot });
+    }).catch(() => null));
+    subs.push(await C.subs.allDexsClearinghouseState({ user }, (ev) => {
+      const positions = []; let av = 0;
+      for (const [, st] of ev.clearinghouseStates) {
+        av += +st.marginSummary.accountValue;
+        for (const a of st.assetPositions || []) {
+          const p = a.position; if (!+p.szi) continue;
+          positions.push({ coin: p.coin, szi: +p.szi, entryPx: +p.entryPx, positionValue: +p.positionValue, unrealizedPnl: +p.unrealizedPnl, liquidationPx: p.liquidationPx == null ? null : +p.liquidationPx, lev: p.leverage?.value ?? null });
+        }
+      }
+      W.pos.set(user, { venue: 'hl', positions, accountValue: av, at: Date.now() });
+      if (W.tab === 'pos') paintW();
+    }).catch(() => null));
+    return;
+  }
+  if (w.venue === 'pacifica') {
+    let first = true, stop = false, timer = 0;
+    const acct = w.addr;
+    const tick = async () => {
+      try {
+        const [h, ps] = await Promise.all([
+          fetch(`${PACIFICA_API}/trades/history?account=${acct}&limit=50`).then((r) => r.json()),
+          fetch(`${PACIFICA_API}/positions?account=${acct}`).then((r) => r.json()),
+        ]);
+        const evs = groupFills(pacificaFills(h?.data || []), { addr: acct, venue: 'pacifica' }).map((e) => ({ ...e, coin: wKey('pacifica', e.coin) }));
+        wAddEvents(first ? evs.slice(0, 15) : evs, { fresh: !first });
+        const positions = pacificaPositions(ps?.data || [], (s) => byCoin.get(wKey('pacifica', s))?.mark).map((p) => ({ ...p, coin: wKey('pacifica', p.coin) }));
+        W.pos.set(acct, { venue: 'pacifica', positions, accountValue: null, at: Date.now() });
+        if (W.tab === 'pos') paintW();
+        first = false;
+      } catch { /* next time */ }
+      if (!stop) timer = setTimeout(tick, document.hidden ? 45000 : 15000);
+    };
+    W.live.set(acct, () => { stop = true; clearTimeout(timer); });
+    tick();
+  }
+}
+function wStop(addr) { W.live.get(addr)?.(); W.live.delete(addr); W.pos.delete(addr); for (const [id, e] of W.events) if (e.addr === addr) W.events.delete(id); }
+function wAdd(addr, label = '') {
+  addr = addr.trim();
+  const venue = venueForAddress(addr);
+  if (!venue) { toast('that is not a wallet address (0x… for Hyperliquid, base58 for Pacifica)', 'down'); return false; }
+  if (venue === 'hl') addr = addr.toLowerCase();
+  const had = wFind(addr);
+  if (had) { if (label) had.label = label; }
+  else W.list = [...W.list, { addr, label: label.slice(0, 40), venue }];
+  wSave(); wStart(wFind(addr)); paintW();
+  toast(`👁 watching ${wName(addr)}`, 'up', 2500);
+  return true;
+}
+function wRemove(addr) { W.list = W.list.filter((w) => w.addr !== addr); wSave(); wStop(addr); paintW(); }
+
+const wAgo = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? s + 's' : s < 3600 ? Math.round(s / 60) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'; };
+function paintW() {
+  const evs = [...W.events.values()].sort((a, b) => b.time - a.time);
+  const unread = evs.filter((e) => e.time > W.seenAt).length;
+  $('wCount').textContent = W.list.length;
+  $('wDot').classList.toggle('hidden', !unread || (!$('wPanel').classList.contains('hidden') && W.tab === 'feed'));
+  $('wToast').checked = W.toast;
+  for (const b of $('wTabs').children) b.classList.toggle('on', b.dataset.w === W.tab);
+  if ($('wPanel').classList.contains('hidden')) return;
+  const body = $('wBody');
+  if (W.tab === 'feed') {
+    W.seenAt = Math.max(W.seenAt, evs[0]?.time || 0); wSave();
+    body.innerHTML = !W.list.length ? '<div class="empty">no wallets yet. Add one under <b>Wallets</b>, or press 👁 on a trader in the Top Traders tab.</div>'
+      : evs.length ? evs.slice(0, 150).map((e) => {
+        const m = byCoin.get(e.coin), long = sideOf(e) === 'LONG';
+        const closing = e.kind === 'close' || e.kind === 'reduce' || e.kind === 'liquidated';
+        return `<div class="wev" data-wsel="${esc(e.coin)}"><div class="wtop"><b>${esc(wName(e.addr))}</b> <span class="dim">${wAgo(e.time)}</span></div>
+          <div><span class="${closing ? 'dim' : long ? 'up' : 'down'}">${esc(describe(e, { label: () => m?.label || e.coin, fmt: px }))}</span>${m ? ` <span class="vtag v-${esc(m.venue || 'hl')}">${esc(venueShort(m))}</span>` : ''}</div>
+          <div class="dim">${usdK(e.ntl)}${e.closedPnl ? ` · PnL <span class="${cls(e.closedPnl)}">${usdK(e.closedPnl)}</span>` : ''}${e.after != null ? ` · now ${e.after ? (e.after > 0 ? 'long ' : 'short ') + (+Math.abs(e.after).toFixed(6)) : 'flat'}` : ''}</div></div>`;
+      }).join('') : '<div class="empty">no moves yet: new trades show here the moment they fill.</div>';
+  } else if (W.tab === 'pos') {
+    body.innerHTML = !W.list.length ? '<div class="empty">no wallets yet.</div>' : W.list.map((w) => {
+      const p = W.pos.get(w.addr);
+      const ps = (p?.positions || []).slice().sort((a, b) => b.positionValue - a.positionValue);
+      const upnl = ps.reduce((a, x) => a + x.unrealizedPnl, 0);
+      return `<div class="wgrp"><div class="wtop"><b>${esc(wName(w.addr))}</b> <span class="vtag v-${w.venue === 'hl' ? 'hl' : w.venue}">${w.venue === 'hl' ? 'HL' : esc(VENUES[w.venue]?.name || w.venue)}</span>
+          <span class="dim">${p?.accountValue != null ? usdK(p.accountValue) + ' · ' : ''}${ps.length ? `uPnL <span class="${cls(upnl)}">${usdK(upnl)}</span>` : p ? 'flat' : 'reading…'}</span></div>
+        ${ps.map((x) => { const m = byCoin.get(x.coin); return `<div class="wpos" data-wsel="${esc(x.coin)}"><span class="${x.szi > 0 ? 'up' : 'down'}">${x.szi > 0 ? 'L' : 'S'}</span> <b>${esc(m?.label || x.coin)}</b> <span class="dim">${usdK(x.positionValue)} @ ${px(x.entryPx)}${x.lev ? ' · ' + x.lev + 'x' : ''}</span><span class="${cls(x.unrealizedPnl)} r">${usdK(x.unrealizedPnl)}</span></div>`; }).join('')}</div>`;
+    }).join('');
+  } else {
+    body.innerHTML = `<div class="wadd"><input id="wAddr" placeholder="0x… (Hyperliquid) or Solana address (Pacifica)" spellcheck="false"><input id="wLabel" placeholder="label" maxlength="40" spellcheck="false"><button class="tbtn" id="wAddBtn">Add</button></div>`
+      + (W.list.length ? W.list.map((w) => `<div class="wrow"><input data-wl="${esc(w.addr)}" value="${esc(w.label || '')}" placeholder="${esc(wName(w.addr))}" maxlength="40">
+          <a class="dim" href="${w.venue === 'hl' ? 'https://hypurrscan.io/address/' : 'https://app.pacifica.fi/portfolio?account='}${esc(w.addr)}" target="_blank" rel="noopener">${esc(shortAddr(w.addr))}</a>
+          <span class="vtag v-${w.venue === 'hl' ? 'hl' : w.venue}">${w.venue === 'hl' ? 'HL' : esc(VENUES[w.venue]?.name || w.venue)}</span>
+          <button class="tbtn" data-wrm="${esc(w.addr)}" title="stop watching">✕</button></div>`).join('') : '<div class="empty">add a wallet to follow its trades.</div>');
+  }
+}
+function wOpen(show) {
+  const p = $('wPanel');
+  const open = show ?? p.classList.contains('hidden');
+  p.classList.toggle('hidden', !open);
+  paintW();
+}
+$('wPill').onclick = () => wOpen();
+$('wClose').onclick = () => wOpen(false);
+$('wTabs').onclick = (e) => { const b = e.target.closest('[data-w]'); if (b) { W.tab = b.dataset.w; paintW(); } };
+$('wToast').onchange = () => { W.toast = $('wToast').checked; wSave(); };
+$('wBody').addEventListener('click', (e) => {
+  if (e.target.closest('a')) return;
+  if (e.target.id === 'wAddBtn') { if (wAdd($('wAddr').value, $('wLabel').value.trim())) { $('wAddr').value = ''; $('wLabel').value = ''; } return; }
+  const rm = e.target.closest('[data-wrm]'); if (rm) { wRemove(rm.dataset.wrm); return; }
+  const s = e.target.closest('[data-wsel]'); if (s && byCoin.has(s.dataset.wsel)) select(s.dataset.wsel);
+});
+$('wBody').addEventListener('change', (e) => {
+  const a = e.target.dataset?.wl; if (!a) return;
+  const w = wFind(a); if (w) { w.label = e.target.value.trim().slice(0, 40); wSave(); }
+});
+$('wBody').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.target.id === 'wAddr' || e.target.id === 'wLabel')) $('wAddBtn').click(); });
+// the feed's "2m ago" stays current
+setInterval(() => { if (!$('wPanel').classList.contains('hidden')) paintW(); }, 20000);
+
 // --- keyboard ------------------------------------------------------------------
 //   /  search markets      B  long      S  short      M  market      L  limit
 //   Enter (in size / price / TP / SL)  place the order      Esc  leave a field
@@ -1580,6 +1742,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'f') pc.fit();
   else if (k === 'a') { e.preventDefault(); toggleAlertPanel(true); }
   else if (k === 'p') music.toggle();
+  else if (k === 'w') wOpen();
   else if (e.key === 'Escape' && drawing) $('chartDraw').click();
 });
 
@@ -1641,4 +1804,7 @@ let autoPick = null;
   }
   if (loadWallet()) startUser(); else { paintAccount(); paintSummary(); }
   connectVenues();
+  // watched wallets: start every one, then paint the dock
+  for (const w of W.list) wStart(w);
+  paintW();
 })();
